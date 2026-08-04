@@ -1,7 +1,35 @@
 import json
 from pathlib import Path
 
+from pier.environments.docker.gvisor import (
+    GVISOR_COMPOSE_NAME,
+    GVISOR_DEFAULT_RUNTIME,
+    GVISOR_SECURITY_OPT,
+    GVISOR_STAGE_IN,
+    GVISOR_STAGE_OUT,
+    gvisor_stage_dirs,
+    write_gvisor_compose_file,
+)
 from pier.models.trial.config import ServiceVolumeConfig
+
+__all__ = [
+    "COMPOSE_BASE_PATH",
+    "COMPOSE_BUILD_PATH",
+    "COMPOSE_DIR",
+    "COMPOSE_NO_NETWORK_PATH",
+    "COMPOSE_PREBUILT_PATH",
+    "COMPOSE_WINDOWS_KEEPALIVE_PATH",
+    "GVISOR_COMPOSE_NAME",
+    "GVISOR_DEFAULT_RUNTIME",
+    "GVISOR_SECURITY_OPT",
+    "GVISOR_STAGE_IN",
+    "GVISOR_STAGE_OUT",
+    "RESOURCES_COMPOSE_NAME",
+    "gvisor_stage_dirs",
+    "write_gvisor_compose_file",
+    "write_mounts_compose_file",
+    "write_resources_compose_file",
+]
 
 # Shared compose file paths used by both local Docker and Daytona DinD environments.
 COMPOSE_DIR = Path(__file__).parent

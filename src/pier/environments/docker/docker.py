@@ -31,6 +31,17 @@ from pier.environments.docker import (
     write_mounts_compose_file,
     write_resources_compose_file,
 )
+from pier.environments.docker.gvisor import (
+    GVISOR_COMPOSE_NAME,
+    GVISOR_DEFAULT_RUNTIME,
+    assert_runtime_registered,
+    container_networks,
+    container_runtime,
+    gvisor_stage_dirs,
+    parse_container_ids,
+    shared_network_ipv4,
+    write_gvisor_compose_file,
+)
 from pier.models.environment_type import EnvironmentType
 from pier.models.task.config import EnvironmentConfig, TaskOS
 from pier.models.trial.config import ResourceMode, ServiceVolumeConfig
@@ -160,9 +171,16 @@ class DockerEnvironment(BaseEnvironment):
         task_env_config: EnvironmentConfig,
         keep_containers: bool = False,
         mounts_json: list[ServiceVolumeConfig] | None = None,
+        gvisor: bool = False,
+        gvisor_runtime: str = GVISOR_DEFAULT_RUNTIME,
         *args,
         **kwargs,
     ):
+        # Set before super().__init__(): BaseEnvironment's constructor calls
+        # _validate_definition(), which enforces the gVisor restrictions.
+        self._gvisor = bool(gvisor)
+        self._gvisor_runtime = gvisor_runtime
+
         super().__init__(
             environment_dir=environment_dir,
             environment_name=environment_name,
@@ -179,6 +197,12 @@ class DockerEnvironment(BaseEnvironment):
             if self._is_windows_container
             else EnvironmentPaths()
         )
+        # Resolved before the platform helpers, which read them during transfers.
+        self._gvisor_stage_in, self._gvisor_stage_out = gvisor_stage_dirs(
+            trial_paths.trial_dir
+        )
+        self._gvisor_compose_path: Path | None = None
+
         # Select the platform-specific file-transfer and exec helpers.
         if self._is_windows_container:
             import uuid
@@ -187,6 +211,11 @@ class DockerEnvironment(BaseEnvironment):
 
             self._windows_container_name = f"pier-{uuid.uuid4().hex[:12]}"
             self._platform = WindowsOps(self, self._windows_container_name)
+        elif self._gvisor:
+            from pier.environments.docker.docker_gvisor_unix import GvisorUnixOps
+
+            self._windows_container_name: str | None = None
+            self._platform = GvisorUnixOps(self)
         else:
             from pier.environments.docker.docker_unix import UnixOps
 
@@ -196,12 +225,14 @@ class DockerEnvironment(BaseEnvironment):
         self._mounts_json = (
             mounts_json if mounts_json is not None else self._default_log_mounts()
         )
+        self._validate_gvisor_mounts()
         self._mounts_compose_path: Path | None = None
         self._resources_compose_temp_dir: tempfile.TemporaryDirectory | None = None
         self._resources_compose_path: Path | None = None
         self._agent_build_context_dir: Path | None = None
         self._egress_proxy_compose_path: Path | None = None
         self._egress_proxy_env: dict[str, str] = {}
+        self._egress_proxy_token: str | None = None
 
         install_fingerprint = (
             f"__agent-{self.agent_install_spec.fingerprint()}"
@@ -250,6 +281,25 @@ class DockerEnvironment(BaseEnvironment):
     @property
     def env_paths(self) -> EnvironmentPaths:
         return self._env_paths
+
+    @property
+    def gvisor(self) -> bool:
+        """Whether the untrusted ``main`` service runs under gVisor."""
+        return self._gvisor
+
+    @property
+    def gvisor_runtime(self) -> str:
+        return self._gvisor_runtime
+
+    @property
+    def gvisor_stage_in(self) -> Path:
+        """Host directory bind-mounted read-only into the sandbox for uploads."""
+        return self._gvisor_stage_in
+
+    @property
+    def gvisor_stage_out(self) -> Path:
+        """Host directory bind-mounted writable into the sandbox for exports."""
+        return self._gvisor_stage_out
 
     def _default_log_mounts(self) -> list[ServiceVolumeConfig]:
         return [
@@ -352,6 +402,11 @@ class DockerEnvironment(BaseEnvironment):
         elif not self.task_env_config.allow_internet:
             paths.append(self._DOCKER_COMPOSE_NO_NETWORK_PATH)
 
+        # Last: Compose resolves scalars as last-writer-wins, so anything
+        # earlier could have its `runtime` flipped back to the default.
+        if self._gvisor_compose_path:
+            paths.append(self._gvisor_compose_path)
+
         return paths
 
     def _prepare_agent_build_context(self) -> None:
@@ -397,6 +452,7 @@ class DockerEnvironment(BaseEnvironment):
                 "or prebuilt-image tasks, not docker-compose tasks."
             )
         token = new_proxy_token()
+        self._egress_proxy_token = token
         self._egress_proxy_env = proxy_environment(
             token, EGRESS_PROXY_SERVICE, EGRESS_PROXY_PORT
         )
@@ -419,6 +475,126 @@ class DockerEnvironment(BaseEnvironment):
         """Write a docker-compose override file with additional volume mounts."""
         path = self.trial_paths.trial_dir / "docker-compose-mounts.json"
         return write_mounts_compose_file(path, self._mounts_json or [])
+
+    def _prepare_gvisor(self) -> None:
+        """Create the staging directories and write the gVisor override."""
+        self._gvisor_stage_in.mkdir(parents=True, exist_ok=True)
+        self._gvisor_stage_out.mkdir(parents=True, exist_ok=True)
+        self._gvisor_compose_path = write_gvisor_compose_file(
+            self.trial_paths.trial_dir / GVISOR_COMPOSE_NAME,
+            runtime=self._gvisor_runtime,
+            stage_in=self._gvisor_stage_in,
+            stage_out=self._gvisor_stage_out,
+        )
+
+    async def _compose_container_id(self, service: str) -> str | None:
+        """Return the running container ID for *service*, or None."""
+        result = await self._run_docker_compose_command(
+            ["ps", "--quiet", service], check=False
+        )
+        ids = parse_container_ids(result.stdout)
+        return ids[0] if ids else None
+
+    async def _verify_gvisor_runtime(self) -> str:
+        """Confirm the daemon really placed ``main`` under the gVisor runtime.
+
+        Host-side and therefore authoritative; ``uname``/``dmesg`` evidence from
+        inside the sandbox is trivially forgeable and is never the gate here.
+        """
+        main_id = await self._compose_container_id("main")
+        if main_id is None:
+            raise RuntimeError(
+                "gVisor mode could not resolve the 'main' container after "
+                "startup, so it cannot verify which runtime Docker used."
+            )
+
+        actual = await container_runtime(main_id)
+        if actual != self._gvisor_runtime:
+            raise RuntimeError(
+                f"Expected the 'main' container to run under "
+                f"{self._gvisor_runtime!r} but Docker reports {actual!r}. "
+                "Refusing to run untrusted code under an unexpected runtime."
+            )
+        return main_id
+
+    async def _verify_gvisor_proxy_runtime(self, proxy_id: str) -> None:
+        actual = await container_runtime(proxy_id)
+        if actual is None:
+            raise RuntimeError(
+                "gVisor mode could not determine the runtime of the egress "
+                "proxy container, so it cannot confirm the proxy stayed off "
+                "the sandbox runtime."
+            )
+        if actual == self._gvisor_runtime:
+            raise RuntimeError(
+                f"The trusted egress proxy is running under "
+                f"{self._gvisor_runtime!r}, but it must stay on Docker's "
+                "default runtime: it is the component that still needs "
+                "Docker's embedded DNS to resolve allowlisted hosts."
+            )
+
+    async def _resolve_gvisor_proxy_address(self, main_id: str, proxy_id: str) -> None:
+        """Point the agent's proxy URL at the proxy's literal IPv4 address.
+
+        The sandbox cannot use Compose service-name resolution, so the trusted
+        control plane resolves the address after startup instead. Docker keeps
+        allocating the project network normally -- no pinned subnet, no fixed
+        address, so concurrent trials cannot collide.
+        """
+        if not self._egress_proxy_env or self._egress_proxy_token is None:
+            return
+
+        address = shared_network_ipv4(
+            await container_networks(proxy_id),
+            await container_networks(main_id),
+        )
+        if not address:
+            raise RuntimeError(
+                "Could not determine the egress proxy's address on the network "
+                "it shares with the 'main' container. gVisor cannot use "
+                "Docker's embedded DNS (google/gvisor#7469), so a reachable "
+                "proxy IP is required."
+            )
+
+        self._egress_proxy_env = proxy_environment(
+            self._egress_proxy_token, address, EGRESS_PROXY_PORT
+        )
+
+    async def _verify_gvisor_after_start(self) -> None:
+        """Fail closed, tearing the project down, if anything is not as declared."""
+        try:
+            main_id = await self._verify_gvisor_runtime()
+            if self._egress_proxy_compose_path:
+                # The proxy is declared, so it must be present and verifiable:
+                # skipping here would leave the agent pointed at an unresolved
+                # service name the sandbox cannot look up.
+                proxy_id = await self._compose_container_id(EGRESS_PROXY_SERVICE)
+                if proxy_id is None:
+                    raise RuntimeError(
+                        "gVisor mode could not resolve the "
+                        f"{EGRESS_PROXY_SERVICE!r} container after startup, so "
+                        "it can neither verify the proxy's runtime nor "
+                        "determine the address the sandbox must use to reach it."
+                    )
+                await self._verify_gvisor_proxy_runtime(proxy_id)
+                await self._resolve_gvisor_proxy_address(main_id, proxy_id)
+        except BaseException:
+            # Never leave a started-but-unverified sandbox reachable by an agent.
+            try:
+                await self._run_docker_compose_command(["down"], check=False)
+            except Exception as e:
+                self.logger.warning(
+                    f"Docker compose down after failed gVisor verification failed: {e}"
+                )
+            raise
+
+    def _cleanup_gvisor_staging(self) -> None:
+        if not self._gvisor:
+            return
+        try:
+            self._platform.cleanup()
+        except Exception as e:
+            self.logger.debug(f"Failed to remove gVisor staging directories: {e}")
 
     def _write_resources_compose_file(self) -> Path:
         self._cleanup_resources_compose_file()
@@ -460,6 +636,77 @@ class DockerEnvironment(BaseEnvironment):
             raise FileNotFoundError(
                 f"{self._dockerfile_path} and {self._environment_docker_compose_path} "
                 "not found. Please ensure at least one of these files exist."
+            )
+        self._validate_gvisor_options()
+
+    def _validate_gvisor_options(self) -> None:
+        """Reject configurations gVisor mode cannot enforce.
+
+        Every case fails closed rather than silently degrading to a weaker
+        sandbox or a broader network policy. The runtime-registration check is
+        deliberately not here -- it shells out to the daemon, so it runs at
+        :meth:`start` instead of on every construction.
+        """
+        if not self._gvisor:
+            return
+
+        if sys.platform != "linux":
+            raise RuntimeError(
+                "gVisor mode requires a Linux host, but this host reports "
+                f"{sys.platform!r}. gVisor's runsc runtime is Linux-only."
+            )
+
+        if self.task_env_config.os == TaskOS.WINDOWS:
+            raise RuntimeError(
+                "gVisor mode does not support Windows tasks "
+                "([environment].os = 'windows'). Drop --ek gvisor=true to run "
+                "this task under the default runtime."
+            )
+
+        if self._environment_docker_compose_path.exists():
+            raise ValueError(
+                "gVisor mode is currently supported only for Dockerfile or "
+                "prebuilt-image tasks, not docker-compose tasks. A Compose "
+                "override cannot remove list-valued keys such as privileged, "
+                "cap_add, devices or extra volumes from a task's own compose "
+                "file, so the task could weaken the sandbox."
+            )
+
+        if self.task_env_config.allow_internet:
+            raise ValueError(
+                "gVisor mode currently requires [environment].allow_internet = "
+                "false. Docker Compose's embedded DNS at 127.0.0.11 is "
+                "unreachable from a gVisor sandbox (google/gvisor#7469), so an "
+                "unrestricted task cannot resolve hostnames. Use a no-network "
+                "or allowlisted task, or drop --ek gvisor=true."
+            )
+
+    def _validate_gvisor_mounts(self) -> None:
+        """Confine bind-mount sources to the trial directory in gVisor mode.
+
+        The v1 security contract admits no broad host mounts and no Docker
+        socket, and a Compose override cannot remove a volume a caller already
+        asked for -- Compose appends list-valued keys rather than replacing
+        them. So the only place this can be enforced is here, by refusing to
+        start. Plain Docker keeps accepting whatever the caller passes.
+        """
+        if not self._gvisor:
+            return
+
+        trial_dir = self.trial_paths.trial_dir.resolve()
+        for mount in self._mounts_json or []:
+            if mount.get("type") != "bind":
+                continue
+            source = str(mount.get("source", ""))
+            resolved = Path(source).resolve()
+            if resolved == trial_dir or resolved.is_relative_to(trial_dir):
+                continue
+            raise ValueError(
+                f"gVisor mode refuses the bind mount {source!r}: its source "
+                f"resolves to {str(resolved)!r}, outside the trial directory "
+                f"{str(trial_dir)!r}. Host mounts would let a task reach "
+                "outside its sandbox; mount under the trial directory instead, "
+                "or drop --ek gvisor=true."
             )
 
     @staticmethod
@@ -611,12 +858,20 @@ class DockerEnvironment(BaseEnvironment):
             )
 
     async def start(self, force_build: bool):
+        # Before anything expensive: refuse to build an image for a sandbox the
+        # daemon cannot actually provide.
+        if self._gvisor:
+            assert_runtime_registered(self._gvisor_runtime)
+
         self._prepare_agent_build_context()
         self._prepare_egress_proxy_compose()
         self._resources_compose_path = self._write_resources_compose_file()
 
         if self._mounts_json:
             self._mounts_compose_path = self._write_mounts_compose_file()
+
+        if self._gvisor:
+            self._prepare_gvisor()
 
         self._use_prebuilt = (
             not force_build
@@ -654,6 +909,9 @@ class DockerEnvironment(BaseEnvironment):
             pass
 
         await self._run_docker_compose_command(["up", "--detach", "--wait"])
+
+        if self._gvisor:
+            await self._verify_gvisor_after_start()
 
         # Make log directories world-writable so non-root agent/verifier
         # users can write to them.  (No-op for Windows containers which do
@@ -706,6 +964,7 @@ class DockerEnvironment(BaseEnvironment):
             except Exception as e:
                 self.logger.warning(f"Docker compose down failed: {e}")
         self._cleanup_resources_compose_file()
+        self._cleanup_gvisor_staging()
 
     async def upload_file(self, source_path: Path | str, target_path: str):
         await self._platform.upload_file(source_path, target_path)
