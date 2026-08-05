@@ -4,11 +4,11 @@
 container: the root filesystem is sandbox-private, so copies in are never
 observed by the sandbox and copies out report that the file does not exist.
 Every transfer therefore moves through the scoped staging bind mounts declared
-in :mod:`pier.environments.docker.gvisor`, with the copy between staging and
+in :mod:`pier.environments.gvisor.runtime`, with the copy between staging and
 the private root filesystem performed *inside* the sandbox. There is
 deliberately no ``docker cp`` fast path -- not even for paths that exist in the
-image, where a host-side copy would silently return stale image content
-instead of what the sandbox wrote.
+image, where a host-side copy would silently return stale image content instead
+of what the sandbox wrote.
 
 The observable contract matches :class:`~pier.environments.docker.docker_unix.UnixOps`:
 
@@ -34,6 +34,10 @@ They are traversed component-by-component through directory descriptors with
 ``O_NOFOLLOW``; staged special files are rejected, and leaf files are created
 with ``O_EXCL`` so a symlink appearing between removal of an old entry and
 creation of the new one is never written through.
+
+The symlink-safe placement helpers live in this module rather than a separate
+one: they are the host-side half of the same transfer contract, they are only
+ever reached through it, and the two halves are reviewed and tested together.
 """
 
 from __future__ import annotations
@@ -48,10 +52,10 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from pier.environments.docker.docker_unix import UnixOps
-from pier.environments.docker.gvisor import GVISOR_STAGE_IN, GVISOR_STAGE_OUT
+from pier.environments.gvisor.runtime import STAGE_IN, STAGE_OUT
 
 if TYPE_CHECKING:
-    from pier.environments.docker.docker import DockerEnvironment
+    from pier.environments.gvisor.environment import GVisorEnvironment
 
 # Bounded so a hostile process racing us cannot spin the resolver forever.
 _MAX_RESOLVE_ATTEMPTS = 8
@@ -305,10 +309,10 @@ def safe_place_file(staged_file: Path, destination: Path) -> None:
         os.close(source_parent_fd)
 
 
-class GvisorUnixOps(UnixOps):
+class GVisorUnixOps(UnixOps):
     """Staging-mount transfer operations for gVisor-sandboxed containers."""
 
-    def __init__(self, env: DockerEnvironment) -> None:
+    def __init__(self, env: GVisorEnvironment) -> None:
         super().__init__(env)
 
     # -- staging helpers ---------------------------------------------------
@@ -320,14 +324,14 @@ class GvisorUnixOps(UnixOps):
     def _new_upload_stage(self) -> tuple[Path, PurePosixPath]:
         """Create a fresh host upload directory and its container path."""
         op_id = self._op_id()
-        host_dir = self._env.gvisor_stage_in / op_id
+        host_dir = self._env.stage_in / op_id
         host_dir.mkdir(parents=True, exist_ok=False)
-        return host_dir, GVISOR_STAGE_IN / op_id
+        return host_dir, STAGE_IN / op_id
 
     def _new_download_stage(self) -> tuple[Path, PurePosixPath]:
         """Reserve a fresh download directory; the container creates it."""
         op_id = self._op_id()
-        return self._env.gvisor_stage_out / op_id, GVISOR_STAGE_OUT / op_id
+        return self._env.stage_out / op_id, STAGE_OUT / op_id
 
     @staticmethod
     def _discard(host_dir: Path) -> None:
@@ -349,7 +353,7 @@ class GvisorUnixOps(UnixOps):
 
     def cleanup(self) -> None:
         """Remove any staging directories left behind by earlier operations."""
-        for directory in (self._env.gvisor_stage_in, self._env.gvisor_stage_out):
+        for directory in (self._env.stage_in, self._env.stage_out):
             shutil.rmtree(directory, ignore_errors=True)
 
     # -- uploads -----------------------------------------------------------
