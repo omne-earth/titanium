@@ -212,6 +212,7 @@ trials/
 *.ipynb
 tasks/
 datasets/
+proof-artifacts/
 !examples/tasks/
 *.code-workspace
 ignore/
