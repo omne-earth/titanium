@@ -1,4 +1,4 @@
-.PHONY: proof-gvisor-env
+.PHONY: proof-gvisor-env proof-gvisor-unit
 
 # Agent/model used for the real, model-backed trajectory. Override on the
 # command line or in the environment, e.g.:
@@ -21,7 +21,10 @@ PROOF_TIMEOUT_MULTIPLIER ?=
 # recorded by Pier, plus trusted host-side proof that runsc is used for the
 # workload, Docker's own defaults are untouched, and cleanup leaves nothing
 # behind.
-proof-gvisor-env:
+proof-gvisor-unit:
+	uv run pytest tests/test_gvisor_proof.py -q
+
+proof-gvisor-env: proof-gvisor-unit
 	@PROOF_AGENT="$(PROOF_AGENT)" \
 	PROOF_MODEL="$(PROOF_MODEL)" \
 	PROOF_TASK="$(PROOF_TASK)" \

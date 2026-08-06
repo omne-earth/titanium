@@ -53,7 +53,7 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["pier"]
