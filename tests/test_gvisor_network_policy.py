@@ -111,6 +111,14 @@ class Sandbox:
             self.env, "_run_docker_compose_command", self.compose_command
         )
         monkeypatch.setattr(f"{GVISOR_MODULE}.container_runtime", self.runtime_of)
+
+        # Teardown's fail-closed queries raise when the engine CLI is absent;
+        # report a clean project so the tests don't need docker on the host.
+        async def no_resources(project, cli="docker"):
+            return []
+
+        monkeypatch.setattr(f"{GVISOR_MODULE}.project_container_ids", no_resources)
+        monkeypatch.setattr(f"{GVISOR_MODULE}.project_network_ids", no_resources)
         return self
 
 

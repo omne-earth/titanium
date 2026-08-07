@@ -1,11 +1,13 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv unit-podman-env unit-podman unit-all pier-run smoke-podman sync upgrade
+.PHONY: .uv unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-env sync upgrade
 
 -include .secrets
 
 MAKE = $(shell command -v make)
-UV = $(shell command -v uv)
+# Recursive on purpose: re-resolved after the .uv target installs uv. The
+# curl installer lands in ~/.local/bin, which may not be on PATH yet.
+UV = $(shell command -v uv || echo $(HOME)/.local/bin/uv)
 
 PY := .venv/bin/python
 PYTEST := .venv/bin/pytest
@@ -41,7 +43,7 @@ PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER
 	@command -v uv >/dev/null || { \
 		if command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y uv; \
 		elif command -v dnf >/dev/null; then sudo dnf install -y uv; \
-		else curl -LsSf https://astral.sh | sh; fi; }
+		else curl -LsSf https://astral.sh/uv/install.sh | sh; fi; }
 
 $(TASKS_PATH_DS):
 	@test -d $(TASKS_PATH_DS) || git clone $(TASKS_SOURCE_DS) $(TASKS_PATH_DS)
@@ -61,13 +63,25 @@ unit-all: unit-podman
 
 pier-run: | .sentinel/tasks
 	mkdir -p "$(PIER_JOBS_DIR)"
-	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	$(PIER_RUN)
-	
-smoke-podman:
+
+smoke-podman: sync
 	bash scripts/podman-doctor.sh --fix
-	$(PYTEST) tests/test_podman_environment.py --html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html --self-contained-html --cov=pier.environments.podman --cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) tests/test_podman_environment.py --html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=pier.environments.podman --cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) pier-run PIER_ENV=podman PIER_TASK=$(TASKS_PATH_TB2)/fix-git PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
+
+smoke-gvisor: sync
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) tests/test_gvisor_environment.py tests/test_gvisor_network_policy.py --html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=pier.environments.gvisor --cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	$(MAKE) pier-run PIER_ENV=gvisor PIER_TASK=$(TASKS_PATH_TB2)/fix-git PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
+
+# Sync the venv and clone the task repos up front so the parallel fan-out
+# starts from a ready checkout instead of racing to build it.
+smoke-env: sync | .sentinel/tasks
+	$(MAKE) -j2 smoke-podman smoke-gvisor
 
 sync: .uv
 	$(UV) sync
