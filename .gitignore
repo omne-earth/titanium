@@ -228,3 +228,9 @@ src/pier/viewer/static/
 # Claude Code
 .claude/scheduled_tasks.lock
 .claude/scheduled_tasks.json
+
+.sentinel/
+.tasks/
+.jobs/
+.reports/
+.secrets
