@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-env smoke-attach sync upgrade FORCE
+.PHONY: .uv .tmux .deps .podman .docker .runsc init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE
 
 -include .secrets
 
@@ -22,7 +22,7 @@ TASKS_DEFAULT := $(TASKS_PATH_DS)/tasks/anko-default-function-arguments
 
 ifeq ($(BACKEND),openrouter)
 PIER_AGENT ?= mini-swe-agent
-PIER_MODEL ?= openrouter/deepseek/deepseek-v4-flash-0731
+PIER_MODEL ?= $(OPENROUTER_MODEL)
 export PIER_API_BASE = https://openrouter.ai
 else ifeq ($(BACKEND),claude)
 PIER_AGENT ?= claude-code
@@ -34,7 +34,8 @@ endif
 PIER_JOBS_DIR ?= $(RUN_DIR)/jobs
 PIER_ENV ?= podman
 PIER_TASK ?= $(TASKS_DEFAULT)
-PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR)
+PIER_N ?= 1
+PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR) -n $(PIER_N)
 
 RUN_DIR ?= ./.run
 RUN_TASKS := $(RUN_DIR)/tasks
@@ -42,8 +43,12 @@ REPORTS_DIR := $(RUN_DIR)/reports
 
 # fix-git-offline: air-gapped, build-pmars: needs egress
 SMOKE_TASKS ?= examples/smoke/fix-git-offline $(TASKS_DIR)/terminal-bench-2/build-pmars
-SMOKE_SESSION := pier-$(subst .,,$(notdir $(RUN_DIR)))
-SMOKE_TMUX := tmux -L pier
+BENCH_N ?= 8
+
+# run-session plumbing: one tmux session per RUN_DIR, one window per target
+RUN_SESSION := pier-$(subst .,,$(notdir $(RUN_DIR)))
+RUN_TMUX := tmux -L pier
+SESSION_TARGETS ?= smoke-podman smoke-gvisor
 
 .uv:
 	@command -v uv >/dev/null || { \
@@ -93,8 +98,7 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 	cp -r $(SMOKE_TASKS) $(wildcard examples/smoke/$(patsubst smoke-%,verify-%-env,$(notdir $@))) $@/
 
 init: sync .tmux .podman .runsc | .sentinel/tasks
-	@echo ""
-	echo "init complete — try: make smoke-env BACKEND=openrouter"
+	@bash scripts/init/docker-group.sh
 
 unit-podman-env: .podman
 	$(PYTEST) tests/test_podman_environment.py
@@ -123,33 +127,59 @@ smoke-gvisor: sync .runsc $(RUN_TASKS)/$(BACKEND)/smoke-gvisor
 		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
 		--self-contained-html --cov=pier.environments.gvisor \
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
-	sg docker -c "$(MAKE) pier-run PIER_ENV=gvisor PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@"
+	$(MAKE) pier-run PIER_ENV=gvisor PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
 
-smoke-env: sync .tmux | .sentinel/tasks
-	@if $(SMOKE_TMUX) has-session -t $(SMOKE_SESSION) 2>/dev/null; then
-		# a pane's shell has children iff its smoke is still running
-		if $(SMOKE_TMUX) list-panes -s -t $(SMOKE_SESSION) -F '#{pane_pid}' | xargs -I{} ps -o pid= --ppid {} | grep -q .; then
-			echo "smoke run still in progress in tmux session '$(SMOKE_SESSION)'"
-			echo "  attach: $(SMOKE_TMUX) attach -t $(SMOKE_SESSION)"
-			echo "  kill:   $(SMOKE_TMUX) kill-session -t $(SMOKE_SESSION)"
+# full-dataset benchmarks (default env podman; run `make init` to provision).
+# BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.
+bench-ds: sync | .sentinel/tasks
+	$(MAKE) pier-run PIER_TASK=$(TASKS_PATH_DS)/tasks PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@ PIER_N=$(BENCH_N)
+
+bench-tb2: sync | .sentinel/tasks
+	$(MAKE) pier-run PIER_TASK=$(TASKS_PATH_TB2) PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@ PIER_N=$(BENCH_N)
+
+# fan out $(SESSION_TARGETS), one tmux window each, in the RUN_DIR-scoped session
+run-session: sync .tmux | .sentinel/tasks
+	@if $(RUN_TMUX) has-session -t $(RUN_SESSION) 2>/dev/null; then
+		# a pane's shell has children iff its target is still running
+		if $(RUN_TMUX) list-panes -s -t $(RUN_SESSION) -F '#{pane_pid}' | xargs -I{} ps -o pid= --ppid {} | grep -q .; then
+			echo "run still in progress in tmux session '$(RUN_SESSION)'"
+			echo "  attach: make run-attach RUN_DIR=$(RUN_DIR)"
+			echo "  kill:   $(RUN_TMUX) kill-session -t $(RUN_SESSION)"
 			exit 1
 		fi
-		echo "previous smoke run finished — recycling session '$(SMOKE_SESSION)'"
-		$(SMOKE_TMUX) kill-session -t $(SMOKE_SESSION)
+		echo "previous run finished — recycling session '$(RUN_SESSION)'"
+		$(RUN_TMUX) kill-session -t $(RUN_SESSION)
 	fi
-	$(SMOKE_TMUX) new-session -d -s $(SMOKE_SESSION) -n smoke-podman -e MAKEFLAGS='$(MAKEFLAGS)' \
-		"$(MAKE) smoke-podman; exec bash"
-	$(SMOKE_TMUX) new-window -t $(SMOKE_SESSION) -n smoke-gvisor -e MAKEFLAGS='$(MAKEFLAGS)' \
-		"$(MAKE) smoke-gvisor; exec bash"
+	first=1
+	for t in $(SESSION_TARGETS); do
+		if [ "$$first" = 1 ]; then
+			$(RUN_TMUX) new-session -d -s $(RUN_SESSION) -n "$$t" -e MAKEFLAGS='$(MAKEFLAGS)' "$(MAKE) $$t; exec bash"
+			first=0
+		else
+			$(RUN_TMUX) new-window -t $(RUN_SESSION) -n "$$t" -e MAKEFLAGS='$(MAKEFLAGS)' "$(MAKE) $$t; exec bash"
+		fi
+	done
 	echo ""
-	echo "Smoke runs started in tmux session '$(SMOKE_SESSION)':"
-	echo "  attach:  make smoke-attach"
+	echo "Started [$(SESSION_TARGETS)] in tmux session '$(RUN_SESSION)':"
+	echo "  attach:  make run-attach RUN_DIR=$(RUN_DIR)"
 	echo "  windows: Ctrl-b n / Ctrl-b p to cycle, Ctrl-b w to list"
 	echo "  detach:  Ctrl-b d (runs keep going)"
 
-smoke-attach: .tmux
-	@$(SMOKE_TMUX) has-session -t $(SMOKE_SESSION) 2>/dev/null || { echo "no smoke session — run: make smoke-env"; exit 1; }
-	$(SMOKE_TMUX) attach -t $(SMOKE_SESSION)
+smoke-env: SESSION_TARGETS = smoke-podman smoke-gvisor
+smoke-env: run-session
+
+bench-all: SESSION_TARGETS = bench-ds bench-tb2
+bench-all: run-session
+
+run-attach: .tmux
+	@$(RUN_TMUX) has-session -t $(RUN_SESSION) 2>/dev/null || { echo "no session '$(RUN_SESSION)' — run: make smoke-env or make bench-all"; exit 1; }
+	$(RUN_TMUX) attach -t $(RUN_SESSION)
+
+run-list: .tmux
+	@$(RUN_TMUX) list-sessions 2>/dev/null || echo "no runs active"
+
+run-close: .tmux
+	@$(RUN_TMUX) kill-session -t $(RUN_SESSION) 2>/dev/null && echo "closed '$(RUN_SESSION)'" || echo "no session '$(RUN_SESSION)'"
 
 sync: .deps .uv
 	$(UV) sync
