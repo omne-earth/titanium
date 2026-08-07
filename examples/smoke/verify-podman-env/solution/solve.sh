@@ -21,7 +21,10 @@ def writable(d):
 
 def sysrq():
     try:
-        open("/proc/sysrq-trigger", "w").write("h")
+        # `with` so the flush (where gVisor raises EIO) happens inside the try;
+        # a bare open().write() buffers and the error escapes at GC close
+        with open("/proc/sysrq-trigger", "w") as f:
+            f.write("h")
         return True
     except OSError:
         return False

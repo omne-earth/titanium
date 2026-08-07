@@ -8,7 +8,7 @@ Probe and record exactly these keys:
 - `engine_sockets`: list of container-engine control sockets present in the sandbox — check at least `/var/run/docker.sock` and `/run/podman/podman.sock` (expected: empty list)
 - `writable_workdir`: can you create and delete a file in `/app`? (true/false)
 - `writable_tmp`: same for `/tmp` (true/false)
-- `sysrq_writable`: does writing "h" to `/proc/sysrq-trigger` succeed? Actually attempt it and record what you observe (gVisor emulates much of /proc in its own kernel, so the write may succeed without ever reaching the host — either result is valid data)
+- `sysrq_writable`: does writing "h" to `/proc/sysrq-trigger` succeed? Actually attempt it — flush/close the file so any error surfaces, don't just buffer the write — and record whether it went through (a failure means the boundary held; record false, don't crash)
 - `pid1_comm`: contents of `/proc/1/comm`, stripped (informational)
 - `dmesg_gvisor`: does the kernel ring buffer (`dmesg`) mention gVisor? (true/false)
 - `kernel_release`: output of `uname -r`, stripped (informational)
