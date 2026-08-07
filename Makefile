@@ -1,12 +1,11 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-env sync upgrade
+.PHONY: .uv .tmux .deps .podman .docker .runsc init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-env smoke-attach sync upgrade
 
 -include .secrets
 
 MAKE = $(shell command -v make)
-# Recursive on purpose: re-resolved after the .uv target installs uv. The
-# curl installer lands in ~/.local/bin, which may not be on PATH yet.
+# Recursive = so it re-resolves after .uv installs uv (~/.local/bin may be off PATH)
 UV = $(shell command -v uv || echo $(HOME)/.local/bin/uv)
 
 PY := .venv/bin/python
@@ -45,6 +44,33 @@ PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER
 		elif command -v dnf >/dev/null; then sudo dnf install -y uv; \
 		else curl -LsSf https://astral.sh/uv/install.sh | sh; fi; }
 
+.tmux:
+	@command -v tmux >/dev/null || { \
+		if command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y tmux; \
+		elif command -v dnf >/dev/null; then sudo dnf install -y tmux; \
+		else echo "no apt-get/dnf found — install tmux manually"; exit 1; fi; }
+
+# needs the venv — keep after `sync` in prerequisite lists
+.podman:
+	bash scripts/doctor/podman.sh --fix
+
+# Guards keep re-runs sudo-free; the scripts themselves are also idempotent.
+.docker:
+	@{ command -v docker && systemctl is-active -q docker; } >/dev/null 2>&1 \
+		|| bash scripts/init/docker.sh
+
+.runsc: .docker
+	@{ command -v runsc && grep -qs '"runsc"' /etc/docker/daemon.json; } >/dev/null 2>&1 \
+		|| bash scripts/init/runsc.sh
+
+# Toolchain for building wheels that ship no binary for this platform/python.
+.deps:
+	@{ command -v gcc && command -v make && command -v python3 && \
+		test -e "$$(python3 -c 'import sysconfig; print(sysconfig.get_path("include"))')/Python.h"; } >/dev/null 2>&1 || { \
+		if command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y gcc make python3 python3-dev; \
+		elif command -v dnf >/dev/null; then sudo dnf install -y gcc make python3 python3-devel; \
+		else echo "no apt-get/dnf found — install gcc make python3 python3-devel manually"; exit 1; fi; }
+
 $(TASKS_PATH_DS):
 	@test -d $(TASKS_PATH_DS) || git clone $(TASKS_SOURCE_DS) $(TASKS_PATH_DS)
 
@@ -53,8 +79,11 @@ $(TASKS_PATH_TB2):
 
 .sentinel/tasks: $(TASKS_PATH_DS) $(TASKS_PATH_TB2)
 
-unit-podman-env:
-	bash scripts/podman-doctor.sh
+init: sync .tmux .podman .runsc | .sentinel/tasks
+	@echo ""
+	echo "init complete — try: make smoke-env BACKEND=openrouter"
+
+unit-podman-env: .podman
 	$(PYTEST) tests/test_podman_environment.py
 
 unit-podman: unit-podman-env
@@ -65,25 +94,51 @@ pier-run: | .sentinel/tasks
 	mkdir -p "$(PIER_JOBS_DIR)"
 	$(PIER_RUN)
 
-smoke-podman: sync
-	bash scripts/podman-doctor.sh --fix
+smoke-podman: sync .podman
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
-	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) tests/test_podman_environment.py --html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
-		--self-contained-html --cov=pier.environments.podman --cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		tests/test_podman_environment.py \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=pier.environments.podman \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) pier-run PIER_ENV=podman PIER_TASK=$(TASKS_PATH_TB2)/fix-git PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
 
-smoke-gvisor: sync
+smoke-gvisor: sync .runsc
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
-	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) tests/test_gvisor_environment.py tests/test_gvisor_network_policy.py --html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
-		--self-contained-html --cov=pier.environments.gvisor --cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
-	$(MAKE) pier-run PIER_ENV=gvisor PIER_TASK=$(TASKS_PATH_TB2)/fix-git PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		tests/test_gvisor_environment.py tests/test_gvisor_network_policy.py \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=pier.environments.gvisor \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	sg docker -c "$(MAKE) pier-run PIER_ENV=gvisor PIER_TASK=$(TASKS_PATH_TB2)/fix-git PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@"
 
-# Sync the venv and clone the task repos up front so the parallel fan-out
-# starts from a ready checkout instead of racing to build it.
-smoke-env: sync | .sentinel/tasks
-	$(MAKE) -j2 smoke-podman smoke-gvisor
+SMOKE_SESSION ?= pier-smoke
+SMOKE_TMUX := tmux -L pier
 
-sync: .uv
+smoke-env: sync .tmux | .sentinel/tasks
+	@if $(SMOKE_TMUX) has-session -t $(SMOKE_SESSION) 2>/dev/null; then
+		if $(SMOKE_TMUX) list-panes -s -t $(SMOKE_SESSION) -F '#{pane_current_command}' | grep -qvE '^(bash|zsh|sh)$$'; then
+			echo "smoke run still in progress in tmux session '$(SMOKE_SESSION)'"
+			echo "  attach: $(SMOKE_TMUX) attach -t $(SMOKE_SESSION)"
+			echo "  kill:   $(SMOKE_TMUX) kill-session -t $(SMOKE_SESSION)"
+			exit 1
+		fi
+		echo "previous smoke run finished — recycling session '$(SMOKE_SESSION)'"
+		$(SMOKE_TMUX) kill-session -t $(SMOKE_SESSION)
+	fi
+	$(SMOKE_TMUX) new-session -d -s $(SMOKE_SESSION) -n smoke-podman "$(MAKE) smoke-podman BACKEND=$(BACKEND); exec bash"
+	$(SMOKE_TMUX) new-window -t $(SMOKE_SESSION) -n smoke-gvisor "$(MAKE) smoke-gvisor BACKEND=$(BACKEND); exec bash"
+	echo ""
+	echo "Smoke runs started in tmux session '$(SMOKE_SESSION)':"
+	echo "  attach:  $(SMOKE_TMUX) attach -t $(SMOKE_SESSION)"
+	echo "  windows: Ctrl-b n / Ctrl-b p to cycle, Ctrl-b w to list"
+	echo "  detach:  Ctrl-b d (runs keep going)"
+
+smoke-attach: .tmux
+	@$(SMOKE_TMUX) has-session -t $(SMOKE_SESSION) 2>/dev/null || { echo "no smoke session — run: make smoke-env"; exit 1; }
+	$(SMOKE_TMUX) attach -t $(SMOKE_SESSION)
+
+sync: .deps .uv
 	$(UV) sync
 
 upgrade: .uv

@@ -10,7 +10,7 @@ FIX=0
 [[ "${1:-}" == "--fix" ]] && FIX=1
 
 # podman-compose and pier are project deps — prefer the repo venv over system PATH
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [[ -d "$REPO_ROOT/.venv/bin" ]] && PATH="$REPO_ROOT/.venv/bin:$PATH"
 
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$1"; }
