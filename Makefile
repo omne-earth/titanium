@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-env smoke-attach sync upgrade
+.PHONY: .uv .tmux .deps .podman .docker .runsc init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-env smoke-attach sync upgrade FORCE
 
 -include .secrets
 
@@ -20,7 +20,9 @@ TASKS_PATH_DS := "$(TASKS_DIR)/deep-swe"
 TASKS_PATH_TB2 := "$(TASKS_DIR)/terminal-bench-2"
 TASKS_DEFAULT := $(TASKS_PATH_DS)/tasks/anko-default-function-arguments
 
-REPORTS_DIR ?= ./.reports
+RUN_DIR ?= ./.run
+RUN_TASKS := $(RUN_DIR)/tasks
+REPORTS_DIR ?= $(RUN_DIR)/reports
 
 ifeq ($(BACKEND),openrouter)
 PIER_AGENT ?= mini-swe-agent
@@ -33,7 +35,10 @@ else
 $(error BACKEND must be 'openrouter' or 'claude', got '$(BACKEND)')
 endif
 
-PIER_JOBS_DIR ?= ./.jobs
+# paths from repo root; fix-git: offline-solvable, build-pmars: needs egress
+SMOKE_TASKS ?= $(TASKS_DIR)/terminal-bench-2/fix-git $(TASKS_DIR)/terminal-bench-2/build-pmars
+
+PIER_JOBS_DIR ?= $(RUN_DIR)/jobs
 PIER_ENV ?= podman
 PIER_TASK ?= $(TASKS_DEFAULT)
 PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR)
@@ -67,9 +72,9 @@ PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER
 .deps:
 	@{ command -v gcc && command -v make && command -v python3 && \
 		test -e "$$(python3 -c 'import sysconfig; print(sysconfig.get_path("include"))')/Python.h"; } >/dev/null 2>&1 || { \
-		if command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y gcc make python3 python3-dev; \
-		elif command -v dnf >/dev/null; then sudo dnf install -y gcc make python3 python3-devel; \
-		else echo "no apt-get/dnf found — install gcc make python3 python3-devel manually"; exit 1; fi; }
+			if command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y gcc make python3 python3-dev; \
+			elif command -v dnf >/dev/null; then sudo dnf install -y gcc make python3 python3-devel; \
+			else echo "no apt-get/dnf found — install gcc make python3 python3-devel manually"; exit 1; fi; }
 
 $(TASKS_PATH_DS):
 	@test -d $(TASKS_PATH_DS) || git clone $(TASKS_SOURCE_DS) $(TASKS_PATH_DS)
@@ -78,6 +83,14 @@ $(TASKS_PATH_TB2):
 	@test -d $(TASKS_PATH_TB2) || git clone $(TASKS_SOURCE_TB2) $(TASKS_PATH_TB2)
 
 .sentinel/tasks: $(TASKS_PATH_DS) $(TASKS_PATH_TB2)
+
+FORCE:
+
+# re-staged fresh every run; per-target dirs keep parallel smoke windows
+# isolated, and examples/smoke/verify-<env>-env rides along when it exists
+$(RUN_TASKS)/%: FORCE | .sentinel/tasks
+	@rm -rf $@ && mkdir -p $@
+	cp -r $(SMOKE_TASKS) $(wildcard examples/smoke/$(patsubst smoke-%,verify-%-env,$(notdir $@))) $@/
 
 init: sync .tmux .podman .runsc | .sentinel/tasks
 	@echo ""
@@ -94,30 +107,31 @@ pier-run: | .sentinel/tasks
 	mkdir -p "$(PIER_JOBS_DIR)"
 	$(PIER_RUN)
 
-smoke-podman: sync .podman
+smoke-podman: sync .podman $(RUN_TASKS)/$(BACKEND)/smoke-podman
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
 		tests/test_podman_environment.py \
 		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
 		--self-contained-html --cov=pier.environments.podman \
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
-	$(MAKE) pier-run PIER_ENV=podman PIER_TASK=$(TASKS_PATH_TB2)/fix-git PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
+	$(MAKE) pier-run PIER_ENV=podman PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
 
-smoke-gvisor: sync .runsc
+smoke-gvisor: sync .runsc $(RUN_TASKS)/$(BACKEND)/smoke-gvisor
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
 		tests/test_gvisor_environment.py tests/test_gvisor_network_policy.py \
 		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
 		--self-contained-html --cov=pier.environments.gvisor \
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
-	sg docker -c "$(MAKE) pier-run PIER_ENV=gvisor PIER_TASK=$(TASKS_PATH_TB2)/fix-git PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@"
+	sg docker -c "$(MAKE) pier-run PIER_ENV=gvisor PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@"
 
 SMOKE_SESSION ?= pier-smoke
 SMOKE_TMUX := tmux -L pier
 
 smoke-env: sync .tmux | .sentinel/tasks
 	@if $(SMOKE_TMUX) has-session -t $(SMOKE_SESSION) 2>/dev/null; then
-		if $(SMOKE_TMUX) list-panes -s -t $(SMOKE_SESSION) -F '#{pane_current_command}' | grep -qvE '^(bash|zsh|sh)$$'; then
+		# a pane's shell has children iff its smoke is still running
+		if $(SMOKE_TMUX) list-panes -s -t $(SMOKE_SESSION) -F '#{pane_pid}' | xargs -I{} ps -o pid= --ppid {} | grep -q .; then
 			echo "smoke run still in progress in tmux session '$(SMOKE_SESSION)'"
 			echo "  attach: $(SMOKE_TMUX) attach -t $(SMOKE_SESSION)"
 			echo "  kill:   $(SMOKE_TMUX) kill-session -t $(SMOKE_SESSION)"
