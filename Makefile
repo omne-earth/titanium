@@ -13,16 +13,12 @@ PYTEST := .venv/bin/pytest
 PIER := .venv/bin/pier
 BACKEND ?= openrouter
 
-TASKS_SOURCE_DS := "https://github.com/datacurve-ai/deep-swe.git"
-TASKS_SOURCE_TB2 := "https://github.com/harbor-framework/terminal-bench-2.git"
+TASKS_SOURCE_DS := https://github.com/datacurve-ai/deep-swe.git
+TASKS_SOURCE_TB2 := https://github.com/harbor-framework/terminal-bench-2.git
 TASKS_DIR := ./.tasks
-TASKS_PATH_DS := "$(TASKS_DIR)/deep-swe"
-TASKS_PATH_TB2 := "$(TASKS_DIR)/terminal-bench-2"
+TASKS_PATH_DS := $(TASKS_DIR)/deep-swe
+TASKS_PATH_TB2 := $(TASKS_DIR)/terminal-bench-2
 TASKS_DEFAULT := $(TASKS_PATH_DS)/tasks/anko-default-function-arguments
-
-RUN_DIR ?= ./.run
-RUN_TASKS := $(RUN_DIR)/tasks
-REPORTS_DIR ?= $(RUN_DIR)/reports
 
 ifeq ($(BACKEND),openrouter)
 PIER_AGENT ?= mini-swe-agent
@@ -35,13 +31,19 @@ else
 $(error BACKEND must be 'openrouter' or 'claude', got '$(BACKEND)')
 endif
 
-# paths from repo root; fix-git: offline-solvable, build-pmars: needs egress
-SMOKE_TASKS ?= $(TASKS_DIR)/terminal-bench-2/fix-git $(TASKS_DIR)/terminal-bench-2/build-pmars
-
 PIER_JOBS_DIR ?= $(RUN_DIR)/jobs
 PIER_ENV ?= podman
 PIER_TASK ?= $(TASKS_DEFAULT)
 PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR)
+
+RUN_DIR ?= ./.run
+RUN_TASKS := $(RUN_DIR)/tasks
+REPORTS_DIR := $(RUN_DIR)/reports
+
+# fix-git-offline: air-gapped, build-pmars: needs egress
+SMOKE_TASKS ?= examples/smoke/fix-git-offline $(TASKS_DIR)/terminal-bench-2/build-pmars
+SMOKE_SESSION := pier-$(subst .,,$(notdir $(RUN_DIR)))
+SMOKE_TMUX := tmux -L pier
 
 .uv:
 	@command -v uv >/dev/null || { \
@@ -59,7 +61,7 @@ PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER
 .podman:
 	bash scripts/doctor/podman.sh --fix
 
-# Guards keep re-runs sudo-free; the scripts themselves are also idempotent.
+# guards keep re-runs sudo-free; the scripts themselves are also idempotent.
 .docker:
 	@{ command -v docker && systemctl is-active -q docker; } >/dev/null 2>&1 \
 		|| bash scripts/init/docker.sh
@@ -68,7 +70,7 @@ PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER
 	@{ command -v runsc && grep -qs '"runsc"' /etc/docker/daemon.json; } >/dev/null 2>&1 \
 		|| bash scripts/init/runsc.sh
 
-# Toolchain for building wheels that ship no binary for this platform/python.
+# toolchain for building wheels that ship no binary for this platform/python.
 .deps:
 	@{ command -v gcc && command -v make && command -v python3 && \
 		test -e "$$(python3 -c 'import sysconfig; print(sysconfig.get_path("include"))')/Python.h"; } >/dev/null 2>&1 || { \
@@ -84,10 +86,8 @@ $(TASKS_PATH_TB2):
 
 .sentinel/tasks: $(TASKS_PATH_DS) $(TASKS_PATH_TB2)
 
+# re-staged fresh every run; per-target dirs keep parallel smoke windows isolated
 FORCE:
-
-# re-staged fresh every run; per-target dirs keep parallel smoke windows
-# isolated, and examples/smoke/verify-<env>-env rides along when it exists
 $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 	@rm -rf $@ && mkdir -p $@
 	cp -r $(SMOKE_TASKS) $(wildcard examples/smoke/$(patsubst smoke-%,verify-%-env,$(notdir $@))) $@/
@@ -125,9 +125,6 @@ smoke-gvisor: sync .runsc $(RUN_TASKS)/$(BACKEND)/smoke-gvisor
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	sg docker -c "$(MAKE) pier-run PIER_ENV=gvisor PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@"
 
-SMOKE_SESSION ?= pier-smoke
-SMOKE_TMUX := tmux -L pier
-
 smoke-env: sync .tmux | .sentinel/tasks
 	@if $(SMOKE_TMUX) has-session -t $(SMOKE_SESSION) 2>/dev/null; then
 		# a pane's shell has children iff its smoke is still running
@@ -140,11 +137,13 @@ smoke-env: sync .tmux | .sentinel/tasks
 		echo "previous smoke run finished — recycling session '$(SMOKE_SESSION)'"
 		$(SMOKE_TMUX) kill-session -t $(SMOKE_SESSION)
 	fi
-	$(SMOKE_TMUX) new-session -d -s $(SMOKE_SESSION) -n smoke-podman "$(MAKE) smoke-podman BACKEND=$(BACKEND); exec bash"
-	$(SMOKE_TMUX) new-window -t $(SMOKE_SESSION) -n smoke-gvisor "$(MAKE) smoke-gvisor BACKEND=$(BACKEND); exec bash"
+	$(SMOKE_TMUX) new-session -d -s $(SMOKE_SESSION) -n smoke-podman -e MAKEFLAGS='$(MAKEFLAGS)' \
+		"$(MAKE) smoke-podman; exec bash"
+	$(SMOKE_TMUX) new-window -t $(SMOKE_SESSION) -n smoke-gvisor -e MAKEFLAGS='$(MAKEFLAGS)' \
+		"$(MAKE) smoke-gvisor; exec bash"
 	echo ""
 	echo "Smoke runs started in tmux session '$(SMOKE_SESSION)':"
-	echo "  attach:  $(SMOKE_TMUX) attach -t $(SMOKE_SESSION)"
+	echo "  attach:  make smoke-attach"
 	echo "  windows: Ctrl-b n / Ctrl-b p to cycle, Ctrl-b w to list"
 	echo "  detach:  Ctrl-b d (runs keep going)"
 
