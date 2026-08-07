@@ -35,6 +35,11 @@ _ENVIRONMENT_REGISTRY: dict[EnvironmentType, _EnvEntry] = {
         "DockerEnvironment",
         None,
     ),
+    EnvironmentType.GVISOR: _EnvEntry(
+        "pier.environments.gvisor.environment",
+        "GVisorEnvironment",
+        None,
+    ),
     EnvironmentType.MODAL: _EnvEntry(
         "pier.environments.modal",
         "ModalEnvironment",
@@ -46,6 +51,39 @@ _ENVIRONMENT_REGISTRY: dict[EnvironmentType, _EnvEntry] = {
         "daytona",
     ),
 }
+
+
+# gVisor used to be an opt-in kwarg on the Docker environment
+# (``--env docker --ek gvisor=true``). It is now a first-class environment type.
+# The old spelling must fail loudly: environment kwargs are splatted into the
+# constructor unvalidated, so ``BaseEnvironment(**kwargs)`` would swallow these
+# names and hand back an ordinary Docker sandbox with no gVisor isolation at all.
+# Silently weaker isolation than the caller asked for is exactly the failure mode
+# this check exists to prevent. Deliberately narrow: only these two names, only
+# on the Docker environment -- this is not general kwargs validation.
+_OBSOLETE_DOCKER_GVISOR_KWARGS = ("gvisor", "gvisor_runtime")
+
+
+def _reject_obsolete_gvisor_kwargs(
+    env_type: EnvironmentType, kwargs: dict[str, object]
+) -> None:
+    if env_type is not EnvironmentType.DOCKER:
+        return
+
+    present = [name for name in _OBSOLETE_DOCKER_GVISOR_KWARGS if name in kwargs]
+    if not present:
+        return
+
+    named = ", ".join(repr(name) for name in present)
+    hint = ""
+    if "gvisor_runtime" in kwargs:
+        hint = f" Pass the runtime as --ek runtime={kwargs['gvisor_runtime']}."
+    raise ValueError(
+        f"The 'docker' environment does not accept {named}. gVisor is now a "
+        "first-class environment: select it with --env gvisor."
+        f"{hint} Refusing to continue rather than silently running an ordinary "
+        "Docker sandbox with no gVisor isolation."
+    )
 
 
 def _load_environment_class(env_type: EnvironmentType) -> type[BaseEnvironment]:
@@ -90,6 +128,7 @@ class EnvironmentFactory:
         default_user: str | int | None = None,
         **kwargs,
     ) -> BaseEnvironment:
+        _reject_obsolete_gvisor_kwargs(type, kwargs)
         environment_class = _load_environment_class(type)
 
         return environment_class(
