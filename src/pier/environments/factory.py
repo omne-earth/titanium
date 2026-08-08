@@ -40,6 +40,11 @@ _ENVIRONMENT_REGISTRY: dict[EnvironmentType, _EnvEntry] = {
         "GVisorEnvironment",
         None,
     ),
+    EnvironmentType.PODMAN: _EnvEntry(
+        "pier.environments.podman.podman",
+        "PodmanEnvironment",
+        None,
+    ),
     EnvironmentType.MODAL: _EnvEntry(
         "pier.environments.modal",
         "ModalEnvironment",

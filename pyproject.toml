@@ -39,6 +39,9 @@ dependencies = [
     "toml>=0.10.2",
     "typer>=0.12",
     "uvicorn>=0.38.0",
+    "podman-compose>=1.6.0",
+    "pytest-cov>=7.1.0",
+    "pytest-html>=4.2.0",
 ]
 
 [project.scripts]

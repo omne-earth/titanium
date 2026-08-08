@@ -191,6 +191,10 @@ def write_docker_proxy_compose(
             "pier-egress-internal": {
                 "internal": True,
             },
+            # Declared explicitly: the proxy joins `default` for outbound egress,
+            # and podman-compose (unlike docker compose) refuses to parse a
+            # service referencing a network the file does not declare.
+            "default": {},
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)
