@@ -34,7 +34,7 @@ include_prebuilt = sys.argv[2] == "--prebuilt"
 refs: set[str] = set()
 
 # The egress proxy base (pier-owned, always in play for allowlist tasks).
-refs.add("docker.io/library/ubuntu:24.04")
+refs.add("docker.io/library/alpine:3.22")
 
 for toml in tasks_dir.rglob("task.toml"):
     task_dir = toml.parent

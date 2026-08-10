@@ -203,11 +203,12 @@ def write_docker_proxy_compose(
     (proxy_dir / "Dockerfile").write_text(
         "\n".join(
             [
-                "FROM docker.io/library/ubuntu:24.04",
-                "RUN apt-get update && "
-                "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
-                "apache2-utils ca-certificates squid && "
-                "rm -rf /var/lib/apt/lists/*",
+                # Alpine over Ubuntu: same squid, same helper paths, a tenth
+                # of the userland exposed to hostile sandbox traffic
+                # (GVISOR.md §2.3 / §4). bash is explicit — the bootstrap and
+                # the /dev/tcp healthcheck both need real bash.
+                "FROM docker.io/library/alpine:3.22",
+                "RUN apk add --no-cache bash squid apache2-utils ca-certificates",
                 "COPY start-squid.sh /usr/local/bin/start-squid.sh",
                 "RUN chmod +x /usr/local/bin/start-squid.sh",
                 'CMD ["bash", "/usr/local/bin/start-squid.sh"]',
