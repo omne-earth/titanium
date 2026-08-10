@@ -35,7 +35,11 @@ PIER_JOBS_DIR ?= $(RUN_DIR)/jobs
 PIER_ENV ?= podman
 PIER_TASK ?= $(TASKS_DEFAULT)
 PIER_N ?= 1
-PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR) -n $(PIER_N)
+# Trial execution runs as the dedicated runner user whenever that user has
+# been provisioned (scripts/init/titanium.sh) — secure by default, opt-out
+# with RUNNER= (empty). Unprovisioned hosts run as the invoking user.
+RUNNER ?= $(shell id -u titanium >/dev/null 2>&1 && echo titanium)
+PIER_RUN ?= $(if $(RUNNER),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )$(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR) -n $(PIER_N)
 
 RUN_DIR ?= ./.run
 RUN_TASKS := $(RUN_DIR)/tasks
@@ -64,7 +68,7 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 
 # needs the venv — keep after `sync` in prerequisite lists
 .podman:
-	bash scripts/doctor/podman.sh --fix
+	bash scripts/doctor/podman.sh --bootstrap
 
 # guards keep re-runs sudo-free; the scripts themselves are also idempotent.
 .docker:

@@ -1,8 +1,8 @@
 # Podman environment: protections, relaxations, and hardening avenues
 
 Selector `--env podman`, class `pier.environments.podman.podman.PodmanEnvironment`,
-provisioned and audited by `scripts/doctor/podman.sh` (report-only by default,
-`--fix` to apply changes). This document records what the vanilla setup
+provisioned and audited by `scripts/doctor/podman.sh` (report-only by default, `--bootstrap` to provision;
+formerly `--fix`). This document records what the vanilla setup
 protects, exactly where Pier relaxed it to make trials run, and concrete ways
 each relaxation could be closed. Its siblings are
 [GVISOR.md](GVISOR.md) and [GVISOR-PODMAN.md](GVISOR-PODMAN.md); the
@@ -26,6 +26,23 @@ uses them.
 **Rootless by default.** Podman's native mode maps container root to the
 invoking user through a user namespace; a full container escape lands as an
 unprivileged user, not host root. Nothing in Pier requires rootful Podman.
+
+**Runner separation (default when provisioned).** "Unprivileged user" is
+only as comforting as what that user owns — without separation it is the
+operator, with their SSH/GPG keys, API secrets, and source tree. Once
+`scripts/init/titanium.sh` has provisioned the `titanium` user, every make
+target runs the whole trial execution as that user by default — opt out with
+`RUNNER=`; unprovisioned hosts run as the invoking user unchanged. The
+wrapper (`scripts/titanium-run.sh`) is one systemd scope per run: no
+per-command `sudo -u`, no API socket, so an escape lands as an account
+owning nothing but trial state. Provisioning covers: nologin user,
+subuid range, linger, cgroup delegation, traversal-plus-read ACLs on the
+repo, read-write plus default ACLs on `.run/` so operator and runner both
+keep access to trial output — and a root-owned, runner-unwritable
+`~titanium/.config/containers`, which structurally closes the user-level
+runtime-redirect residual of GVISOR-PODMAN.md §2.3. The environment variables
+a trial legitimately needs (model API credentials, `PIER_*` knobs) are the
+only ones that cross into the scope.
 
 **Daemonless lifecycle.** There is no long-lived privileged daemon whose
 compromise affects every container on the host; each `podman` invocation is

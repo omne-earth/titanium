@@ -2,12 +2,16 @@
 # Host preflight for running Pier on Podman without a socket.
 # Checks the things that actually break, in the order they break.
 #
-#   ./podman-doctor.sh          # report only
-#   ./podman-doctor.sh --fix    # also write registries.conf if missing
+#   ./podman.sh              # report only
+#   ./podman.sh --bootstrap  # also provision what is missing (host-wide
+#                            # concerns only; the runner user is provisioned
+#                            # by scripts/init/titanium.sh)
+#
+# --fix is accepted as a deprecated alias for --bootstrap.
 
 set -uo pipefail
 FIX=0
-[[ "${1:-}" == "--fix" ]] && FIX=1
+[[ "${1:-}" == "--bootstrap" || "${1:-}" == "--fix" ]] && FIX=1
 
 # podman-compose and pier are project deps — prefer the repo venv over system PATH
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -167,7 +171,7 @@ else
     ok "wrote $DELEGATE_DROPIN — log out and back in (or restart user@$(id -u)) for delegation to apply"
   else
     warn "cgroups v2 but cpu/memory not delegated (controllers: ${CG_CONTROLLERS:-<none>}) — limits are silently dropped.
-        LIMIT/GUARANTEE tasks are rejected; AUTO tasks run unbounded. Re-run with --fix, or write $DELEGATE_DROPIN:
+        LIMIT/GUARANTEE tasks are rejected; AUTO tasks run unbounded. Re-run with --bootstrap, or write $DELEGATE_DROPIN:
           [Service]
           Delegate=cpu cpuset io memory pids"
   fi
