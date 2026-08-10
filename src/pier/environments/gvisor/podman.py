@@ -35,6 +35,7 @@ import os
 
 from pier.environments.gvisor.environment import GVisorEnvironment
 from pier.environments.gvisor.podman_runtime import (
+    assert_runtime_digest,
     assert_runtime_resolvable,
     container_oci_runtime,
     project_container_ids_podman,
@@ -108,13 +109,17 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
         assert_runtime_resolvable(
             DEFAULT_RUNTIME, os.environ.get("PIER_PODMAN_BIN", "podman")
         )
+        assert_runtime_digest()
 
     # -- engine seam overrides ---------------------------------------------
 
     def _assert_runtime_registered(self) -> None:
         # Podman has no daemon registry to consult; make Podman itself resolve
         # the runtime, which is the same resolution compose-up will perform.
+        # The digest check then proves the binary answering to that name is
+        # still the one the install script recorded.
         assert_runtime_resolvable(self._runtime, self._engine_cli)
+        assert_runtime_digest()
 
     async def _container_runtime(self, container_id: str) -> str | None:
         # Podman's {{.HostConfig.Runtime}} is a compat placeholder ("oci");

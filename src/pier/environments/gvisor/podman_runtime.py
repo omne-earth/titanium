@@ -37,10 +37,12 @@ assumed:
 
 from __future__ import annotations
 
+import hashlib
+import os
 import subprocess
 import tempfile
 import uuid
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from pier.environments.gvisor.runtime import (
     _inspect,
@@ -281,3 +283,60 @@ def assert_runtime_resolvable(
             "or register it under [engine.runtimes] in containers.conf, or "
             "select a different environment with --env podman."
         )
+
+
+# Where scripts/init/runsc-podman.sh records `<sha3-512>  <path>` for the
+# binary it installed (or, trust-on-first-use, the one it found). SHA3
+# deliberately: the download itself is verified against upstream's SHA-512
+# release checksum, so pinning in a different hash family means a break in
+# either family defeats at most one of the two checks. Overridable so
+# deployments and tests can relocate the pin.
+RUNSC_DIGEST_PIN = "/usr/local/share/pier/runsc.sha3-512"
+
+
+def assert_runtime_digest(pin_file: str | Path | None = None) -> None:
+    """Fail closed when the pinned runtime binary changed since install.
+
+    The resolvability probe proves *a* binary answers to the runtime name;
+    this proves it is still bit-for-bit the one the install script recorded,
+    turning "a file named runsc exists" into "the runsc we installed exists".
+    A missing pin file is not an error -- hosts provisioned before pinning, or
+    with a distro-managed runsc, simply have no pin to enforce -- but a pin
+    that names a now-missing or now-different binary is: silent downgrade to
+    unpinned is exactly the tampering this check exists to catch.
+    """
+    path = Path(
+        pin_file
+        if pin_file is not None
+        else os.environ.get("PIER_RUNSC_DIGEST_PIN", RUNSC_DIGEST_PIN)
+    )
+    try:
+        pin = path.read_text()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(f"Runtime digest pin {path} is unreadable: {exc}")
+
+    for line in pin.splitlines():
+        expected, _, binary = line.strip().partition("  ")
+        if not expected or not binary:
+            continue
+        digest = hashlib.sha3_512()
+        try:
+            with open(binary, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Runtime digest pin {path} names {binary}, which cannot be "
+                f"read ({exc}). Refusing to run the sandbox under an "
+                "unverifiable runtime binary; reinstall with "
+                "scripts/init/runsc-podman.sh or remove the pin deliberately."
+            )
+        if digest.hexdigest() != expected:
+            raise RuntimeError(
+                f"{binary} does not match the digest recorded at install "
+                f"time in {path}. The runtime binary changed outside "
+                "scripts/init/runsc-podman.sh; refusing to run untrusted "
+                "code under it."
+            )

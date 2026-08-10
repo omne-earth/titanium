@@ -582,3 +582,51 @@ def test_preflight_never_touches_the_docker_daemon(monkeypatch):
     monkeypatch.setattr("pier.environments.gvisor.runtime.engine_runtimes", boom)
 
     GVisorPodmanEnvironment.preflight()
+
+
+# ---------------------------------------------------------------------------
+# Runtime digest pin -- "the runsc we installed", not "a file named runsc"
+# ---------------------------------------------------------------------------
+
+
+def _pin(tmp_path, content: bytes) -> tuple:
+    import hashlib
+
+    binary = tmp_path / "runsc"
+    binary.write_bytes(content)
+    pin = tmp_path / "runsc.sha3-512"
+    pin.write_text(f"{hashlib.sha3_512(content).hexdigest()}  {binary}\n")
+    return pin, binary
+
+
+def test_digest_pin_passes_for_the_recorded_binary(tmp_path):
+    pin, _ = _pin(tmp_path, b"sentry")
+    podman_runtime.assert_runtime_digest(pin)  # must not raise
+
+
+def test_digest_pin_fails_closed_when_the_binary_changed(tmp_path):
+    pin, binary = _pin(tmp_path, b"sentry")
+    binary.write_bytes(b"impostor")
+    with pytest.raises(RuntimeError, match="changed outside"):
+        podman_runtime.assert_runtime_digest(pin)
+
+
+def test_digest_pin_fails_closed_when_the_binary_vanished(tmp_path):
+    pin, binary = _pin(tmp_path, b"sentry")
+    binary.unlink()
+    with pytest.raises(RuntimeError, match="cannot be read"):
+        podman_runtime.assert_runtime_digest(pin)
+
+
+def test_missing_pin_is_not_an_error(tmp_path):
+    # Hosts provisioned before pinning, or distro-managed runtimes: no pin,
+    # no check -- the resolvability probe still gates.
+    podman_runtime.assert_runtime_digest(tmp_path / "absent.sha3-512")
+
+
+def test_pin_location_honors_the_env_knob(tmp_path, monkeypatch):
+    pin, binary = _pin(tmp_path, b"sentry")
+    binary.write_bytes(b"impostor")
+    monkeypatch.setenv("PIER_RUNSC_DIGEST_PIN", str(pin))
+    with pytest.raises(RuntimeError, match="changed outside"):
+        podman_runtime.assert_runtime_digest()

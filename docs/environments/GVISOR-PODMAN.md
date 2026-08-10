@@ -127,6 +127,22 @@ replacing. The probe also creates (and force-removes, by fixed name) a real
 container per check — writes to Podman storage that vanilla preflights don't
 make.
 
+Hardened since: the install script pins the binary's SHA3-512 at
+`/usr/local/share/pier/runsc.sha3-512` (trust-on-first-use when runsc
+pre-existed; an existing pin is never overwritten, so replacing the binary
+and re-running init cannot silently re-bless it), and
+`assert_runtime_digest` — run at CLI preflight and again at every start —
+fails closed when the pinned binary changed or vanished. A missing pin file
+is the only pass-through, for hosts provisioned before pinning
+(`PIER_RUNSC_DIGEST_PIN` relocates it). The script also registers the
+resolved path in root-owned `/etc/containers/containers.conf.d/
+pier-runsc.conf`, restoring a root-gated registry analogous to Docker's, and
+warns when a user-level `containers.conf` mentions runsc. Residual trust:
+the user-level override is warned about, not blocked (Podman's precedence is
+not Pier's to change), and an attacker with root can rewrite pin and binary
+together — the pin raises "anyone who can write the path" to "root", not to
+impossible.
+
 ### 2.4 Rootless export ownership: staged copies chowned to in-container root
 
 Where: `GVisorPodmanUnixOps._host_owner()` returns `"0:0"`, overriding
@@ -219,15 +235,12 @@ narrower UID-mapping and networking support there.
 
 ## 4. Hardening avenues
 
-**Runtime resolution trust (2.3).** (a) Pin by absolute path *and* digest:
-extend `assert_runtime_resolvable` to also stat the resolved binary and
-compare a configured sha256 (the install script already checksums the
-download; persisting that digest gives preflight something to verify against),
-turning "a file named runsc exists" into "the runsc we installed exists".
-(b) Register runsc explicitly in the *system* `containers.conf`
-(`/etc/containers/containers.conf`, root-owned) rather than relying on path
-search, and have the doctor flag a user-level `[engine.runtimes]` override as
-a warning — restoring a root-gated registry analogous to Docker's.
+**Runtime resolution trust (2.3).** (a) and (b) are implemented (§2.3):
+SHA3-512 pin verified fail-closed at preflight and every start, root-owned
+`containers.conf.d` registration, user-level override warning at init.
+Remaining: block (not just warn on) user-level `[engine.runtimes]` redirects
+by having preflight parse the user config, if the added config-parsing
+surface is ever judged worth it.
 (c) is implemented: after each verification gate passes, the shared gVisor
 base writes `runtime-verification.json` into the trial directory recording
 the engine-reported runtime identity for `main` and the proxy verbatim (a
