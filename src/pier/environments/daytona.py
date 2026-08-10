@@ -20,7 +20,7 @@ from pier.environments.capabilities import (
     EnvironmentCapabilities,
     EnvironmentResourceCapabilities,
 )
-from pier.environments.docker import (
+from pier.environments.compose import (
     COMPOSE_BASE_PATH,
     COMPOSE_BUILD_PATH,
     COMPOSE_NO_NETWORK_PATH,
@@ -491,18 +491,18 @@ class _DaytonaDinD(_DaytonaStrategy):
 
     def _compose_file_flags(self) -> list[str]:
         build_or_prebuilt = (
-            "docker-compose-prebuilt.yaml"
+            "prebuilt.yaml"
             if self._use_prebuilt
-            else "docker-compose-build.yaml"
+            else "build.yaml"
         )
         files = [
-            f"{self._COMPOSE_DIR}/docker-compose-base.yaml",
+            f"{self._COMPOSE_DIR}/base.yaml",
             self._RESOURCES_COMPOSE_PATH,
             f"{self._COMPOSE_DIR}/{build_or_prebuilt}",
             f"{self._ENVIRONMENT_DIR}/docker-compose.yaml",
         ]
         if self._env._compose_should_block_main_network():
-            files.append(f"{self._COMPOSE_DIR}/docker-compose-no-network.yaml")
+            files.append(f"{self._COMPOSE_DIR}/no-network.yaml")
 
         flags: list[str] = []
         for file in files:

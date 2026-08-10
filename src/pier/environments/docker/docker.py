@@ -21,7 +21,7 @@ from pier.environments.agent_setup import (
 )
 from pier.environments.base import BaseEnvironment, ExecResult
 from pier.environments.capabilities import EnvironmentCapabilities
-from pier.environments.docker import (
+from pier.environments.compose import (
     COMPOSE_BASE_PATH,
     COMPOSE_BUILD_PATH,
     COMPOSE_NO_NETWORK_PATH,
@@ -401,7 +401,7 @@ class DockerEnvironment(BaseEnvironment):
             token, EGRESS_PROXY_SERVICE, EGRESS_PROXY_PORT
         )
         self._egress_proxy_compose_path = write_docker_proxy_compose(
-            path=self.trial_paths.trial_dir / "docker-compose-egress-proxy.json",
+            path=self.trial_paths.trial_dir / "compose-egress-proxy.json",
             proxy_dir=self.trial_paths.trial_dir / "egress-proxy",
             allowlist=allowlist,
             token=token,
@@ -417,7 +417,7 @@ class DockerEnvironment(BaseEnvironment):
 
     def _write_mounts_compose_file(self) -> Path:
         """Write a docker-compose override file with additional volume mounts."""
-        path = self.trial_paths.trial_dir / "docker-compose-mounts.json"
+        path = self.trial_paths.trial_dir / "compose-mounts.json"
         return write_mounts_compose_file(path, self._mounts_json or [])
 
     def _write_resources_compose_file(self) -> Path:
