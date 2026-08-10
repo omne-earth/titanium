@@ -65,6 +65,17 @@ short name there still resolves — or under enforcing, fails — through host
 configuration. The doctor's message names this case; the fix is qualifying
 the task's own `FROM` line, not relaxing the host.
 
+The same trust posture governs *which* image is used at all
+(`_effective_docker_image`, shared by every local compose-driven
+environment): when a task ships both a Dockerfile and a `docker_image`
+prebuilt, the prebuilt — typically a mutable-tag build cache of that same
+Dockerfile on a third-party registry account — is ignored and the Dockerfile
+is built locally with qualified FROMs. `PIER_IMAGE_SOURCE=prebuilt` opts
+into upstream-parity byte-exactness where that matters more than
+auditability; image-only tasks are unaffected either way. The remote
+Daytona/Modal environments retain their own prebuilt handling and are
+outside this policy.
+
 ### 2.2 SELinux relabel: shared `z`, not private `Z`
 
 Where: `PodmanEnvironment._apply_selinux_relabel()` (`podman.py`) stamps
