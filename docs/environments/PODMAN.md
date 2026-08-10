@@ -40,13 +40,7 @@ no-network mode cannot be undone by pod-level namespace sharing.
 
 ## 2. What was relaxed, where, and why
 
-### 2.1 Short-name resolution: `enforcing` → `permissive` with docker.io search
-
-Where: `scripts/doctor/podman.sh --fix` writes
-`unqualified-search-registries = ["docker.io"]` and
-`short-name-mode = "permissive"` into the user-level
-`~/.config/containers/registries.conf` (which, when present, replaces the
-`/etc` file wholesale).
+### 2.1 Short-name resolution: retired — Pier qualifies its image references
 
 What vanilla does: Podman's compiled-in default is `short-name-mode =
 "enforcing"`, which refuses to resolve an unqualified image name (`FROM
@@ -54,18 +48,22 @@ ubuntu:24.04`) without an interactive registry choice. That is a supply-chain
 protection: a short name is ambiguous across registries, and enforcing mode
 makes the ambiguity a human decision instead of a silent pick.
 
-Why it was relaxed: task Dockerfiles are written in Docker's world, where
-short names always mean Docker Hub, and builds run non-interactively — the
-enforcing prompt is a hard failure inside `podman-compose build`. Permissive
-mode with a single search registry restores Docker's behavior.
+What Pier does now: nothing is relaxed. Short names in the Dockerfile dialect
+tasks are written in mean Docker Hub, so build preparation makes that meaning
+explicit at the byte level (`qualify_image_reference` /
+`qualify_dockerfile_froms` in `agent_setup.py`): the agent-install rewrite
+qualifies every `FROM` in the embedded task Dockerfile (multi-stage
+references and `scratch`/variable bases excluded), the prebuilt image name is
+qualified the same way, and the egress proxy image is written qualified.
+Enforcing mode never fires because no unqualified name reaches Podman on the
+standard flow, and the doctor no longer writes `registries.conf` at all — it
+warns when a previously written permissive configuration is still present.
 
-Blast radius: every unqualified image reference on the host — not just Pier's
-— now resolves to docker.io without confirmation. The pick is pinned to one
-registry, so the classic cross-registry squatting attack is off the table, but
-a typo-squatted or hijacked docker.io name is pulled without the pause
-enforcing mode would have imposed. The `--fix` write also replaces the entire
-effective registries.conf for that user, discarding any distribution-shipped
-mirror or blocking configuration.
+Residual: a task built directly from its own Dockerfile with *no* agent
+install bypasses the rewrite (Pier builds the task's context verbatim), so a
+short name there still resolves — or under enforcing, fails — through host
+configuration. The doctor's message names this case; the fix is qualifying
+the task's own `FROM` line, not relaxing the host.
 
 ### 2.2 SELinux relabel: shared `z`, not private `Z`
 
@@ -171,17 +169,13 @@ label and use `podman cp` (`podman_unix.py`).
 
 ## 4. Hardening avenues
 
-**Short names (2.1).** Several options, combinable. (a) Fully qualify images
-at build preparation: Pier already rewrites the task Dockerfile for agent
-installs (`write_agent_dockerfile`), so rewriting `FROM ubuntu:24.04` to
-`FROM docker.io/library/ubuntu:24.04` there removes the need for permissive
-mode without touching task sources — the cleanest fix, and it lets the doctor
-stop writing registries.conf entirely. (b) Keep `enforcing` and ship a
-per-name alias table in a `registries.conf.d` drop-in instead of a wholesale
-user file, which preserves the distribution's configuration and confines the
-relaxation to exactly the names tasks use. (c) For curated datasets, pin
-digests (`FROM ubuntu@sha256:…`) at dataset-ingestion time, which removes the
-resolution question altogether.
+**Short names (2.1).** Qualification at build preparation is implemented and
+the doctor no longer writes `registries.conf` (§2.1). Remaining: (a) extend
+the rewrite to the direct-Dockerfile-without-agent-install path by always
+building from a prepared copy of the task context; (b) for curated datasets,
+pin digests (`FROM ubuntu@sha256:…`) at dataset-ingestion time, which removes
+the resolution question altogether and pairs with the local image-supply
+work.
 
 **SELinux sharing (2.2).** (a) Assign the trial container and its
 separate-mode verifier the *same* private MCS category pair

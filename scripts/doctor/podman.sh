@@ -122,33 +122,24 @@ esac
 
 echo
 echo "== short-name resolution =="
-# Task Dockerfiles use short names (`FROM ubuntu:24.04`), which need search
-# registries AND a non-enforcing short-name-mode: enforcing wants to prompt
-# for the registry, a hard failure in a non-TTY build.
+# Pier fully qualifies its own image references at build preparation (the
+# agent-install Dockerfile rewrite, the prebuilt image name, and the egress
+# proxy image), so the standard flow needs no search-registry configuration
+# and the doctor no longer writes any. The residual: a task built directly
+# from its own Dockerfile with NO agent install bypasses the rewrite, and a
+# short name there still resolves through host configuration.
 REG_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/containers/registries.conf"
-# The user-level file, when present, replaces /etc's wholesale.
 EFFECTIVE_CONF=/etc/containers/registries.conf
 [[ -f "$REG_CONF" ]] && EFFECTIVE_CONF="$REG_CONF"
 mode=$(grep -hs '^[[:space:]]*short-name-mode' "$EFFECTIVE_CONF" | tail -1 | sed -E 's/.*"([a-z]+)".*/\1/')
 mode=${mode:-enforcing}  # podman's compiled-in default
 
-if grep -qs '^[[:space:]]*unqualified-search-registries' "$EFFECTIVE_CONF" && [[ "$mode" != "enforcing" ]]; then
-  ok "short names resolve non-interactively ($EFFECTIVE_CONF, short-name-mode=$mode)"
+if [[ "$mode" == "enforcing" ]]; then
+  ok "short-name-mode=enforcing (podman's supply-chain default) — Pier qualifies its image references, so the standard flow never needs a search registry.
+        Only tasks built from their own Dockerfile without an agent install would hit enforcing; qualify their FROM lines instead of relaxing this."
 else
-  if [[ $FIX -eq 1 ]]; then
-    mkdir -p "$(dirname "$REG_CONF")"
-    # The user file replaces /etc's, so it must carry both keys itself.
-    [[ -f "$REG_CONF" ]] && sed -i -E '/^[[:space:]]*(unqualified-search-registries|short-name-mode)/d' "$REG_CONF"
-    cat >> "$REG_CONF" <<'EOF'
-unqualified-search-registries = ["docker.io"]
-short-name-mode = "permissive"
-EOF
-    ok "wrote unqualified-search-registries + short-name-mode=permissive to $REG_CONF"
-  else
-    bad "short names won't resolve ($EFFECTIVE_CONF: short-name-mode=$mode) — 'FROM ubuntu:24.04' will fail. Re-run with --fix, or set in $REG_CONF:
-          unqualified-search-registries = [\"docker.io\"]
-          short-name-mode = \"permissive\""
-  fi
+  warn "$EFFECTIVE_CONF relaxes short names (short-name-mode=$mode) — no longer needed by Pier, which qualifies its image references.
+        Every unqualified pull on this host resolves without confirmation; consider restoring enforcing mode."
 fi
 
 echo
