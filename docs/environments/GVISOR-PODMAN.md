@@ -228,9 +228,13 @@ turning "a file named runsc exists" into "the runsc we installed exists".
 (`/etc/containers/containers.conf`, root-owned) rather than relying on path
 search, and have the doctor flag a user-level `[engine.runtimes]` override as
 a warning — restoring a root-gated registry analogous to Docker's.
-(c) Cheapest: verify `podman info --format '{{.Host.OCIRuntime.Path}}'`-style
-resolution output in the probe result and log the resolved path into trial
-artifacts, so post-hoc audit can see *which* binary each trial ran under.
+(c) is implemented: after each verification gate passes, the shared gVisor
+base writes `runtime-verification.json` into the trial directory recording
+the engine-reported runtime identity for `main` and the proxy verbatim (a
+name when selected by name, a resolved path when selected by path — Pier
+does not re-derive paths from names, which would re-implement the engine's
+search order). Post-hoc audit sees what the engine claimed each trial ran
+under; (a)'s digest pin is what would upgrade the claim to proof.
 
 **Staging relabel (2.2).** The per-trial MCS-category avenue from PODMAN.md §4
 applies directly and is *more* valuable here: assigning the trial container

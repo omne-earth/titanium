@@ -45,9 +45,11 @@ all); bind-mount sources confined to the trial directory
 refusing to start is the only enforcement point; docker-compose tasks rejected
 outright (`docker_compose=False`) because a task's own compose file could
 re-add `privileged`, `cap_add`, `devices`, or extra volumes that an override
-cannot strip; and connectivity for `allow_internet = true` is *proven* by an
+cannot strip; connectivity for `allow_internet = true` is *proven* by an
 in-sandbox probe after runtime verification, never assumed, with failure
-tearing the environment down rather than downgrading the network mode.
+tearing the environment down rather than downgrading the network mode; and
+each passed verification gate records the engine-reported runtime identity
+into the trial's `runtime-verification.json` for post-hoc audit.
 
 ## 2. What was relaxed, where, and why
 
