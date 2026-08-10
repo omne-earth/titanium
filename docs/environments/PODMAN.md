@@ -204,7 +204,7 @@ label and use `podman cp` (`podman_unix.py`).
 
 ## 4. Hardening avenues
 
-**Short names (2.1).** Qualification at build preparation is implemented and
+**[PARTIAL] Short names (2.1).** Qualification at build preparation is implemented and
 the doctor no longer writes `registries.conf` (§2.1). Remaining: (a) extend
 the rewrite to the direct-Dockerfile-without-agent-install path by always
 building from a prepared copy of the task context; (b) for curated datasets,
@@ -212,7 +212,7 @@ pin digests (`FROM ubuntu@sha256:…`) at dataset-ingestion time, which removes
 the resolution question altogether and pairs with the local image-supply
 work.
 
-**SELinux sharing (2.2).** (a) Assign the trial container and its
+**[ ] SELinux sharing (2.2).** (a) Assign the trial container and its
 separate-mode verifier the *same* private MCS category pair
 (`--security-opt label=level:s0:cX,cY`, one pair generated per trial), then
 relabel with `Z`; the two cooperating containers share the data while every
@@ -223,7 +223,7 @@ launches. (b) Relabel externally once at trial-directory creation
 `PIER_PODMAN_SELINUX_RELABEL=none`, keeping label management in trusted host
 code. (c) Generate a scoped policy with udica if categories prove too coarse.
 
-**Resource limits (2.3).** Post-start enforcement verification, the
+**[PARTIAL] Resource limits (2.3).** Post-start enforcement verification, the
 fail-closed fallback flag, and doctor coverage are implemented: the doctor
 reports cgroups version and delegated controllers, and `--fix` writes a
 `Delegate=cpu cpuset io memory pids` drop-in for `user@.service` (applies at
@@ -232,13 +232,13 @@ transient scope (`systemd-run --user --scope -p MemoryMax=…`) as an
 engine-external ceiling for `AUTO` tasks; coarser than per-container cgroups
 but real.
 
-**Artifact ownership (2.4).** (a) Run a `podman unshare chown -R 0:0` recovery
+**[ ] Artifact ownership (2.4).** (a) Run a `podman unshare chown -R 0:0` recovery
 pass over artifact directories in `prepare_logs_for_host()` — host-side,
 cheap, and closes the gap for non-root agents without touching in-container
 state. (b) Alternatively `podman cp` artifacts out instead of relying on the
 bind view, since `cp` writes as the invoking user.
 
-**Exec fidelity (2.5).** Implemented — programmatic execs inject `-T` in
+**[DONE] Exec fidelity (2.5).** Implemented — programmatic execs inject `-T` in
 `PodmanEnvironment._run_docker_compose_command`, transcript bytes are
 pipe-clean, and gvisor-podman inherits the injection instead of carrying its
 own override.

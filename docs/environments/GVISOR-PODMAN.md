@@ -235,7 +235,7 @@ narrower UID-mapping and networking support there.
 
 ## 4. Hardening avenues
 
-**Runtime resolution trust (2.3).** (a) and (b) are implemented (§2.3):
+**[PARTIAL] Runtime resolution trust (2.3).** (a) and (b) are implemented (§2.3):
 SHA3-512 pin verified fail-closed at preflight and every start, root-owned
 `containers.conf.d` registration, user-level override warning at init.
 Remaining: block (not just warn on) user-level `[engine.runtimes]` redirects
@@ -249,7 +249,7 @@ does not re-derive paths from names, which would re-implement the engine's
 search order). Post-hoc audit sees what the engine claimed each trial ran
 under; (a)'s digest pin is what would upgrade the claim to proof.
 
-**Staging relabel (2.2).** The per-trial MCS-category avenue from PODMAN.md §4
+**[ ] Staging relabel (2.2).** The per-trial MCS-category avenue from PODMAN.md §4
 applies directly and is *more* valuable here: assigning the trial container
 and separate-mode verifier one private category pair and relabeling staging
 with `Z` would remove the only cross-container-readable surface this
@@ -260,21 +260,21 @@ pair on, so the private level must be stamped on the staging directories
 directly and granted to the verifier's label — unconfined `main` still
 reaches its own staging, while other labeled containers lose access.
 
-**Cgroup honesty (2.6).** Implemented via the inherited post-start
+**[DONE] Cgroup honesty (2.6).** Implemented via the inherited post-start
 enforcement verification (PODMAN.md §2.3): declared limits are read back
 from `main`'s cgroup files host-side after every start, so the silent-ignore
 path is detectable and fatal where enforcement was promised. Remaining: the
 systemd transient-scope ceiling from PODMAN.md §4 as an engine-external
 backstop for `AUTO` tasks on hosts that cannot enforce.
 
-**Rootless proof (2.7).** Not code: stand up a rootless, cgroups-v2-delegated,
+**[ ] Rootless proof (2.7).** Not code: stand up a rootless, cgroups-v2-delegated,
 SELinux-enforcing host in CI and put `make smoke-gvisor-podman` in the merge
 gate for this environment's files. The smoke task
 (`examples/smoke/verify-gvisor-podman-env`) already asserts the boundary from
 inside, and §2.7's one-off run proves it passes on such a host; what's missing
 is making that run continuous rather than on-record-once.
 
-**Label-stamping dependency (2.5).** Implemented for containers: Pier stamps
+**[PARTIAL] Label-stamping dependency (2.5).** Implemented for containers: Pier stamps
 `pier.trial=<project>` through `--podman-run-args` and the discovery union
 queries it, so container teardown owns a label no podman-compose version
 change can take away. Remaining: networks are created by podman-compose
