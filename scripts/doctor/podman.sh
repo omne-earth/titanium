@@ -152,6 +152,37 @@ EOF
 fi
 
 echo
+echo "== cgroup delegation =="
+# Rootless Podman enforces --cpus/--memory only on cgroups v2 with the cpu and
+# memory controllers delegated to the user; otherwise it warns and silently
+# drops the limit. Pier reports the capability honestly (LIMIT tasks are
+# rejected up front) and verifies enforcement after every start, but only
+# delegation makes limits actually work.
+CG=$(podman info --format '{{.Host.CgroupsVersion}}|{{.Host.CgroupControllers}}' 2>/dev/null)
+CG_VERSION=${CG%%|*}
+CG_CONTROLLERS=${CG#*|}
+DELEGATE_DROPIN=/etc/systemd/system/user@.service.d/pier-delegate.conf
+if [[ "$CG_VERSION" != "v2" ]]; then
+  warn "cgroups ${CG_VERSION:-<unknown>} — rootless Podman cannot enforce cpu/memory limits at all.
+        LIMIT/GUARANTEE tasks are rejected; AUTO tasks run unbounded. Boot with
+        systemd.unified_cgroup_hierarchy=1 to get v2."
+elif [[ "$CG_CONTROLLERS" == *cpu* && "$CG_CONTROLLERS" == *memory* ]]; then
+  ok "cgroups v2 with cpu+memory delegated ($CG_CONTROLLERS) — limits enforce, and Pier verifies them post-start"
+else
+  if [[ $FIX -eq 1 ]]; then
+    sudo mkdir -p "$(dirname "$DELEGATE_DROPIN")"
+    printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | sudo tee "$DELEGATE_DROPIN" >/dev/null
+    sudo systemctl daemon-reload
+    ok "wrote $DELEGATE_DROPIN — log out and back in (or restart user@$(id -u)) for delegation to apply"
+  else
+    warn "cgroups v2 but cpu/memory not delegated (controllers: ${CG_CONTROLLERS:-<none>}) — limits are silently dropped.
+        LIMIT/GUARANTEE tasks are rejected; AUTO tasks run unbounded. Re-run with --fix, or write $DELEGATE_DROPIN:
+          [Service]
+          Delegate=cpu cpuset io memory pids"
+  fi
+fi
+
+echo
 echo "== selinux =="
 if command -v getenforce >/dev/null && [[ "$(getenforce)" == "Enforcing" ]]; then
   ok "SELinux enforcing — bind mounts are tagged bind.selinux=z, Podman relabels them at container start.

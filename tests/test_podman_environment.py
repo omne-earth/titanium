@@ -219,3 +219,151 @@ async def test_chown_to_host_user_is_a_noop_under_rootless():
         Probe.__new__(Probe), "/logs/artifacts", recursive=True
     )
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Cgroup limit verification -- enforce-what-you-declared, host-side
+# ---------------------------------------------------------------------------
+
+
+def _cgroup(tmp_path, cpu_max=None, memory_max=None) -> Path:
+    cg = tmp_path / "libpod-fake.scope"
+    cg.mkdir()
+    if cpu_max is not None:
+        (cg / "cpu.max").write_text(cpu_max + "\n")
+    if memory_max is not None:
+        (cg / "memory.max").write_text(memory_max + "\n")
+    return cg
+
+
+def test_cgroup_problem_none_when_limits_are_applied(tmp_path):
+    cg = _cgroup(tmp_path, cpu_max="200000 100000", memory_max=str(512 * 1024 * 1024))
+    assert PodmanEnvironment._cgroup_limit_problem(cg, "cpu", 2) is None
+    assert PodmanEnvironment._cgroup_limit_problem(cg, "memory", 512) is None
+
+
+def test_cgroup_problem_flags_a_silently_dropped_limit(tmp_path):
+    # Rootless v1 / undelegated / runsc-ignored: the file reads "max".
+    cg = _cgroup(tmp_path, cpu_max="max 100000", memory_max="max")
+    assert "no quota" in PodmanEnvironment._cgroup_limit_problem(cg, "cpu", 2)
+    assert "no limit" in PodmanEnvironment._cgroup_limit_problem(cg, "memory", 512)
+
+
+def test_cgroup_problem_flags_a_wrong_value(tmp_path):
+    cg = _cgroup(tmp_path, memory_max=str(64 * 1024 * 1024))
+    assert "declares 512" in PodmanEnvironment._cgroup_limit_problem(cg, "memory", 512)
+
+
+def test_cgroup_problem_tolerates_unit_rounding(tmp_path):
+    # Compose "512M" parsed decimally lands ~2.4% under the binary value.
+    cg = _cgroup(tmp_path, memory_max=str(512 * 1000 * 1000))
+    assert PodmanEnvironment._cgroup_limit_problem(cg, "memory", 512) is None
+
+
+def test_cgroup_problem_reports_unreadable_files(tmp_path):
+    cg = _cgroup(tmp_path)  # neither file present
+    assert "not readable" in PodmanEnvironment._cgroup_limit_problem(cg, "cpu", 2)
+
+
+@pytest.mark.asyncio
+async def test_limit_mode_fails_the_start_when_enforcement_is_absent(tmp_path):
+    from pier.models.trial.config import ResourceMode
+
+    env = PodmanEnvironment.__new__(PodmanEnvironment)
+    env.environment_name = "unit"
+    env._cpu_resource_mode = ResourceMode.LIMIT
+    env._memory_resource_mode = ResourceMode.LIMIT
+    env._resource_limit_value = lambda resource, auto_mode: (
+        2 if resource == "cpu" else None
+    )
+    cg = _cgroup(tmp_path, cpu_max="max 100000")
+
+    async def fake_dir():
+        return cg
+
+    env._main_cgroup_dir = fake_dir
+    with pytest.raises(RuntimeError, match="not enforced"):
+        await env._verify_resource_limits()
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_warns_instead_of_failing(tmp_path):
+    import logging
+
+    from pier.models.trial.config import ResourceMode
+
+    env = PodmanEnvironment.__new__(PodmanEnvironment)
+    env.environment_name = "unit"
+    env.logger = logging.getLogger("test_auto_mode_warns")
+    env._cpu_resource_mode = ResourceMode.AUTO
+    env._memory_resource_mode = ResourceMode.AUTO
+    env._resource_limit_value = lambda resource, auto_mode: 512
+    cg = _cgroup(tmp_path, cpu_max="max 100000", memory_max="max")
+
+    async def fake_dir():
+        return cg
+
+    env._main_cgroup_dir = fake_dir
+    await env._verify_resource_limits()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_no_declared_limits_skips_container_resolution():
+    env = PodmanEnvironment.__new__(PodmanEnvironment)
+    env._resource_limit_value = lambda resource, auto_mode: None
+
+    async def boom():  # pragma: no cover
+        raise AssertionError("must not resolve the container")
+
+    env._main_cgroup_dir = boom
+    await env._verify_resource_limits()
+
+
+def test_cgroup_fallback_can_fail_closed(monkeypatch):
+    import subprocess
+
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("podman")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setenv("PIER_PODMAN_CGROUP_FAIL_CLOSED", "1")
+    caps = PodmanEnvironment.resource_capabilities()
+    assert (caps.cpu_limit, caps.memory_limit) == (False, False)
+
+
+# ---------------------------------------------------------------------------
+# Exec fidelity -- programmatic execs must be pipe-clean, not pty-mangled
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_programmatic_exec_disables_tty_allocation(monkeypatch, tmp_path):
+    import asyncio as _asyncio
+
+    spawned = []
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_exec(*argv, **kwargs):
+        spawned.append(list(argv))
+        return FakeProcess()
+
+    monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_exec)
+
+    env = PodmanEnvironment.__new__(PodmanEnvironment)
+    env.environment_name = "unit"
+    env.environment_dir = tmp_path
+    env._compose_base = lambda: ["podman-compose"]
+    env._compose_env = lambda: {}
+
+    await env._run_docker_compose_command(["exec", "main", "bash", "-c", "true"])
+    await env._run_docker_compose_command(["exec", "-T", "main", "true"])
+    await env._run_docker_compose_command(["down"])
+
+    assert spawned[0][:3] == ["podman-compose", "exec", "-T"]
+    assert spawned[1].count("-T") == 1
+    assert "-T" not in spawned[2]

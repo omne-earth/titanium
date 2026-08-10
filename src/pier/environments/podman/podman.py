@@ -12,6 +12,9 @@ Environment knobs (all optional):
     PIER_PODMAN_COMPOSE     compose provider + args  (default: podman-compose)
     PIER_PODMAN_IN_POD      --in-pod value           (default: false)
     PIER_PODMAN_RUN_ARGS    extra args for podman run
+    PIER_PODMAN_CGROUP_FAIL_CLOSED
+        report no limit support when cgroup state cannot be queried
+        (default: assume the common modern case and report support)
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from pier.environments.base import ExecResult
 from pier.environments.capabilities import (
@@ -35,6 +39,7 @@ from pier.environments.docker.docker import (
 )
 from pier.environments.podman.podman_unix import PodmanUnixOps
 from pier.models.environment_type import EnvironmentType
+from pier.models.trial.config import ResourceMode
 
 # podman-compose stamps both the docker-compatible labels and its own
 # namespaced set, depending on version; try them in order.
@@ -97,7 +102,15 @@ class PodmanEnvironment(DockerEnvironment):
                 check=True,
             ).stdout.strip()
         except Exception:
-            # Can't tell — assume the common modern case rather than blocking.
+            # Can't tell. The default assumes the common modern case rather
+            # than blocking; deployments that prefer refusal over a possibly
+            # unbounded run opt into failing closed.
+            if os.environ.get("PIER_PODMAN_CGROUP_FAIL_CLOSED", "").lower() in (
+                "1",
+                "true",
+                "yes",
+            ):
+                return False, False
             return True, True
 
         version, _, controllers = info.partition("|")
@@ -175,6 +188,98 @@ class PodmanEnvironment(DockerEnvironment):
                 "storage. Run it manually once, then retry."
             )
 
+    # ---------------------------------------------------- limit verification
+
+    # Verify enforcement, not configuration: Podman accepts `--cpus`/`--memory`
+    # and then, on hosts that cannot enforce them (rootless v1, undelegated
+    # controllers, runsc-in-userns silently ignoring cgroup errors), drops the
+    # limit without failing the start. Reading the container's own cgroup files
+    # from the host is the only signal that reflects what is actually applied.
+    _CGROUP_FS = Path("/sys/fs/cgroup")
+
+    async def start(self, force_build: bool):
+        await super().start(force_build)
+        await self._verify_resource_limits()
+
+    async def _verify_resource_limits(self) -> None:
+        checks: list[tuple[str, ResourceMode, int]] = []
+        cpu_limit = self._resource_limit_value("cpu", auto_mode=ResourceMode.LIMIT)
+        if cpu_limit is not None:
+            checks.append(("cpu", self._cpu_resource_mode, cpu_limit))
+        memory_limit = self._resource_limit_value(
+            "memory", auto_mode=ResourceMode.LIMIT
+        )
+        if memory_limit is not None:
+            checks.append(("memory", self._memory_resource_mode, memory_limit))
+        if not checks:
+            return
+
+        cgroup_dir = await self._main_cgroup_dir()
+        for resource, mode, declared in checks:
+            problem = (
+                self._cgroup_limit_problem(cgroup_dir, resource, declared)
+                if cgroup_dir is not None
+                else "the container's cgroup path could not be resolved"
+            )
+            if problem is None:
+                continue
+            message = (
+                f"Declared {resource} limit is not enforced for "
+                f"{self.environment_name}: {problem}. The workload would run "
+                "unbounded."
+            )
+            if mode in (ResourceMode.LIMIT, ResourceMode.GUARANTEE):
+                raise RuntimeError(message)
+            self.logger.warning(message)
+
+    async def _main_cgroup_dir(self) -> Path | None:
+        try:
+            container = await self.resolve_container("main")
+            result = await self._podman(
+                ["inspect", "--format", "{{.State.CgroupPath}}", container],
+                check=False,
+            )
+        except Exception:
+            return None
+        if result.return_code != 0:
+            return None
+        cgroup_path = (result.stdout or "").strip()
+        if not cgroup_path.startswith("/"):
+            return None
+        cgroup_dir = self._CGROUP_FS / cgroup_path.lstrip("/")
+        return cgroup_dir if cgroup_dir.is_dir() else None
+
+    @staticmethod
+    def _cgroup_limit_problem(
+        cgroup_dir: Path, resource: str, declared: int
+    ) -> str | None:
+        """None when the cgroup enforces *declared*, else what is wrong.
+
+        `declared` is CPUs for cpu and MB for memory. Comparison allows 10%
+        for unit rounding between compose byte-suffix parsing and the kernel;
+        the failure mode being caught is a dropped limit ("max"), not an
+        off-by-a-few-bytes one.
+        """
+        filename = "cpu.max" if resource == "cpu" else "memory.max"
+        try:
+            raw = (cgroup_dir / filename).read_text().strip()
+        except OSError as exc:
+            return f"{filename} is not readable under {cgroup_dir} ({exc})"
+
+        if resource == "cpu":
+            quota, _, period = raw.partition(" ")
+            if quota == "max":
+                return f"cpu.max reports no quota ({raw!r})"
+            actual = int(quota) / int(period or "100000")
+        else:
+            if raw == "max":
+                return "memory.max reports no limit ('max')"
+            actual = int(raw) / (1024 * 1024)
+
+        if abs(actual - declared) > declared * 0.1:
+            return f"{filename} reports {actual:g}, task declares {declared}"
+        return None
+
     async def _chown_to_host_user(self, path: str, recursive: bool = False) -> None:
         """No-op: rootless Podman already maps container root to the invoking
         user, so files arrive correctly owned. The parent's chown to
@@ -227,7 +332,16 @@ class PodmanEnvironment(DockerEnvironment):
     ) -> ExecResult:
         """Parent's contract retargeted at podman-compose, which has no
         ``--project-directory`` — the subprocess cwd stands in for it. Every
-        other flag Pier uses is supported as-is."""
+        other flag Pier uses is supported as-is.
+
+        Programmatic execs run with ``-T``: podman-compose passes ``--tty``
+        otherwise, and pty line discipline rewrites ``\\n`` to ``\\r\\n`` and
+        reorders stream interleaving in captured output. crun tolerates the
+        pty (runsc rejects it outright), but transcripts should be pipe-clean
+        either way. Interactive ``attach`` builds its own command and keeps
+        its TTY."""
+        if command and command[0] == "exec" and "-T" not in command:
+            command = ["exec", "-T", *command[1:]]
         full_command = self._compose_base() + list(command)
 
         process = await asyncio.create_subprocess_exec(
