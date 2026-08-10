@@ -47,19 +47,16 @@ than `docker cp` can).
 
 ### 2.1 Exec runs without a pseudo-TTY (`-T` injected)
 
-Where: `GVisorPodmanEnvironment._run_docker_compose_command`
-(`gvisor/podman.py`) inserts `-T` into every programmatic `exec`.
+Where: inherited from `PodmanEnvironment._run_docker_compose_command`
+(PODMAN.md §2.5), which inserts `-T` into every programmatic `exec`.
 
-Why: `podman-compose exec` passes `--tty` unless told otherwise, Podman
-forwards terminal allocation to the OCI runtime, and runsc's `exec` implements
-no such flag — every exec fails with `flag provided but not defined: -tty`.
-crun tolerates the flag, which is why the plain Podman environment never
-noticed.
-
-This is a *fidelity improvement*, not a weakening — output is pipe-clean
-instead of pty-mangled (contrast PODMAN.md §2.5) — but it is a behavioral
-divergence from the sibling environment worth recording, and interactive
-`attach` deliberately keeps its TTY.
+Why it is load-bearing here rather than cosmetic: `podman-compose exec`
+passes `--tty` unless told otherwise, Podman forwards terminal allocation to
+the OCI runtime, and runsc's `exec` implements no such flag — every exec
+fails with `flag provided but not defined: -tty`. crun merely tolerates the
+pty, so for the plain Podman environment the same injection is a fidelity
+fix; for this one it is a correctness requirement. Interactive `attach`
+deliberately keeps its TTY.
 
 ### 2.2 SELinux at the seam: staging mounts relabeled, process label disabled
 
@@ -177,9 +174,12 @@ controllers *are* delegated, limits are now applied by `runsc` inside a user
 namespace, and gVisor documents that cgroup configuration errors on this path
 may be ignored rather than fatal. The capability report can therefore be
 optimistic in ways the plain Podman environment's isn't — controllers
-detected, limit accepted, enforcement silently absent. Deliberately *not*
-papered over: runsc is registered without `--ignore-cgroups`, so where cgroup
-application fails loudly it fails loudly.
+detected, limit accepted, enforcement silently absent. Two backstops:
+runsc is registered without `--ignore-cgroups`, so where cgroup application
+fails loudly it fails loudly; and the post-start enforcement verification
+inherited from PODMAN.md §2.3 reads `main`'s `cpu.max`/`memory.max` from the
+host after every start, so the silent-ignore path is detected — fatal for
+`LIMIT`/`GUARANTEE` tasks, a logged warning for `AUTO` — rather than trusted.
 
 ### 2.7 Validation posture: rootful- and rootless-verified
 
@@ -238,15 +238,12 @@ pair on, so the private level must be stamped on the staging directories
 directly and granted to the verifier's label — unconfined `main` still
 reaches its own staging, while other labeled containers lose access.
 
-**Cgroup honesty (2.6).** (a) Verify enforcement, not configuration: after
-start, read `main`'s cgroup files host-side
-(`memory.max` / `cpu.max` under the container's cgroup path from
-`podman inspect`) and fail the trial's resource contract if declared limits
-are absent — this converts the silent-ignore path into a detectable one and is
-the same trust posture as runtime verification. (b) Alternatively force
-`resource_capabilities` to `(False, False)` for this environment until (a)
-exists, trading capability for honesty. (c) The systemd transient-scope
-ceiling from PODMAN.md §4 works unchanged as an engine-external backstop.
+**Cgroup honesty (2.6).** Implemented via the inherited post-start
+enforcement verification (PODMAN.md §2.3): declared limits are read back
+from `main`'s cgroup files host-side after every start, so the silent-ignore
+path is detectable and fatal where enforcement was promised. Remaining: the
+systemd transient-scope ceiling from PODMAN.md §4 as an engine-external
+backstop for `AUTO` tasks on hosts that cannot enforce.
 
 **Rootless proof (2.7).** Not code: stand up a rootless, cgroups-v2-delegated,
 SELinux-enforcing host in CI and put `make smoke-gvisor-podman` in the merge

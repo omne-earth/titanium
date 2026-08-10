@@ -108,12 +108,24 @@ report `cpu_limit=False` / `memory_limit=False` in that situation so tasks
 declaring `LIMIT`/`GUARANTEE` enforcement are rejected up front instead of
 running unbounded. When Podman cannot even be queried, the code assumes the
 common modern case (`True, True`) rather than blocking — an availability-over-
-enforcement choice worth knowing about.
+enforcement choice; deployments that prefer refusal set
+`PIER_PODMAN_CGROUP_FAIL_CLOSED=1` to make that fallback report no support.
 
-Blast radius: on affected hosts, tasks in `AUTO` resource mode run with **no
-CPU or memory ceiling at all**. A runaway or adversarial workload is bounded
-only by the host. This is the single largest practical relaxation of this
-environment on older hosts.
+Capability reporting is backed by post-start verification
+(`_verify_resource_limits`, called from `start()`): when a task declares a
+cpu or memory limit, the trusted host resolves `main`'s cgroup directory
+(`podman inspect {{.State.CgroupPath}}` under `/sys/fs/cgroup`) and reads
+`cpu.max` / `memory.max` itself. A file reporting `max` — the signature of a
+silently dropped limit — or a value more than 10% off the declaration fails
+the start for `LIMIT`/`GUARANTEE` tasks and logs a warning for `AUTO` tasks.
+This verifies *enforcement*, not configuration: the same trust posture as
+runtime verification, and the only signal that survives Podman accepting a
+flag it cannot honor.
+
+Blast radius: on affected hosts, tasks in `AUTO` resource mode still run with
+**no CPU or memory ceiling at all** — verification makes the gap loud (and
+fatal where enforcement was promised), not closed. A runaway or adversarial
+`AUTO` workload on such a host remains bounded only by the host.
 
 ### 2.4 Host artifact ownership: chown-to-host-user disabled
 
@@ -132,18 +144,19 @@ not writable/removable by the host user until recovered with
 `podman unshare chown -R 0:0 <dir>`. Trials whose agents run as a non-root
 `default_user` will exhibit this on their artifact directories.
 
-### 2.5 Exec allocates a pseudo-TTY
+### 2.5 Exec fidelity: programmatic execs run without a pseudo-TTY (resolved)
 
-Where: inherited behavior — `podman-compose exec` passes `--tty` unless given
-`-T` (`compose_exec_args` in podman-compose), and
-`DockerEnvironment.exec()` does not pass `-T`.
+Where: `PodmanEnvironment._run_docker_compose_command` injects `-T` into
+every programmatic `exec`; interactive `attach` builds its own command and
+keeps its TTY.
 
-What this changes: every programmatic exec runs on a pty. crun tolerates it,
-so nothing fails, but pty line discipline rewrites `\n` to `\r\n` in captured
-output and merges the streams' interleaving differently than a pipe would.
-This is a *fidelity* relaxation: transcripts and any output-sensitive parsing
-see terminal-mangled bytes. (The gvisor-podman environment already injects
-`-T` because runsc rejects the flag outright; see GVISOR-PODMAN.md §2.1.)
+History: `podman-compose exec` passes `--tty` unless given `-T`, and this
+environment originally inherited that — crun tolerates the pty, so nothing
+failed, but pty line discipline rewrote `\n` to `\r\n` in captured output and
+merged stream interleaving differently than a pipe would, so transcripts saw
+terminal-mangled bytes. The injection that gvisor-podman needed for
+correctness (runsc rejects the flag outright; see GVISOR-PODMAN.md §2.1) is
+now applied here for fidelity, and gvisor-podman inherits it.
 
 ## 3. Inherited and functional limitations (not relaxations)
 
@@ -181,13 +194,14 @@ launches. (b) Relabel externally once at trial-directory creation
 `PIER_PODMAN_SELINUX_RELABEL=none`, keeping label management in trusted host
 code. (c) Generate a scoped policy with udica if categories prove too coarse.
 
-**Resource limits (2.3).** (a) Document and preflight-require cgroups v2 with
-`Delegate=cpu memory` on the user's systemd slice — the doctor script is the
-natural home for the check and the `--fix`. (b) Make the unknown-state
-fallback fail closed (`False, False`) behind a flag for deployments that
-prefer refusal over unbounded runs. (c) For hosts stuck on v1, wrap trials in
-a systemd transient scope (`systemd-run --user --scope -p MemoryMax=…`) as an
-engine-external ceiling; coarser than per-container cgroups but real.
+**Resource limits (2.3).** Post-start enforcement verification, the
+fail-closed fallback flag, and doctor coverage are implemented: the doctor
+reports cgroups version and delegated controllers, and `--fix` writes a
+`Delegate=cpu cpuset io memory pids` drop-in for `user@.service` (applies at
+next login). Remaining: for hosts stuck on v1, wrap trials in a systemd
+transient scope (`systemd-run --user --scope -p MemoryMax=…`) as an
+engine-external ceiling for `AUTO` tasks; coarser than per-container cgroups
+but real.
 
 **Artifact ownership (2.4).** (a) Run a `podman unshare chown -R 0:0` recovery
 pass over artifact directories in `prepare_logs_for_host()` — host-side,
@@ -195,7 +209,7 @@ cheap, and closes the gap for non-root agents without touching in-container
 state. (b) Alternatively `podman cp` artifacts out instead of relying on the
 bind view, since `cp` writes as the invoking user.
 
-**Exec fidelity (2.5).** Inject `-T` into programmatic execs exactly as
-`GVisorPodmanEnvironment._run_docker_compose_command` does — the change is
-three lines, interactive `attach` keeps its TTY, and transcript bytes become
-pipe-clean. Worth doing here independently of gVisor.
+**Exec fidelity (2.5).** Implemented — programmatic execs inject `-T` in
+`PodmanEnvironment._run_docker_compose_command`, transcript bytes are
+pipe-clean, and gvisor-podman inherits the injection instead of carrying its
+own override.
