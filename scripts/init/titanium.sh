@@ -50,10 +50,15 @@ sudo chown "$RUNNER:$RUNNER" "$RUNNER_HOME/.config"
 sudo chown root:root "$RUNNER_HOME/.config/containers"
 sudo chmod 755 "$RUNNER_HOME/.config" "$RUNNER_HOME/.config/containers"
 
-# 6. Filesystem access. Traversal-only (x) on the operator's home, read on
-#    the repo, read-write on the run state; default ACLs keep titanium-written
-#    trial output readable and writable by the operator.
-sudo setfacl -m "u:$RUNNER:x" "$(dirname "$REPO_ROOT")"
+# 6. Filesystem access. Traversal-only (x) on every path component above the
+#    repo — execute without read, so titanium can pass through but not list —
+#    read on the repo, read-write on the run state; default ACLs keep
+#    titanium-written trial output readable and writable by the operator.
+component=$REPO_ROOT
+while [[ "$(dirname "$component")" != "/" ]]; do
+  component=$(dirname "$component")
+  sudo setfacl -m "u:$RUNNER:x" "$component"
+done
 sudo setfacl -R -m "u:$RUNNER:rX" "$REPO_ROOT"
 mkdir -p "$REPO_ROOT/.run"
 sudo setfacl -R -m "u:$RUNNER:rwX" -m "d:u:$RUNNER:rwX" -m "d:u:$OPERATOR:rwX" "$REPO_ROOT/.run"
