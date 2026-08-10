@@ -1,9 +1,11 @@
 """Docker-specific runsc constants, Compose override, and host-side probes.
 
-Everything here is deliberately Docker-specific. The only engine-dependent
-parameter is the CLI binary name, which is threaded through explicitly rather
-than hidden behind an abstraction: Docker is the only implemented engine in this
-slice, and a speculative container-engine framework would be dead weight.
+Everything here is deliberately Docker-specific except where a helper is
+genuinely engine-neutral, in which case the CLI binary name is threaded through
+explicitly rather than hidden behind an abstraction. The places where Podman's
+schema or conventions differ (inspect fields, label namespaces, runtime
+resolution) live in :mod:`pier.environments.gvisor.podman_runtime`; a
+speculative container-engine framework spanning both would be dead weight.
 
 Two gVisor properties drive the design:
 
@@ -49,18 +51,32 @@ STAGE_ROOT = PurePosixPath("/.pier-stage")
 STAGE_IN = STAGE_ROOT / "in"
 STAGE_OUT = STAGE_ROOT / "out"
 
-# ``label=disable`` is deliberately absent. A production-shaped runsc container
-# carrying both staging bind mounts starts and works on an SELinux-enforcing
-# host without it: Docker sees runsc advertise ``selinux: false`` in its OCI
-# runtime features and assigns no process label at all, so there is no label to
-# disable. Adding one would weaken confinement for no benefit.
+# ``label=disable`` is deliberately absent from the shared baseline. A
+# production-shaped runsc container carrying both staging bind mounts starts
+# and works on an SELinux-enforcing host without it under Docker: Docker sees
+# runsc advertise ``selinux: false`` in its OCI runtime features and assigns no
+# process label at all, so there is no label to disable, and adding one would
+# weaken confinement for no benefit. Podman performs no such feature check and
+# labels the process unconditionally, which runsc rejects ("SELinux is not
+# supported"), so the podman flavor opts in via
+# ``write_compose_override(disable_process_label=True)``.
 SECURITY_OPT: list[str] = ["no-new-privileges:true"]
 
-# Engine name -> CLI binary. Docker is the only implemented engine in this PR.
-# Podman is tracked separately ("gVisor podman engine support") and must fail
-# loudly rather than fall back to Docker.
-_IMPLEMENTED_ENGINES: dict[str, str] = {"docker": "docker"}
-_KNOWN_UNIMPLEMENTED_ENGINES = ("podman",)
+# Engine name -> CLI binary. Both engines are implemented, but each is driven
+# by its own environment class (`--env gvisor` for Docker, `--env gvisor-podman`
+# for Podman): the two differ in compose provider, inspect schema and label
+# conventions, so an engine kwarg alone cannot retarget an environment. Which
+# engines a given environment class actually drives is expressed through the
+# ``supported`` argument of :func:`resolve_engine_cli`.
+_ENGINE_CLIS: dict[str, str] = {"docker": "docker", "podman": "podman"}
+
+# Known engine -> the --env selector that drives it. Used to redirect a caller
+# who asked a gVisor environment for an engine that a *different* gVisor
+# environment implements.
+_ENGINE_SELECTORS: dict[str, str] = {
+    "docker": "--env gvisor",
+    "podman": "--env gvisor-podman",
+}
 
 # `docker compose ps -q` prints one container ID per line. Pier merges compose
 # stderr into stdout, so lines are filtered rather than taken wholesale.
@@ -73,33 +89,39 @@ _CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
 COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 
 
-def resolve_engine_cli(engine: str) -> str:
+def resolve_engine_cli(engine: str, supported: tuple[str, ...] = ("docker",)) -> str:
     """Return the CLI binary for *engine*, or fail immediately and clearly.
 
     Called before ``super().__init__()`` so an unsupported engine is rejected at
     construction, long before anything is built or started. There is deliberately
-    no fallback: silently running a "podman" request on Docker would hand back a
-    sandbox with different isolation properties than the caller asked for.
+    no fallback: silently running a "podman" request on Docker (or vice versa)
+    would hand back a sandbox driven by a different engine than the caller
+    asked for.
+
+    *supported* names the engines the calling environment class actually
+    drives. A known engine outside that set is not an error in the request but
+    in the selector, so the failure message redirects to the ``--env`` value
+    that does drive it rather than pretending the engine does not exist.
     """
     name = str(engine).strip().lower()
-    cli = _IMPLEMENTED_ENGINES.get(name)
-    if cli is not None:
-        return cli
-
-    if name in _KNOWN_UNIMPLEMENTED_ENGINES:
-        raise NotImplementedError(
-            f"The gVisor environment does not implement the {engine!r} container "
-            "engine yet. Docker is the only supported engine in this release; "
-            "Podman support is tracked separately as 'gVisor podman engine "
-            "support'. Drop the engine kwarg (or pass engine=docker) to run "
-            "under Docker."
+    cli = _ENGINE_CLIS.get(name)
+    if cli is None:
+        known = ", ".join(sorted(_ENGINE_CLIS))
+        raise ValueError(
+            f"Unknown container engine {engine!r} for the gVisor environment. "
+            f"Supported engines: {known}."
         )
 
-    supported = ", ".join(sorted(_IMPLEMENTED_ENGINES))
-    raise ValueError(
-        f"Unknown container engine {engine!r} for the gVisor environment. "
-        f"Supported engines: {supported}."
-    )
+    if name not in supported:
+        selector = _ENGINE_SELECTORS[name]
+        raise ValueError(
+            f"This gVisor environment does not drive the {engine!r} container "
+            f"engine; select it with {selector} instead. Refusing to continue "
+            "rather than silently driving a different engine than the one "
+            "asked for."
+        )
+
+    return cli
 
 
 def stage_dirs(trial_dir: Path | str) -> tuple[Path, Path]:
@@ -115,6 +137,8 @@ def write_compose_override(
     stage_in: Path,
     stage_out: Path,
     dns: Iterable[str] | None = None,
+    selinux_relabel: str | None = None,
+    disable_process_label: bool = False,
 ) -> Path:
     """Write the Compose override that puts ``main`` under *runtime*.
 
@@ -128,23 +152,47 @@ def write_compose_override(
     (docker/compose#8441), which is why
     :mod:`pier.environments.gvisor.network` verifies and repairs the sandbox's
     resolver after startup rather than trusting this key.
+
+    ``selinux_relabel`` stamps ``bind: {selinux: <value>}`` on both staging
+    mounts. Podman -- unlike Docker -- does not relabel bind mounts, so on an
+    SELinux-enforcing host the sandbox would be denied its own staging
+    directories without it; podman-compose honors the long-form ``selinux``
+    option and Docker Compose has no use for it, so the docker flavor passes
+    None. The value mirrors ``PIER_PODMAN_SELINUX_RELABEL`` semantics ('z' or
+    'Z'); anything else is ignored rather than emitted.
+
+    ``disable_process_label`` appends ``label=disable`` to ``security_opt``.
+    Podman assigns an SELinux process label to every container on an enforcing
+    host without consulting the runtime's advertised features, and runsc
+    aborts on any spec that carries one ("SELinux is not supported"), leaving
+    the container stuck in Created. Docker skips labeling for runsc on its
+    own, so the docker flavor keeps the default False.
     """
+    stage_binds: list[dict[str, object]] = [
+        {
+            "type": "bind",
+            "source": str(Path(stage_in).resolve()),
+            "target": str(STAGE_IN),
+            "read_only": True,
+        },
+        {
+            "type": "bind",
+            "source": str(Path(stage_out).resolve()),
+            "target": str(STAGE_OUT),
+        },
+    ]
+    if selinux_relabel in ("z", "Z"):
+        for bind in stage_binds:
+            bind["bind"] = {"selinux": selinux_relabel}
+
+    security_opt = list(SECURITY_OPT)
+    if disable_process_label:
+        security_opt.append("label=disable")
+
     main: dict[str, object] = {
         "runtime": runtime,
-        "security_opt": list(SECURITY_OPT),
-        "volumes": [
-            {
-                "type": "bind",
-                "source": str(Path(stage_in).resolve()),
-                "target": str(STAGE_IN),
-                "read_only": True,
-            },
-            {
-                "type": "bind",
-                "source": str(Path(stage_out).resolve()),
-                "target": str(STAGE_OUT),
-            },
-        ],
+        "security_opt": security_opt,
+        "volumes": stage_binds,
     }
     nameservers = list(dns or [])
     if nameservers:

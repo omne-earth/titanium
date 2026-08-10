@@ -18,7 +18,7 @@ Pier is a fork. We wanted a smaller, more opinionated base to build on. On top o
 ## What works today
 
 - **Task format:** Harbor-compatible.
-- **Environments:** `docker`, `podman`, `modal`. Per-agent install specs and network allowlists are honored on all three, so installed agents work under `allow_internet = false`.
+- **Environments:** `docker`, `podman`, `gvisor`, `gvisor-podman`, `modal`. Per-agent install specs and network allowlists are honored on all of them, so installed agents work under `allow_internet = false`. The two gVisor environments run the untrusted `main` service under the runsc sandbox with host-side runtime verification — `gvisor` drives Docker, `gvisor-podman` drives rootless Podman through `podman-compose` with no engine socket anywhere in the path (provision with `bash scripts/init/runsc-podman.sh`).
 - **Agents:** `nop`, `oracle`, `claude-code`, `codex`, `cursor-cli`, `gemini-cli`, `opencode`, `mini-swe-agent`. All emit augmented ATIF v1.7.
 - **Datasets:** local Harbor-format task directories via `-p` / `--path`.
 - **CLI:** `pier run`, `pier job`, `pier view`, `pier critique run`, `pier check` / `pier analyze` (vendored from Harbor)

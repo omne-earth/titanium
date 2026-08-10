@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE
 
 -include .secrets
 
@@ -48,7 +48,7 @@ BENCH_N ?= 8
 # run-session plumbing: one tmux session per RUN_DIR, one window per target
 RUN_SESSION := pier-$(subst .,,$(notdir $(RUN_DIR)))
 RUN_TMUX := tmux -L pier
-SESSION_TARGETS ?= smoke-podman smoke-gvisor
+SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 
 .uv:
 	@command -v uv >/dev/null || { \
@@ -74,6 +74,12 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor
 .runsc: .docker
 	@{ command -v runsc && grep -qs '"runsc"' /etc/docker/daemon.json; } >/dev/null 2>&1 \
 		|| bash scripts/init/runsc.sh
+
+# no daemon registration for podman: the binary at a default search path is
+# the whole requirement, and the script probes resolution through podman itself.
+.runsc-podman: .podman
+	@{ command -v runsc; } >/dev/null 2>&1 \
+		|| bash scripts/init/runsc-podman.sh
 
 # toolchain for building wheels that ship no binary for this platform/python.
 .deps:
@@ -129,6 +135,15 @@ smoke-gvisor: sync .runsc $(RUN_TASKS)/$(BACKEND)/smoke-gvisor
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) pier-run PIER_ENV=gvisor PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
 
+smoke-gvisor-podman: sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-podman
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		tests/test_gvisor_podman_environment.py tests/test_environment_factory.py \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=pier.environments.gvisor \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	$(MAKE) pier-run PIER_ENV=gvisor-podman PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
+
 # full-dataset benchmarks (default env podman; run `make init` to provision).
 # BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.
 bench-ds: sync | .sentinel/tasks
@@ -165,7 +180,7 @@ run-session: sync .tmux | .sentinel/tasks
 	echo "  windows: Ctrl-b n / Ctrl-b p to cycle, Ctrl-b w to list"
 	echo "  detach:  Ctrl-b d (runs keep going)"
 
-smoke-env: SESSION_TARGETS = smoke-podman smoke-gvisor
+smoke-env: SESSION_TARGETS = smoke-podman smoke-gvisor smoke-gvisor-podman
 smoke-env: run-session
 
 bench-all: SESSION_TARGETS = bench-ds bench-tb2
