@@ -304,9 +304,14 @@ class PodmanEnvironment(DockerEnvironment):
         # network_mode: none while the egress proxy still needs a net.
         if self.in_pod:
             cmd.append(f"--in-pod={self.in_pod}")
+        # Every container carries a label Pier owns, so teardown discovery
+        # (PODMAN_PROJECT_LABELS in gvisor.podman_runtime) does not depend on
+        # podman-compose continuing to stamp its own namespaces.
+        run_args = f"--label pier.trial={self._project_name}"
         if self.run_args:
-            # '=' required: argparse won't take a '-'-leading token as a value.
-            cmd.append(f"--podman-run-args={self.run_args}")
+            run_args = f"{self.run_args} {run_args}"
+        # '=' required: argparse won't take a '-'-leading token as a value.
+        cmd.append(f"--podman-run-args={run_args}")
 
         cmd.extend(["--project-name", self._project_name])
         for path in self._docker_compose_paths:

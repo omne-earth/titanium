@@ -330,6 +330,7 @@ def test_project_container_discovery_unions_both_label_namespaces(
 ):
     import asyncio
 
+    pier_trial_id = "d" * 12
     cli = RecordingCli(
         {
             "label=com.docker.compose.project": (0, f"{MAIN_ID}\n", ""),
@@ -338,6 +339,9 @@ def test_project_container_discovery_unions_both_label_namespaces(
                 f"{MAIN_ID}\n{PROXY_ID}\n",
                 "",
             ),
+            # Pier's own stamp keeps discovery alive even if podman-compose
+            # drops both of its namespaces (a container only pier labeled).
+            "label=pier.trial": (0, f"{pier_trial_id}\n", ""),
         }
     )
     monkeypatch.setattr(podman_runtime, "_run_cli", cli)
@@ -346,10 +350,11 @@ def test_project_container_discovery_unions_both_label_namespaces(
     ids = asyncio.run(env._query_project_container_ids())
 
     # Union, de-duplicated, order-stable.
-    assert ids == [MAIN_ID, PROXY_ID]
+    assert ids == [MAIN_ID, PROXY_ID, pier_trial_id]
     labels = " ".join(" ".join(call) for call in cli.calls)
     assert "label=com.docker.compose.project=" in labels
     assert "label=io.podman.compose.project=" in labels
+    assert f"label=pier.trial={env._project_name}" in labels
 
 
 def test_project_network_discovery_returns_names(tmp_path, monkeypatch):

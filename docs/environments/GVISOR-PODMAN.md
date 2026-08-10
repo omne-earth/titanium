@@ -162,8 +162,13 @@ the trusted proxy, or a stopped one — as readily as the running `main`;
 label-filtered `podman ps` restores both the service scoping and the
 running-only default the verification contract states. None of these relax a
 boundary; they widen *queries* so the existing fail-closed guarantees keep
-holding on Podman's output formats. The residual trust is that podman-compose
-keeps stamping at least one of the two label namespaces.
+holding on Podman's output formats. Container discovery no longer trusts
+podman-compose's stamping at all: every container also carries a
+``pier.trial=<project>`` label that Pier itself passes through
+``--podman-run-args`` (PodmanEnvironment._compose_base), and the discovery
+union includes it. The residual trust is scoped to *networks*, which
+podman-compose creates without run-args and which therefore still carry only
+the compose namespaces.
 
 ### 2.6 Resource limits: the Podman gap, with a gVisor wrinkle
 
@@ -252,8 +257,9 @@ gate for this environment's files. The smoke task
 inside, and §2.7's one-off run proves it passes on such a host; what's missing
 is making that run continuous rather than on-record-once.
 
-**Label-stamping dependency (2.5).** Belt-and-braces against a future
-podman-compose dropping a namespace: pass an explicit third label
-(`--label pier.trial=<session>`) through podman-compose's per-container label
-pass-through and include it in the discovery union — Pier then owns at least
-one label no upstream version change can take away.
+**Label-stamping dependency (2.5).** Implemented for containers: Pier stamps
+`pier.trial=<project>` through `--podman-run-args` and the discovery union
+queries it, so container teardown owns a label no podman-compose version
+change can take away. Remaining: networks are created by podman-compose
+without run-args, so network discovery still rides the compose namespaces —
+closable by creating the network Pier-side before `up` with its own label.

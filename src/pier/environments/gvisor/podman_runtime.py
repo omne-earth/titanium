@@ -51,9 +51,16 @@ from pier.environments.gvisor.runtime import (
 # Both label namespaces podman-compose stamps on containers and networks,
 # queried in this order. See _PROJECT_LABELS in
 # pier.environments.podman.podman, which handles the same version drift.
+# ``pier.trial`` is Pier's own stamp (PodmanEnvironment._compose_base passes
+# it through --podman-run-args), so container discovery keeps working even if
+# a future podman-compose drops or renames its namespaces. Networks are
+# created by podman-compose without run-args, so network discovery still
+# rides the compose labels alone; a filter on a label no container carries
+# just contributes nothing to the union.
 PODMAN_PROJECT_LABELS: tuple[str, ...] = (
     "com.docker.compose.project",
     "io.podman.compose.project",
+    "pier.trial",
 )
 PODMAN_SERVICE_LABELS: tuple[str, ...] = (
     "com.docker.compose.service",

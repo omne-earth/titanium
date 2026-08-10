@@ -51,8 +51,24 @@ def test_podman_run_args_are_attached_with_equals():
     cmd = PodmanEnvironment._compose_base(
         _stub(run_args="--add-host=host.containers.internal:host-gateway")
     )
-    assert "--podman-run-args=--add-host=host.containers.internal:host-gateway" in cmd
+    joined = next(c for c in cmd if c.startswith("--podman-run-args="))
+    assert "--add-host=host.containers.internal:host-gateway" in joined
     assert "--podman-run-args" not in cmd
+
+
+def test_every_container_carries_the_pier_trial_label():
+    # Teardown discovery must not depend on podman-compose's own label
+    # namespaces surviving version drift; Pier stamps one it owns.
+    cmd = PodmanEnvironment._compose_base(_stub())
+    joined = next(c for c in cmd if c.startswith("--podman-run-args="))
+    assert "--label pier.trial=deepswe-trial-01" in joined
+
+
+def test_pier_trial_label_composes_with_user_run_args():
+    cmd = PodmanEnvironment._compose_base(_stub(run_args="--memory-swappiness=0"))
+    joined = next(c for c in cmd if c.startswith("--podman-run-args="))
+    assert "--memory-swappiness=0" in joined
+    assert "--label pier.trial=deepswe-trial-01" in joined
 
 
 def test_no_option_value_is_a_bare_dash_prefixed_token():
