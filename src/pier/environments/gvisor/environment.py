@@ -81,6 +81,12 @@ class VerificationState(str, Enum):
 class GVisorEnvironment(DockerEnvironment):
     """Docker-backed environment that runs the untrusted service under runsc."""
 
+    # Engines this class actually drives. The Podman flavor
+    # (:class:`~pier.environments.gvisor.podman.GVisorPodmanEnvironment`)
+    # narrows this to ("podman",); resolve_engine_cli redirects a known but
+    # unsupported engine to the --env selector that does drive it.
+    _SUPPORTED_ENGINES: tuple[str, ...] = ("docker",)
+
     def __init__(
         self,
         environment_dir: Path,
@@ -104,7 +110,9 @@ class GVisorEnvironment(DockerEnvironment):
         # to Docker -- a caller who asked for Podman must not silently receive a
         # sandbox with different isolation properties.
         self._engine = str(engine)
-        self._engine_cli = resolve_engine_cli(self._engine)
+        self._engine_cli = resolve_engine_cli(
+            self._engine, supported=self._SUPPORTED_ENGINES
+        )
         self._runtime = str(runtime)
 
         self._dns_option = dns
@@ -118,11 +126,6 @@ class GVisorEnvironment(DockerEnvironment):
         self._stage_in, self._stage_out = stage_dirs(trial_paths.trial_dir)
         self._compose_override_path: Path | None = None
 
-        # The exact Compose project label this instance's containers and
-        # networks carry, computed the same way DockerEnvironment computes it
-        # so fallback cleanup targets precisely (and only) this environment's
-        # own resources -- never another project's, even one sharing a prefix.
-        self._project_name = _sanitize_docker_compose_project_name(session_id)
         # Serializes concurrent or repeated _teardown() calls (a failure
         # inside _ensure_verified() and a failure in start() can both try to
         # tear down the same attempt) so cleanup work is never run twice at
@@ -196,6 +199,20 @@ class GVisorEnvironment(DockerEnvironment):
         return self._runtime
 
     @property
+    def _project_name(self) -> str:
+        """The exact Compose project label this instance's resources carry.
+
+        Computed the same way DockerEnvironment computes it so fallback
+        cleanup targets precisely (and only) this environment's own resources
+        -- never another project's, even one sharing a prefix. A property
+        rather than an attribute assigned in ``__init__`` so the Podman flavor
+        -- whose PodmanEnvironment base declares the identical read-only
+        property for its compose driving -- composes without the instance
+        assignment tripping over the property's missing setter.
+        """
+        return _sanitize_docker_compose_project_name(self.session_id)
+
+    @property
     def project_name(self) -> str:
         """The exact Compose ``--project-name`` this environment's resources carry."""
         return self._project_name
@@ -218,6 +235,55 @@ class GVisorEnvironment(DockerEnvironment):
     @property
     def verification_state(self) -> VerificationState:
         return self._state
+
+    # -- engine seam -------------------------------------------------------
+    #
+    # Every host-side interaction whose schema or semantics differ between
+    # engines goes through one of these hooks. The defaults are the Docker
+    # behavior this class has always had; the Podman flavor overrides exactly
+    # the hooks where Podman differs (inspect fields, label namespaces,
+    # runtime registration) and nothing else. Verification, teardown and the
+    # network logic above them stay engine-agnostic by construction.
+
+    def _assert_runtime_registered(self) -> None:
+        """Fail closed unless the sandbox runtime is available to the engine.
+
+        For Docker the daemon's registry is authoritative; other engines
+        resolve runtimes differently and override this hook.
+        """
+        assert_runtime_registered(self._runtime, self._engine_cli)
+
+    async def _container_runtime(self, container_id: str) -> str | None:
+        """The OCI runtime the engine actually used for *container_id*."""
+        return await container_runtime(container_id, self._engine_cli)
+
+    def _runtime_matches(self, actual: str | None) -> bool:
+        """Whether the engine-reported runtime is the requested sandbox runtime.
+
+        Docker reports exactly the registered name, so equality is the whole
+        test. Engines that may report a resolved path instead override this.
+        """
+        return actual == self._runtime
+
+    async def _container_state(self, container_id: str) -> dict | None:
+        return await container_state(container_id, self._engine_cli)
+
+    async def _container_networks(self, container_id: str) -> dict[str, dict]:
+        return await container_networks(container_id, self._engine_cli)
+
+    async def _query_project_container_ids(self) -> list[str]:
+        """Container IDs (any state) labeled for this exact Compose project."""
+        return await project_container_ids(self._project_name, self._engine_cli)
+
+    async def _query_project_network_ids(self) -> list[str]:
+        """Network references labeled for this exact Compose project."""
+        return await project_network_ids(self._project_name, self._engine_cli)
+
+    async def _remove_containers(self, container_ids: list[str]) -> None:
+        await remove_containers(container_ids, self._engine_cli)
+
+    async def _remove_networks(self, network_ids: list[str]) -> None:
+        await remove_networks(network_ids, self._engine_cli)
 
     # -- validation --------------------------------------------------------
 
@@ -343,7 +409,7 @@ class GVisorEnvironment(DockerEnvironment):
         # daemon cannot actually provide.
         # Deliberately outside the try below: nothing has been created yet, so
         # there is nothing to tear down and no image must be built.
-        assert_runtime_registered(self._runtime, self._engine_cli)
+        self._assert_runtime_registered()
         self._reset_for_new_start_attempt()
         try:
             # Resolver selection happens here too, so an unrestricted-internet
@@ -496,10 +562,10 @@ class GVisorEnvironment(DockerEnvironment):
         inspect`` on the host, which is safe to run against a Created, Exited
         or otherwise unverified container.
         """
-        state = await container_state(container_id, self._engine_cli)
+        state = await self._container_state(container_id)
         status = (state or {}).get("Status", "unknown")
         error = (state or {}).get("Error") or "none"
-        configured = await container_runtime(container_id, self._engine_cli)
+        configured = await self._container_runtime(container_id)
         return (
             f"container ID {container_id}, State.Status={status!r}, "
             f"State.Error={error!r}, configured runtime={configured!r}"
@@ -522,8 +588,8 @@ class GVisorEnvironment(DockerEnvironment):
                 "after startup, so it cannot verify which runtime Docker used."
             )
 
-        actual = await container_runtime(main_id, self._engine_cli)
-        if actual != self._runtime:
+        actual = await self._container_runtime(main_id)
+        if not self._runtime_matches(actual):
             raise RuntimeError(
                 f"Expected the 'main' container to run under {self._runtime!r} "
                 f"but {self._engine_cli} reports {actual!r}. Refusing to run "
@@ -532,16 +598,16 @@ class GVisorEnvironment(DockerEnvironment):
         return main_id
 
     async def _verify_proxy_runtime(self, proxy_id: str) -> None:
-        actual = await container_runtime(proxy_id, self._engine_cli)
+        actual = await self._container_runtime(proxy_id)
         if actual is None:
             raise RuntimeError(
                 "The gVisor environment could not determine the runtime of the "
                 "egress proxy container, so it cannot confirm the proxy stayed "
                 "off the sandbox runtime."
             )
-        if actual == self._runtime:
+        if self._runtime_matches(actual):
             raise RuntimeError(
-                f"The trusted egress proxy is running under {self._runtime!r}, "
+                f"The trusted egress proxy is running under {actual!r}, "
                 "but it must stay on Docker's default runtime: it is the "
                 "component that still needs Docker's embedded DNS to resolve "
                 "allowlisted hosts."
@@ -572,8 +638,8 @@ class GVisorEnvironment(DockerEnvironment):
             return
 
         address = shared_network_ipv4(
-            await container_networks(proxy_id, self._engine_cli),
-            await container_networks(main_id, self._engine_cli),
+            await self._container_networks(proxy_id),
+            await self._container_networks(main_id),
         )
         if not address:
             raise RuntimeError(
@@ -721,24 +787,18 @@ class GVisorEnvironment(DockerEnvironment):
 
             # Containers first: a network cannot be removed while a container
             # from this project is still attached to it.
-            containers = await project_container_ids(
-                self._project_name, self._engine_cli
-            )
+            containers = await self._query_project_container_ids()
             if containers:
-                await remove_containers(containers, self._engine_cli)
+                await self._remove_containers(containers)
 
-            networks = await project_network_ids(self._project_name, self._engine_cli)
+            networks = await self._query_project_network_ids()
             if networks:
-                await remove_networks(networks, self._engine_cli)
+                await self._remove_networks(networks)
 
             self._cleanup_staging()
 
-            remaining_containers = await project_container_ids(
-                self._project_name, self._engine_cli
-            )
-            remaining_networks = await project_network_ids(
-                self._project_name, self._engine_cli
-            )
+            remaining_containers = await self._query_project_container_ids()
+            remaining_networks = await self._query_project_network_ids()
             if remaining_containers or remaining_networks:
                 raise RuntimeError(
                     "The gVisor environment could not fully clean up Compose "
@@ -746,8 +806,8 @@ class GVisorEnvironment(DockerEnvironment):
                     f"{len(remaining_containers)} container(s) "
                     f"{remaining_containers} and {len(remaining_networks)} "
                     f"network(s) {remaining_networks} remain. Remove them "
-                    "manually (e.g. 'docker rm --force <id>' and "
-                    "'docker network rm <id>') before retrying this trial."
+                    f"manually (e.g. '{self._engine_cli} rm --force <id>' and "
+                    f"'{self._engine_cli} network rm <id>') before retrying this trial."
                 )
 
             self._torn_down = True

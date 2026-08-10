@@ -60,6 +60,11 @@ def test_gvisor_is_a_first_class_environment_type():
     assert EnvironmentType("gvisor") is EnvironmentType.GVISOR
 
 
+def test_gvisor_podman_is_a_first_class_environment_type():
+    assert EnvironmentType.GVISOR_PODMAN.value == "gvisor-podman"
+    assert EnvironmentType("gvisor-podman") is EnvironmentType.GVISOR_PODMAN
+
+
 def test_gvisor_environment_reports_its_type():
     assert GVisorEnvironment.type() is EnvironmentType.GVISOR
 
@@ -81,6 +86,51 @@ def test_gvisor_is_registered_in_the_factory():
 
 def test_gvisor_needs_no_optional_extra():
     assert _ENVIRONMENT_REGISTRY[EnvironmentType.GVISOR].pip_extra is None
+
+
+def test_gvisor_podman_is_registered_in_the_factory():
+    from pier.environments.gvisor.podman import GVisorPodmanEnvironment
+
+    assert EnvironmentType.GVISOR_PODMAN in _ENVIRONMENT_REGISTRY
+    assert (
+        _load_environment_class(EnvironmentType.GVISOR_PODMAN)
+        is GVisorPodmanEnvironment
+    )
+    assert _ENVIRONMENT_REGISTRY[EnvironmentType.GVISOR_PODMAN].pip_extra is None
+
+
+def test_env_gvisor_podman_resolves_through_the_factory(tmp_path):
+    from pier.environments.gvisor.podman import GVisorPodmanEnvironment
+
+    env = _from_config(
+        tmp_path, TrialEnvironmentConfig(type=EnvironmentType.GVISOR_PODMAN)
+    )
+
+    assert isinstance(env, GVisorPodmanEnvironment)
+    assert env.type() is EnvironmentType.GVISOR_PODMAN
+    assert env.engine == "podman"
+    assert env.runtime == "runsc"
+
+
+def test_env_gvisor_still_resolves_to_the_docker_flavor(tmp_path):
+    # Adding the podman flavor must not change what --env gvisor selects.
+    from pier.environments.gvisor.podman import GVisorPodmanEnvironment
+
+    env = _from_config(tmp_path, TrialEnvironmentConfig(type=EnvironmentType.GVISOR))
+
+    assert type(env) is GVisorEnvironment
+    assert not isinstance(env, GVisorPodmanEnvironment)
+    assert env.engine == "docker"
+
+
+def test_engine_docker_on_env_gvisor_podman_redirects_to_gvisor(tmp_path):
+    with pytest.raises(ValueError, match=r"--env gvisor\b"):
+        _from_config(
+            tmp_path,
+            TrialEnvironmentConfig(
+                type=EnvironmentType.GVISOR_PODMAN, kwargs={"engine": "docker"}
+            ),
+        )
 
 
 def test_env_gvisor_resolves_through_the_factory(tmp_path):
@@ -128,8 +178,10 @@ def test_engine_docker_is_accepted(tmp_path):
     assert env.engine == "docker"
 
 
-def test_engine_podman_fails_immediately_and_clearly(tmp_path):
-    with pytest.raises(NotImplementedError, match="gVisor podman engine support"):
+def test_engine_podman_on_env_gvisor_redirects_to_gvisor_podman(tmp_path):
+    # The engine exists now, but the docker-flavored environment does not
+    # drive it: the failure must name the selector that does.
+    with pytest.raises(ValueError, match=r"--env gvisor-podman"):
         _from_config(
             tmp_path,
             TrialEnvironmentConfig(
@@ -148,16 +200,27 @@ def test_unknown_engine_fails_immediately_and_clearly(tmp_path):
         )
 
 
-def test_engine_never_silently_falls_back_to_docker():
-    # The seam is thin on purpose, but it must never resolve an unimplemented
-    # engine to the Docker CLI: that would hand back different isolation
-    # properties than the caller asked for.
+def test_engine_never_silently_resolves_outside_its_environment():
+    # The seam is thin on purpose, but it must never resolve an engine a given
+    # environment does not drive: that would hand back a sandbox driven by a
+    # different engine than the caller asked for.
     assert resolve_engine_cli("docker") == "docker"
     assert resolve_engine_cli("DOCKER") == "docker"
+    assert resolve_engine_cli("podman", supported=("podman",)) == "podman"
+    assert resolve_engine_cli("PODMAN", supported=("podman",)) == "podman"
 
-    for engine in ("podman", "containerd", "", "runc"):
-        with pytest.raises((NotImplementedError, ValueError)):
+    # Known engines outside the supported set redirect rather than resolve.
+    with pytest.raises(ValueError, match=r"--env gvisor-podman"):
+        resolve_engine_cli("podman", supported=("docker",))
+    with pytest.raises(ValueError, match=r"--env gvisor"):
+        resolve_engine_cli("docker", supported=("podman",))
+
+    # Unknown engines are rejected regardless of the supported set.
+    for engine in ("containerd", "", "runc"):
+        with pytest.raises(ValueError, match="Unknown container engine"):
             resolve_engine_cli(engine)
+        with pytest.raises(ValueError, match="Unknown container engine"):
+            resolve_engine_cli(engine, supported=("podman",))
 
 
 # ---------------------------------------------------------------------------
