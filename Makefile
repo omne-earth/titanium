@@ -38,7 +38,7 @@ PIER_N ?= 1
 # Trial execution runs as the dedicated runner user whenever that user has
 # been provisioned (scripts/init/titanium.sh) — secure by default, opt-out
 # with RUNNER= (empty). Unprovisioned hosts run as the invoking user.
-RUNNER ?= $(shell id -u titanium >/dev/null 2>&1 && echo titanium)
+RUNNER ?= $(shell test -f /usr/local/share/pier/titanium.provisioned && echo titanium)
 PIER_RUN ?= $(if $(RUNNER),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )$(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR) -n $(PIER_N)
 
 RUN_DIR ?= ./.run
@@ -107,9 +107,11 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 	@rm -rf $@ && mkdir -p $@
 	cp -r $(SMOKE_TASKS) $(wildcard examples/smoke/$(patsubst smoke-%,verify-%-env,$(notdir $@))) $@/
 
-# provisioning the runner user makes RUNNER=titanium the default from here on
+# provisioning the runner user makes RUNNER=titanium the default from here on.
+# stamp-guarded, not user-guarded: a partially provisioned host must re-run
+# the (idempotent) script, and the stamp is only written after its probe.
 .titanium: .podman
-	@id -u titanium >/dev/null 2>&1 || bash scripts/init/titanium.sh
+	@test -f /usr/local/share/pier/titanium.provisioned || bash scripts/init/titanium.sh
 
 init: sync .tmux .podman .runsc .runsc-podman .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
