@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore
 
 -include .secrets
 
@@ -195,6 +195,17 @@ run-list: .tmux
 
 run-close: .tmux
 	@$(RUN_TMUX) kill-session -t $(RUN_SESSION) 2>/dev/null && echo "closed '$(RUN_SESSION)'" || echo "no session '$(RUN_SESSION)'"
+
+# Vendor every image a task set references into one archive; restore it on an
+# airgapped host so nothing is ever pulled. --prebuilt matches
+# PIER_IMAGE_SOURCE=prebuilt deployments.
+IMAGES_TASKS ?= examples/smoke
+IMAGES_ARCHIVE ?= $(RUN_DIR)/images.tar
+images-vendor: sync .podman
+	bash scripts/images/vendor.sh $(IMAGES_TASKS) $(IMAGES_ARCHIVE) $(IMAGES_VENDOR_ARGS)
+
+images-restore: .podman
+	bash scripts/images/restore.sh $(IMAGES_ARCHIVE)
 
 sync: .deps .uv
 	$(UV) sync

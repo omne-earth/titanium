@@ -76,6 +76,13 @@ auditability; image-only tasks are unaffected either way. The remote
 Daytona/Modal environments retain their own prebuilt handling and are
 outside this policy.
 
+Airgapped hosts close the loop with `make images-vendor` /
+`make images-restore` (`scripts/images/`): vendor collects every reference a
+task set can reach — Dockerfile FROMs qualified identically to build
+preparation, image-only tasks' prebuilts, the proxy base, and with
+`--prebuilt` the full prebuilt set — into one `podman save` archive that
+restore loads where nothing can be pulled.
+
 ### 2.2 SELinux relabel: shared `z`, not private `Z`
 
 Where: `PodmanEnvironment._apply_selinux_relabel()` (`podman.py`) stamps
