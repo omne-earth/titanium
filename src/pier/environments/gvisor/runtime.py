@@ -40,7 +40,7 @@ from pathlib import Path, PurePosixPath
 # writes this into /etc/docker/daemon.json).
 DEFAULT_RUNTIME = "runsc"
 
-COMPOSE_OVERRIDE_NAME = "docker-compose-gvisor.json"
+COMPOSE_OVERRIDE_NAME = "compose-gvisor.json"
 
 # Per-trial staging root on the host, under the trial directory so that
 # concurrent trials can never share a path.

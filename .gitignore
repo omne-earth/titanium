@@ -234,3 +234,4 @@ src/pier/viewer/static/
 .run*/
 .secrets
 .artifacts/
+.logs/

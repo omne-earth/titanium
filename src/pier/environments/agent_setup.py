@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import shlex
 from pathlib import Path
@@ -11,6 +12,56 @@ from pier.models.agent.network import NetworkAllowlist
 AGENT_INSTALL_DIR = ".pier-agent-install"
 EGRESS_PROXY_SERVICE = "pier-egress-proxy"
 EGRESS_PROXY_PORT = 8080
+
+# `FROM [--flags…] <image> [AS <stage>]`, case-insensitive like Docker itself.
+_FROM_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*FROM\s+(?:--\S+\s+)*)(?P<image>\S+)(?P<suffix>\s+.*)?$",
+    re.IGNORECASE,
+)
+_AS_STAGE_RE = re.compile(r"\s+AS\s+(?P<stage>\S+)", re.IGNORECASE)
+
+
+def qualify_image_reference(ref: str) -> str:
+    """Return *ref* with an explicit registry, Docker's implied one made real.
+
+    A short name (`ubuntu:24.04`, `alexgshaw/build-pmars`) means Docker Hub in
+    the Dockerfile dialect tasks are written in; emitting `docker.io/…`
+    preserves exactly that meaning while removing the resolution question for
+    engines that would otherwise consult host-global search-registry
+    configuration (PODMAN.md §2.1). Already-qualified references, `scratch`,
+    and variable substitutions pass through untouched.
+    """
+    if not ref or ref.startswith("$") or "${" in ref or ref == "scratch":
+        return ref
+    first, _, rest = ref.partition("/")
+    if rest and ("." in first or ":" in first or first == "localhost"):
+        return ref  # first component is a registry host
+    if "/" in ref:
+        return f"docker.io/{ref}"
+    return f"docker.io/library/{ref}"
+
+
+def qualify_dockerfile_froms(text: str) -> str:
+    """Qualify every `FROM` image in *text*, leaving stage references alone.
+
+    Multi-stage builds may `FROM <stage>` a name declared by an earlier
+    `FROM … AS <stage>`; those are build-local and must never be rewritten
+    into registry references.
+    """
+    stages: set[str] = set()
+    lines = []
+    for line in text.splitlines():
+        match = _FROM_LINE_RE.match(line)
+        if match:
+            image = match.group("image")
+            suffix = match.group("suffix") or ""
+            as_match = _AS_STAGE_RE.search(suffix)
+            if as_match:
+                stages.add(as_match.group("stage").lower())
+            if image.lower() not in stages:
+                line = f"{match.group('prefix')}{qualify_image_reference(image)}{suffix}"
+        lines.append(line)
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
 
 
 def docker_run_command(script: str) -> str:
@@ -56,10 +107,10 @@ def write_agent_dockerfile(
     dockerfile_path = build_dir / "Dockerfile"
 
     if prebuilt_image_name:
-        dockerfile = [f"FROM {prebuilt_image_name}"]
+        dockerfile = [f"FROM {qualify_image_reference(prebuilt_image_name)}"]
     else:
         source = source_environment_dir / "Dockerfile"
-        dockerfile = [source.read_text()]
+        dockerfile = [qualify_dockerfile_froms(source.read_text())]
 
     fingerprint = install.fingerprint()
     dockerfile.extend(
@@ -152,11 +203,12 @@ def write_docker_proxy_compose(
     (proxy_dir / "Dockerfile").write_text(
         "\n".join(
             [
-                "FROM ubuntu:24.04",
-                "RUN apt-get update && "
-                "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
-                "apache2-utils ca-certificates squid && "
-                "rm -rf /var/lib/apt/lists/*",
+                # Alpine over Ubuntu: same squid, same helper paths, a tenth
+                # of the userland exposed to hostile sandbox traffic
+                # (GVISOR.md §2.3 / §4). bash is explicit — the bootstrap and
+                # the /dev/tcp healthcheck both need real bash.
+                "FROM docker.io/library/alpine:3.22",
+                "RUN apk add --no-cache bash squid apache2-utils ca-certificates",
                 "COPY start-squid.sh /usr/local/bin/start-squid.sh",
                 "RUN chmod +x /usr/local/bin/start-squid.sh",
                 'CMD ["bash", "/usr/local/bin/start-squid.sh"]',

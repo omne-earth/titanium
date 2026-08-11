@@ -14,7 +14,7 @@ from pier.environments.modal import ModalEnvironment, _ModalDinD, _ModalDirect
 
 
 def test_docker_proxy_compose_does_not_inject_proxy_env_into_main(tmp_path):
-    path = tmp_path / "docker-compose-egress-proxy.json"
+    path = tmp_path / "compose-egress-proxy.json"
     write_docker_proxy_compose(
         path=path,
         proxy_dir=tmp_path / "proxy",

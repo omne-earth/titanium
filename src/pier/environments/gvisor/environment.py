@@ -23,8 +23,10 @@ agent -- is ever treated as evidence.
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import sys
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from urllib.parse import urlparse
@@ -595,6 +597,7 @@ class GVisorEnvironment(DockerEnvironment):
                 f"but {self._engine_cli} reports {actual!r}. Refusing to run "
                 "untrusted code under an unexpected runtime."
             )
+        self._record_runtime_evidence("main", actual)
         return main_id
 
     async def _verify_proxy_runtime(self, proxy_id: str) -> None:
@@ -612,6 +615,33 @@ class GVisorEnvironment(DockerEnvironment):
                 "component that still needs Docker's embedded DNS to resolve "
                 "allowlisted hosts."
             )
+        self._record_runtime_evidence(EGRESS_PROXY_SERVICE, actual)
+
+    def _record_runtime_evidence(self, service: str, reported: str | None) -> None:
+        """Record the engine-reported runtime identity into the trial dir.
+
+        Post-hoc audit of *which* runtime each trial ran under, written only
+        after the corresponding verification gate passed. The value is the
+        engine's own report verbatim -- a name when the runtime was selected
+        by name, a resolved path when selected by path; re-deriving a path
+        from a name would re-implement the engine's search order, which
+        runtime trust deliberately avoids. Bookkeeping, not a gate: a write
+        failure is logged, never fatal, and the file proves nothing an
+        attacker in the sandbox could forge -- it is host-side output about
+        host-side state.
+        """
+        path = self.trial_paths.trial_dir / "runtime-verification.json"
+        try:
+            evidence = json.loads(path.read_text()) if path.exists() else {}
+            evidence.setdefault("engine", self._engine_cli)
+            evidence.setdefault("expected_runtime", self._runtime)
+            evidence.setdefault("services", {})[service] = {
+                "reported": reported,
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+            }
+            path.write_text(json.dumps(evidence, indent=2))
+        except OSError as exc:
+            self.logger.warning(f"Could not record runtime evidence: {exc}")
 
     def _proxy_token(self) -> str | None:
         """Recover the proxy token from the URL the Docker path already built.

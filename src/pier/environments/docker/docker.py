@@ -21,7 +21,7 @@ from pier.environments.agent_setup import (
 )
 from pier.environments.base import BaseEnvironment, ExecResult
 from pier.environments.capabilities import EnvironmentCapabilities
-from pier.environments.docker import (
+from pier.environments.compose import (
     COMPOSE_BASE_PATH,
     COMPOSE_BUILD_PATH,
     COMPOSE_NO_NETWORK_PATH,
@@ -223,7 +223,7 @@ class DockerEnvironment(BaseEnvironment):
             env_verifier_logs_path=str(self._env_paths.verifier_dir),
             env_agent_logs_path=str(self._env_paths.agent_dir),
             env_artifacts_path=str(self._env_paths.artifacts_dir),
-            prebuilt_image_name=task_env_config.docker_image,
+            prebuilt_image_name=self._effective_docker_image,
         )
         self._use_prebuilt = False
 
@@ -294,6 +294,28 @@ class DockerEnvironment(BaseEnvironment):
     @property
     def _dockerfile_path(self) -> Path:
         return self.environment_dir / "Dockerfile"
+
+    @property
+    def _effective_docker_image(self) -> str | None:
+        """The task's prebuilt image, filtered by the image-source policy.
+
+        Source-first by default: when a task ships both a Dockerfile and a
+        ``docker_image``, the prebuilt is typically a third-party build cache
+        of that same Dockerfile under a mutable tag — an unverifiable
+        supply-chain input, where the Dockerfile (its FROM lines fully
+        qualified at build preparation) is auditable and buildable locally.
+        ``PIER_IMAGE_SOURCE=prebuilt`` opts into the upstream-parity behavior
+        of trusting the prebuilt; tasks that ship only an image are unaffected
+        by the policy because there is nothing else to build from.
+        """
+        image = self.task_env_config.docker_image
+        if not image:
+            return None
+        if os.environ.get("PIER_IMAGE_SOURCE", "source") == "prebuilt":
+            return image
+        if self._dockerfile_path.exists():
+            return None
+        return image
 
     @property
     def _environment_docker_compose_path(self) -> Path:
@@ -372,7 +394,7 @@ class DockerEnvironment(BaseEnvironment):
         if build_dir.exists():
             shutil.rmtree(build_dir)
 
-        if self.task_env_config.docker_image:
+        if self._effective_docker_image:
             build_dir.mkdir(parents=True, exist_ok=True)
         else:
             shutil.copytree(self.environment_dir, build_dir)
@@ -380,7 +402,7 @@ class DockerEnvironment(BaseEnvironment):
         write_agent_dockerfile(
             build_dir=build_dir,
             source_environment_dir=build_dir,
-            prebuilt_image_name=self.task_env_config.docker_image,
+            prebuilt_image_name=self._effective_docker_image,
             install=install,
             user=self._resolve_user(None),
         )
@@ -401,7 +423,7 @@ class DockerEnvironment(BaseEnvironment):
             token, EGRESS_PROXY_SERVICE, EGRESS_PROXY_PORT
         )
         self._egress_proxy_compose_path = write_docker_proxy_compose(
-            path=self.trial_paths.trial_dir / "docker-compose-egress-proxy.json",
+            path=self.trial_paths.trial_dir / "compose-egress-proxy.json",
             proxy_dir=self.trial_paths.trial_dir / "egress-proxy",
             allowlist=allowlist,
             token=token,
@@ -417,7 +439,7 @@ class DockerEnvironment(BaseEnvironment):
 
     def _write_mounts_compose_file(self) -> Path:
         """Write a docker-compose override file with additional volume mounts."""
-        path = self.trial_paths.trial_dir / "docker-compose-mounts.json"
+        path = self.trial_paths.trial_dir / "compose-mounts.json"
         return write_mounts_compose_file(path, self._mounts_json or [])
 
     def _write_resources_compose_file(self) -> Path:
@@ -618,9 +640,9 @@ class DockerEnvironment(BaseEnvironment):
         if self._mounts_json:
             self._mounts_compose_path = self._write_mounts_compose_file()
 
-        self._use_prebuilt = (
+        self._use_prebuilt = bool(
             not force_build
-            and self.task_env_config.docker_image
+            and self._effective_docker_image
             and self.agent_install_spec is None
         )
 
@@ -640,7 +662,7 @@ class DockerEnvironment(BaseEnvironment):
 
         # Validate image OS after build/pull but before container start.
         image_to_check = (
-            self.task_env_config.docker_image
+            self._effective_docker_image
             if self._use_prebuilt
             else self._env_vars.main_image_name
         )

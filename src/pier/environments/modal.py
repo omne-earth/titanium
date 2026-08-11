@@ -25,7 +25,7 @@ from pier.environments.capabilities import (
     EnvironmentCapabilities,
     EnvironmentResourceCapabilities,
 )
-from pier.environments.docker import (
+from pier.environments.compose import (
     COMPOSE_BASE_PATH,
     COMPOSE_BUILD_PATH,
     COMPOSE_NO_NETWORK_PATH,
@@ -405,21 +405,21 @@ class _ModalDinD(_ModalStrategy):
     def _compose_file_flags(self) -> list[str]:
         """Return -f flag pairs for all compose files as a flat list."""
         build_or_prebuilt = (
-            "docker-compose-prebuilt.yaml"
+            "prebuilt.yaml"
             if self._use_prebuilt
-            else "docker-compose-build.yaml"
+            else "build.yaml"
         )
         files = [
-            f"{self._COMPOSE_DIR}/docker-compose-base.yaml",
+            f"{self._COMPOSE_DIR}/base.yaml",
             f"{self._COMPOSE_DIR}/{build_or_prebuilt}",
             f"{self._ENVIRONMENT_DIR}/docker-compose.yaml",
         ]
         if not self._env.task_env_config.allow_internet:
-            files.append(f"{self._COMPOSE_DIR}/docker-compose-no-network.yaml")
+            files.append(f"{self._COMPOSE_DIR}/no-network.yaml")
 
         # Modal sandboxes lack netlink permissions for creating veth pairs,
         # so all services must use the host network namespace.
-        files.append(f"{self._COMPOSE_DIR}/docker-compose-host-network.yaml")
+        files.append(f"{self._COMPOSE_DIR}/host-network.yaml")
 
         flags: list[str] = []
         for f in files:
@@ -549,7 +549,7 @@ class _ModalDinD(_ModalStrategy):
             env.environment_dir, use_prebuilt=self._use_prebuilt
         )
         await self._vm_exec(
-            f"cat > /pier/compose/docker-compose-host-network.yaml << 'YAML'\n"
+            f"cat > /pier/compose/host-network.yaml << 'YAML'\n"
             f"{overlay}\n"
             f"YAML",
             timeout_sec=10,

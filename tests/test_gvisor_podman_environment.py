@@ -330,6 +330,7 @@ def test_project_container_discovery_unions_both_label_namespaces(
 ):
     import asyncio
 
+    pier_trial_id = "d" * 12
     cli = RecordingCli(
         {
             "label=com.docker.compose.project": (0, f"{MAIN_ID}\n", ""),
@@ -338,6 +339,9 @@ def test_project_container_discovery_unions_both_label_namespaces(
                 f"{MAIN_ID}\n{PROXY_ID}\n",
                 "",
             ),
+            # Pier's own stamp keeps discovery alive even if podman-compose
+            # drops both of its namespaces (a container only pier labeled).
+            "label=pier.trial": (0, f"{pier_trial_id}\n", ""),
         }
     )
     monkeypatch.setattr(podman_runtime, "_run_cli", cli)
@@ -346,10 +350,11 @@ def test_project_container_discovery_unions_both_label_namespaces(
     ids = asyncio.run(env._query_project_container_ids())
 
     # Union, de-duplicated, order-stable.
-    assert ids == [MAIN_ID, PROXY_ID]
+    assert ids == [MAIN_ID, PROXY_ID, pier_trial_id]
     labels = " ".join(" ".join(call) for call in cli.calls)
     assert "label=com.docker.compose.project=" in labels
     assert "label=io.podman.compose.project=" in labels
+    assert f"label=pier.trial={env._project_name}" in labels
 
 
 def test_project_network_discovery_returns_names(tmp_path, monkeypatch):
@@ -577,3 +582,51 @@ def test_preflight_never_touches_the_docker_daemon(monkeypatch):
     monkeypatch.setattr("pier.environments.gvisor.runtime.engine_runtimes", boom)
 
     GVisorPodmanEnvironment.preflight()
+
+
+# ---------------------------------------------------------------------------
+# Runtime digest pin -- "the runsc we installed", not "a file named runsc"
+# ---------------------------------------------------------------------------
+
+
+def _pin(tmp_path, content: bytes) -> tuple:
+    import hashlib
+
+    binary = tmp_path / "runsc"
+    binary.write_bytes(content)
+    pin = tmp_path / "runsc.sha3-512"
+    pin.write_text(f"{hashlib.sha3_512(content).hexdigest()}  {binary}\n")
+    return pin, binary
+
+
+def test_digest_pin_passes_for_the_recorded_binary(tmp_path):
+    pin, _ = _pin(tmp_path, b"sentry")
+    podman_runtime.assert_runtime_digest(pin)  # must not raise
+
+
+def test_digest_pin_fails_closed_when_the_binary_changed(tmp_path):
+    pin, binary = _pin(tmp_path, b"sentry")
+    binary.write_bytes(b"impostor")
+    with pytest.raises(RuntimeError, match="changed outside"):
+        podman_runtime.assert_runtime_digest(pin)
+
+
+def test_digest_pin_fails_closed_when_the_binary_vanished(tmp_path):
+    pin, binary = _pin(tmp_path, b"sentry")
+    binary.unlink()
+    with pytest.raises(RuntimeError, match="cannot be read"):
+        podman_runtime.assert_runtime_digest(pin)
+
+
+def test_missing_pin_is_not_an_error(tmp_path):
+    # Hosts provisioned before pinning, or distro-managed runtimes: no pin,
+    # no check -- the resolvability probe still gates.
+    podman_runtime.assert_runtime_digest(tmp_path / "absent.sha3-512")
+
+
+def test_pin_location_honors_the_env_knob(tmp_path, monkeypatch):
+    pin, binary = _pin(tmp_path, b"sentry")
+    binary.write_bytes(b"impostor")
+    monkeypatch.setenv("PIER_RUNSC_DIGEST_PIN", str(pin))
+    with pytest.raises(RuntimeError, match="changed outside"):
+        podman_runtime.assert_runtime_digest()

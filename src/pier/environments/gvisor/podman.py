@@ -35,6 +35,7 @@ import os
 
 from pier.environments.gvisor.environment import GVisorEnvironment
 from pier.environments.gvisor.podman_runtime import (
+    assert_runtime_digest,
     assert_runtime_resolvable,
     container_oci_runtime,
     project_container_ids_podman,
@@ -108,13 +109,17 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
         assert_runtime_resolvable(
             DEFAULT_RUNTIME, os.environ.get("PIER_PODMAN_BIN", "podman")
         )
+        assert_runtime_digest()
 
     # -- engine seam overrides ---------------------------------------------
 
     def _assert_runtime_registered(self) -> None:
         # Podman has no daemon registry to consult; make Podman itself resolve
         # the runtime, which is the same resolution compose-up will perform.
+        # The digest check then proves the binary answering to that name is
+        # still the one the install script recorded.
         assert_runtime_resolvable(self._runtime, self._engine_cli)
+        assert_runtime_digest()
 
     async def _container_runtime(self, container_id: str) -> str | None:
         # Podman's {{.HostConfig.Runtime}} is a compat placeholder ("oci");
@@ -158,24 +163,10 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
 
     # -- compose wiring ----------------------------------------------------
 
-    async def _run_docker_compose_command(
-        self, command: list[str], check: bool = True, timeout_sec: int | None = None
-    ):
-        """Podman-compose driving with pseudo-tty allocation disabled for exec.
-
-        ``podman-compose exec`` passes ``--tty`` unless given ``-T``, and
-        Podman forwards terminal allocation to the OCI runtime, whose ``exec``
-        subcommand in runsc does not implement a ``-tty`` flag -- every exec
-        would fail with "flag provided but not defined: -tty". crun tolerates
-        the flag, which is why the plain podman environment never needed this.
-        Scoped to programmatic execs only: interactive ``attach`` builds its
-        own command and keeps its TTY.
-        """
-        if command and command[0] == "exec" and "-T" not in command:
-            command = ["exec", "-T", *command[1:]]
-        return await super()._run_docker_compose_command(
-            command, check=check, timeout_sec=timeout_sec
-        )
+    # ``-T`` on programmatic execs is inherited from PodmanEnvironment. It is
+    # load-bearing here rather than cosmetic: runsc's exec implements no
+    # ``-tty`` flag, so without it every exec fails with "flag provided but
+    # not defined: -tty" (crun merely tolerates the pty).
 
     def _prepare_gvisor(self) -> None:
         """Write the override with Podman's SELinux relabel option.

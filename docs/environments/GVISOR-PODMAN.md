@@ -47,19 +47,16 @@ than `docker cp` can).
 
 ### 2.1 Exec runs without a pseudo-TTY (`-T` injected)
 
-Where: `GVisorPodmanEnvironment._run_docker_compose_command`
-(`gvisor/podman.py`) inserts `-T` into every programmatic `exec`.
+Where: inherited from `PodmanEnvironment._run_docker_compose_command`
+(PODMAN.md §2.5), which inserts `-T` into every programmatic `exec`.
 
-Why: `podman-compose exec` passes `--tty` unless told otherwise, Podman
-forwards terminal allocation to the OCI runtime, and runsc's `exec` implements
-no such flag — every exec fails with `flag provided but not defined: -tty`.
-crun tolerates the flag, which is why the plain Podman environment never
-noticed.
-
-This is a *fidelity improvement*, not a weakening — output is pipe-clean
-instead of pty-mangled (contrast PODMAN.md §2.5) — but it is a behavioral
-divergence from the sibling environment worth recording, and interactive
-`attach` deliberately keeps its TTY.
+Why it is load-bearing here rather than cosmetic: `podman-compose exec`
+passes `--tty` unless told otherwise, Podman forwards terminal allocation to
+the OCI runtime, and runsc's `exec` implements no such flag — every exec
+fails with `flag provided but not defined: -tty`. crun merely tolerates the
+pty, so for the plain Podman environment the same injection is a fidelity
+fix; for this one it is a correctness requirement. Interactive `attach`
+deliberately keeps its TTY.
 
 ### 2.2 SELinux at the seam: staging mounts relabeled, process label disabled
 
@@ -130,6 +127,22 @@ replacing. The probe also creates (and force-removes, by fixed name) a real
 container per check — writes to Podman storage that vanilla preflights don't
 make.
 
+Hardened since: the install script pins the binary's SHA3-512 at
+`/usr/local/share/pier/runsc.sha3-512` (trust-on-first-use when runsc
+pre-existed; an existing pin is never overwritten, so replacing the binary
+and re-running init cannot silently re-bless it), and
+`assert_runtime_digest` — run at CLI preflight and again at every start —
+fails closed when the pinned binary changed or vanished. A missing pin file
+is the only pass-through, for hosts provisioned before pinning
+(`PIER_RUNSC_DIGEST_PIN` relocates it). The script also registers the
+resolved path in root-owned `/etc/containers/containers.conf.d/
+pier-runsc.conf`, restoring a root-gated registry analogous to Docker's, and
+warns when a user-level `containers.conf` mentions runsc. Residual trust:
+the user-level override is warned about, not blocked (Podman's precedence is
+not Pier's to change), and an attacker with root can rewrite pin and binary
+together — the pin raises "anyone who can write the path" to "root", not to
+impossible.
+
 ### 2.4 Rootless export ownership: staged copies chowned to in-container root
 
 Where: `GVisorPodmanUnixOps._host_owner()` returns `"0:0"`, overriding
@@ -165,8 +178,13 @@ the trusted proxy, or a stopped one — as readily as the running `main`;
 label-filtered `podman ps` restores both the service scoping and the
 running-only default the verification contract states. None of these relax a
 boundary; they widen *queries* so the existing fail-closed guarantees keep
-holding on Podman's output formats. The residual trust is that podman-compose
-keeps stamping at least one of the two label namespaces.
+holding on Podman's output formats. Container discovery no longer trusts
+podman-compose's stamping at all: every container also carries a
+``pier.trial=<project>`` label that Pier itself passes through
+``--podman-run-args`` (PodmanEnvironment._compose_base), and the discovery
+union includes it. The residual trust is scoped to *networks*, which
+podman-compose creates without run-args and which therefore still carry only
+the compose namespaces.
 
 ### 2.6 Resource limits: the Podman gap, with a gVisor wrinkle
 
@@ -177,9 +195,12 @@ controllers *are* delegated, limits are now applied by `runsc` inside a user
 namespace, and gVisor documents that cgroup configuration errors on this path
 may be ignored rather than fatal. The capability report can therefore be
 optimistic in ways the plain Podman environment's isn't — controllers
-detected, limit accepted, enforcement silently absent. Deliberately *not*
-papered over: runsc is registered without `--ignore-cgroups`, so where cgroup
-application fails loudly it fails loudly.
+detected, limit accepted, enforcement silently absent. Two backstops:
+runsc is registered without `--ignore-cgroups`, so where cgroup application
+fails loudly it fails loudly; and the post-start enforcement verification
+inherited from PODMAN.md §2.3 reads `main`'s `cpu.max`/`memory.max` from the
+host after every start, so the silent-ignore path is detected — fatal for
+`LIMIT`/`GUARANTEE` tasks, a logged warning for `AUTO` — rather than trusted.
 
 ### 2.7 Validation posture: rootful- and rootless-verified
 
@@ -214,20 +235,21 @@ narrower UID-mapping and networking support there.
 
 ## 4. Hardening avenues
 
-**Runtime resolution trust (2.3).** (a) Pin by absolute path *and* digest:
-extend `assert_runtime_resolvable` to also stat the resolved binary and
-compare a configured sha256 (the install script already checksums the
-download; persisting that digest gives preflight something to verify against),
-turning "a file named runsc exists" into "the runsc we installed exists".
-(b) Register runsc explicitly in the *system* `containers.conf`
-(`/etc/containers/containers.conf`, root-owned) rather than relying on path
-search, and have the doctor flag a user-level `[engine.runtimes]` override as
-a warning — restoring a root-gated registry analogous to Docker's.
-(c) Cheapest: verify `podman info --format '{{.Host.OCIRuntime.Path}}'`-style
-resolution output in the probe result and log the resolved path into trial
-artifacts, so post-hoc audit can see *which* binary each trial ran under.
+**[PARTIAL] Runtime resolution trust (2.3).** (a) and (b) are implemented (§2.3):
+SHA3-512 pin verified fail-closed at preflight and every start, root-owned
+`containers.conf.d` registration, user-level override warning at init.
+Remaining: block (not just warn on) user-level `[engine.runtimes]` redirects
+by having preflight parse the user config, if the added config-parsing
+surface is ever judged worth it.
+(c) is implemented: after each verification gate passes, the shared gVisor
+base writes `runtime-verification.json` into the trial directory recording
+the engine-reported runtime identity for `main` and the proxy verbatim (a
+name when selected by name, a resolved path when selected by path — Pier
+does not re-derive paths from names, which would re-implement the engine's
+search order). Post-hoc audit sees what the engine claimed each trial ran
+under; (a)'s digest pin is what would upgrade the claim to proof.
 
-**Staging relabel (2.2).** The per-trial MCS-category avenue from PODMAN.md §4
+**[ ] Staging relabel (2.2).** The per-trial MCS-category avenue from PODMAN.md §4
 applies directly and is *more* valuable here: assigning the trial container
 and separate-mode verifier one private category pair and relabeling staging
 with `Z` would remove the only cross-container-readable surface this
@@ -238,25 +260,23 @@ pair on, so the private level must be stamped on the staging directories
 directly and granted to the verifier's label — unconfined `main` still
 reaches its own staging, while other labeled containers lose access.
 
-**Cgroup honesty (2.6).** (a) Verify enforcement, not configuration: after
-start, read `main`'s cgroup files host-side
-(`memory.max` / `cpu.max` under the container's cgroup path from
-`podman inspect`) and fail the trial's resource contract if declared limits
-are absent — this converts the silent-ignore path into a detectable one and is
-the same trust posture as runtime verification. (b) Alternatively force
-`resource_capabilities` to `(False, False)` for this environment until (a)
-exists, trading capability for honesty. (c) The systemd transient-scope
-ceiling from PODMAN.md §4 works unchanged as an engine-external backstop.
+**[DONE] Cgroup honesty (2.6).** Implemented via the inherited post-start
+enforcement verification (PODMAN.md §2.3): declared limits are read back
+from `main`'s cgroup files host-side after every start, so the silent-ignore
+path is detectable and fatal where enforcement was promised. Remaining: the
+systemd transient-scope ceiling from PODMAN.md §4 as an engine-external
+backstop for `AUTO` tasks on hosts that cannot enforce.
 
-**Rootless proof (2.7).** Not code: stand up a rootless, cgroups-v2-delegated,
+**[ ] Rootless proof (2.7).** Not code: stand up a rootless, cgroups-v2-delegated,
 SELinux-enforcing host in CI and put `make smoke-gvisor-podman` in the merge
 gate for this environment's files. The smoke task
 (`examples/smoke/verify-gvisor-podman-env`) already asserts the boundary from
 inside, and §2.7's one-off run proves it passes on such a host; what's missing
 is making that run continuous rather than on-record-once.
 
-**Label-stamping dependency (2.5).** Belt-and-braces against a future
-podman-compose dropping a namespace: pass an explicit third label
-(`--label pier.trial=<session>`) through podman-compose's per-container label
-pass-through and include it in the discovery union — Pier then owns at least
-one label no upstream version change can take away.
+**[PARTIAL] Label-stamping dependency (2.5).** Implemented for containers: Pier stamps
+`pier.trial=<project>` through `--podman-run-args` and the discovery union
+queries it, so container teardown owns a label no podman-compose version
+change can take away. Remaining: networks are created by podman-compose
+without run-args, so network discovery still rides the compose namespaces —
+closable by creating the network Pier-side before `up` with its own label.

@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore
 
 -include .secrets
 
@@ -32,10 +32,19 @@ $(error BACKEND must be 'openrouter' or 'claude', got '$(BACKEND)')
 endif
 
 PIER_JOBS_DIR ?= $(RUN_DIR)/jobs
-PIER_ENV ?= podman
+PIER_ENV ?= gvisor-podman
 PIER_TASK ?= $(TASKS_DEFAULT)
 PIER_N ?= 1
-PIER_RUN ?= $(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR) -n $(PIER_N)
+# Trial execution runs as the dedicated runner user whenever that user has
+# been provisioned (scripts/init/titanium.sh) — secure by default, opt-out
+# with RUNNER= (empty). Unprovisioned hosts run as the invoking user.
+RUNNER ?= $(shell test -f /usr/local/share/pier/titanium.provisioned && echo titanium)
+# Wrapping is scoped to the podman family: the docker-daemon environments
+# need socket access, and the runner must never join the docker group — that
+# group is root-equivalent and would nullify the separation.
+RUNNER_ENVS := podman gvisor-podman
+PIER_WRAP := $(if $(and $(RUNNER),$(filter $(PIER_ENV),$(RUNNER_ENVS))),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )
+PIER_RUN ?= $(PIER_WRAP)$(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR) -n $(PIER_N)
 
 RUN_DIR ?= ./.run
 RUN_TASKS := $(RUN_DIR)/tasks
@@ -64,7 +73,7 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 
 # needs the venv — keep after `sync` in prerequisite lists
 .podman:
-	bash scripts/doctor/podman.sh --fix
+	bash scripts/doctor/podman.sh --bootstrap
 
 # guards keep re-runs sudo-free; the scripts themselves are also idempotent.
 .docker:
@@ -78,7 +87,8 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 # no daemon registration for podman: the binary at a default search path is
 # the whole requirement, and the script probes resolution through podman itself.
 .runsc-podman: .podman
-	@{ command -v runsc; } >/dev/null 2>&1 \
+	@{ command -v runsc && test -f /usr/local/share/pier/runsc.sha3-512 \
+		&& test -f /etc/containers/containers.conf.d/pier-runsc.conf; } >/dev/null 2>&1 \
 		|| bash scripts/init/runsc-podman.sh
 
 # toolchain for building wheels that ship no binary for this platform/python.
@@ -103,8 +113,23 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 	@rm -rf $@ && mkdir -p $@
 	cp -r $(SMOKE_TASKS) $(wildcard examples/smoke/$(patsubst smoke-%,verify-%-env,$(notdir $@))) $@/
 
-init: sync .tmux .podman .runsc | .sentinel/tasks
+# provisioning the runner user makes RUNNER=titanium the default from here on.
+# stamp-guarded, not user-guarded: a partially provisioned host must re-run
+# the (idempotent) script, and the stamp is only written after its probe.
+.titanium: .podman
+	@test -f /usr/local/share/pier/titanium.provisioned || bash scripts/init/titanium.sh
+
+init: sync .tmux .podman .runsc .runsc-podman .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
+
+# utility: run any podman command in the runner's context — trial containers
+# and images live in titanium's storage, invisible to the operator's podman.
+#   make podman-ps ARGS=--all
+#   make podman-images
+#   make podman-logs ARGS=<container>
+# Unprovisioned hosts fall through to the operator's own podman.
+podman-%:
+	@$(if $(RUNNER),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )podman $* $(ARGS)
 
 unit-podman-env: .podman
 	$(PYTEST) tests/test_podman_environment.py
@@ -144,7 +169,7 @@ smoke-gvisor-podman: sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-pod
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) pier-run PIER_ENV=gvisor-podman PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
 
-# full-dataset benchmarks (default env podman; run `make init` to provision).
+# full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
 # BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.
 bench-ds: sync | .sentinel/tasks
 	$(MAKE) pier-run PIER_TASK=$(TASKS_PATH_DS)/tasks PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@ PIER_N=$(BENCH_N)
@@ -195,6 +220,17 @@ run-list: .tmux
 
 run-close: .tmux
 	@$(RUN_TMUX) kill-session -t $(RUN_SESSION) 2>/dev/null && echo "closed '$(RUN_SESSION)'" || echo "no session '$(RUN_SESSION)'"
+
+# Vendor every image a task set references into one archive; restore it on an
+# airgapped host so nothing is ever pulled. --prebuilt matches
+# PIER_IMAGE_SOURCE=prebuilt deployments.
+IMAGES_TASKS ?= examples/smoke
+IMAGES_ARCHIVE ?= $(RUN_DIR)/images.tar
+images-vendor: sync .podman
+	bash scripts/images/vendor.sh $(IMAGES_TASKS) $(IMAGES_ARCHIVE) $(IMAGES_VENDOR_ARGS)
+
+images-restore: .podman
+	bash scripts/images/restore.sh $(IMAGES_ARCHIVE)
 
 sync: .deps .uv
 	$(UV) sync

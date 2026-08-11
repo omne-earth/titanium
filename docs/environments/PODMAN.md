@@ -1,8 +1,8 @@
 # Podman environment: protections, relaxations, and hardening avenues
 
 Selector `--env podman`, class `pier.environments.podman.podman.PodmanEnvironment`,
-provisioned and audited by `scripts/doctor/podman.sh` (report-only by default,
-`--fix` to apply changes). This document records what the vanilla setup
+provisioned and audited by `scripts/doctor/podman.sh` (report-only by default, `--bootstrap` to provision;
+formerly `--fix`). This document records what the vanilla setup
 protects, exactly where Pier relaxed it to make trials run, and concrete ways
 each relaxation could be closed. Its siblings are
 [GVISOR.md](GVISOR.md) and [GVISOR-PODMAN.md](GVISOR-PODMAN.md); the
@@ -27,6 +27,30 @@ uses them.
 invoking user through a user namespace; a full container escape lands as an
 unprivileged user, not host root. Nothing in Pier requires rootful Podman.
 
+**Runner separation (default when provisioned).** "Unprivileged user" is
+only as comforting as what that user owns — without separation it is the
+operator, with their SSH/GPG keys, API secrets, and source tree. Once
+`scripts/init/titanium.sh` has provisioned the `titanium` user, every
+podman-family run (`--env podman`, `--env gvisor-podman`) executes wholly as
+that user by default — opt out with `RUNNER=`; unprovisioned hosts run as
+the invoking user unchanged. The docker-daemon environments are deliberately
+outside the wrapper: they need socket access, and the runner must never
+join the docker group — that group is root-equivalent, and granting it
+would nullify the separation. The
+wrapper (`scripts/titanium-run.sh`) is one systemd scope per run: no
+per-command `sudo -u`, no API socket, so an escape lands as an account
+owning nothing but trial state. Provisioning covers: nologin user,
+subuid range, linger, cgroup delegation, traversal-plus-read ACLs on the
+repo, read-write plus default ACLs on `.run/` so operator and runner both
+keep access to trial output — and a root-owned, runner-unwritable
+`~titanium/.config/containers`, which structurally closes the user-level
+runtime-redirect residual of GVISOR-PODMAN.md §2.3. The environment variables
+a trial legitimately needs (model API credentials, `PIER_*` knobs) are the
+only ones that cross into the scope. Because trial containers and images
+live in the runner's storage — invisible to the operator's own podman —
+`make podman-<subcommand> [ARGS=…]` proxies any podman command into the
+runner's context for inspection (`make podman-ps ARGS=--all`).
+
 **Daemonless lifecycle.** There is no long-lived privileged daemon whose
 compromise affects every container on the host; each `podman` invocation is
 its own process tree under the invoking user.
@@ -40,13 +64,7 @@ no-network mode cannot be undone by pod-level namespace sharing.
 
 ## 2. What was relaxed, where, and why
 
-### 2.1 Short-name resolution: `enforcing` → `permissive` with docker.io search
-
-Where: `scripts/doctor/podman.sh --fix` writes
-`unqualified-search-registries = ["docker.io"]` and
-`short-name-mode = "permissive"` into the user-level
-`~/.config/containers/registries.conf` (which, when present, replaces the
-`/etc` file wholesale).
+### 2.1 Short-name resolution: retired — Pier qualifies its image references
 
 What vanilla does: Podman's compiled-in default is `short-name-mode =
 "enforcing"`, which refuses to resolve an unqualified image name (`FROM
@@ -54,18 +72,40 @@ ubuntu:24.04`) without an interactive registry choice. That is a supply-chain
 protection: a short name is ambiguous across registries, and enforcing mode
 makes the ambiguity a human decision instead of a silent pick.
 
-Why it was relaxed: task Dockerfiles are written in Docker's world, where
-short names always mean Docker Hub, and builds run non-interactively — the
-enforcing prompt is a hard failure inside `podman-compose build`. Permissive
-mode with a single search registry restores Docker's behavior.
+What Pier does now: nothing is relaxed. Short names in the Dockerfile dialect
+tasks are written in mean Docker Hub, so build preparation makes that meaning
+explicit at the byte level (`qualify_image_reference` /
+`qualify_dockerfile_froms` in `agent_setup.py`): the agent-install rewrite
+qualifies every `FROM` in the embedded task Dockerfile (multi-stage
+references and `scratch`/variable bases excluded), the prebuilt image name is
+qualified the same way, and the egress proxy image is written qualified.
+Enforcing mode never fires because no unqualified name reaches Podman on the
+standard flow, and the doctor no longer writes `registries.conf` at all — it
+warns when a previously written permissive configuration is still present.
 
-Blast radius: every unqualified image reference on the host — not just Pier's
-— now resolves to docker.io without confirmation. The pick is pinned to one
-registry, so the classic cross-registry squatting attack is off the table, but
-a typo-squatted or hijacked docker.io name is pulled without the pause
-enforcing mode would have imposed. The `--fix` write also replaces the entire
-effective registries.conf for that user, discarding any distribution-shipped
-mirror or blocking configuration.
+Residual: a task built directly from its own Dockerfile with *no* agent
+install bypasses the rewrite (Pier builds the task's context verbatim), so a
+short name there still resolves — or under enforcing, fails — through host
+configuration. The doctor's message names this case; the fix is qualifying
+the task's own `FROM` line, not relaxing the host.
+
+The same trust posture governs *which* image is used at all
+(`_effective_docker_image`, shared by every local compose-driven
+environment): when a task ships both a Dockerfile and a `docker_image`
+prebuilt, the prebuilt — typically a mutable-tag build cache of that same
+Dockerfile on a third-party registry account — is ignored and the Dockerfile
+is built locally with qualified FROMs. `PIER_IMAGE_SOURCE=prebuilt` opts
+into upstream-parity byte-exactness where that matters more than
+auditability; image-only tasks are unaffected either way. The remote
+Daytona/Modal environments retain their own prebuilt handling and are
+outside this policy.
+
+Airgapped hosts close the loop with `make images-vendor` /
+`make images-restore` (`scripts/images/`): vendor collects every reference a
+task set can reach — Dockerfile FROMs qualified identically to build
+preparation, image-only tasks' prebuilts, the proxy base, and with
+`--prebuilt` the full prebuilt set — into one `podman save` archive that
+restore loads where nothing can be pulled.
 
 ### 2.2 SELinux relabel: shared `z`, not private `Z`
 
@@ -108,12 +148,24 @@ report `cpu_limit=False` / `memory_limit=False` in that situation so tasks
 declaring `LIMIT`/`GUARANTEE` enforcement are rejected up front instead of
 running unbounded. When Podman cannot even be queried, the code assumes the
 common modern case (`True, True`) rather than blocking — an availability-over-
-enforcement choice worth knowing about.
+enforcement choice; deployments that prefer refusal set
+`PIER_PODMAN_CGROUP_FAIL_CLOSED=1` to make that fallback report no support.
 
-Blast radius: on affected hosts, tasks in `AUTO` resource mode run with **no
-CPU or memory ceiling at all**. A runaway or adversarial workload is bounded
-only by the host. This is the single largest practical relaxation of this
-environment on older hosts.
+Capability reporting is backed by post-start verification
+(`_verify_resource_limits`, called from `start()`): when a task declares a
+cpu or memory limit, the trusted host resolves `main`'s cgroup directory
+(`podman inspect {{.State.CgroupPath}}` under `/sys/fs/cgroup`) and reads
+`cpu.max` / `memory.max` itself. A file reporting `max` — the signature of a
+silently dropped limit — or a value more than 10% off the declaration fails
+the start for `LIMIT`/`GUARANTEE` tasks and logs a warning for `AUTO` tasks.
+This verifies *enforcement*, not configuration: the same trust posture as
+runtime verification, and the only signal that survives Podman accepting a
+flag it cannot honor.
+
+Blast radius: on affected hosts, tasks in `AUTO` resource mode still run with
+**no CPU or memory ceiling at all** — verification makes the gap loud (and
+fatal where enforcement was promised), not closed. A runaway or adversarial
+`AUTO` workload on such a host remains bounded only by the host.
 
 ### 2.4 Host artifact ownership: chown-to-host-user disabled
 
@@ -132,18 +184,19 @@ not writable/removable by the host user until recovered with
 `podman unshare chown -R 0:0 <dir>`. Trials whose agents run as a non-root
 `default_user` will exhibit this on their artifact directories.
 
-### 2.5 Exec allocates a pseudo-TTY
+### 2.5 Exec fidelity: programmatic execs run without a pseudo-TTY (resolved)
 
-Where: inherited behavior — `podman-compose exec` passes `--tty` unless given
-`-T` (`compose_exec_args` in podman-compose), and
-`DockerEnvironment.exec()` does not pass `-T`.
+Where: `PodmanEnvironment._run_docker_compose_command` injects `-T` into
+every programmatic `exec`; interactive `attach` builds its own command and
+keeps its TTY.
 
-What this changes: every programmatic exec runs on a pty. crun tolerates it,
-so nothing fails, but pty line discipline rewrites `\n` to `\r\n` in captured
-output and merges the streams' interleaving differently than a pipe would.
-This is a *fidelity* relaxation: transcripts and any output-sensitive parsing
-see terminal-mangled bytes. (The gvisor-podman environment already injects
-`-T` because runsc rejects the flag outright; see GVISOR-PODMAN.md §2.1.)
+History: `podman-compose exec` passes `--tty` unless given `-T`, and this
+environment originally inherited that — crun tolerates the pty, so nothing
+failed, but pty line discipline rewrote `\n` to `\r\n` in captured output and
+merged stream interleaving differently than a pipe would, so transcripts saw
+terminal-mangled bytes. The injection that gvisor-podman needed for
+correctness (runsc rejects the flag outright; see GVISOR-PODMAN.md §2.1) is
+now applied here for fidelity, and gvisor-podman inherits it.
 
 ## 3. Inherited and functional limitations (not relaxations)
 
@@ -158,19 +211,15 @@ label and use `podman cp` (`podman_unix.py`).
 
 ## 4. Hardening avenues
 
-**Short names (2.1).** Several options, combinable. (a) Fully qualify images
-at build preparation: Pier already rewrites the task Dockerfile for agent
-installs (`write_agent_dockerfile`), so rewriting `FROM ubuntu:24.04` to
-`FROM docker.io/library/ubuntu:24.04` there removes the need for permissive
-mode without touching task sources — the cleanest fix, and it lets the doctor
-stop writing registries.conf entirely. (b) Keep `enforcing` and ship a
-per-name alias table in a `registries.conf.d` drop-in instead of a wholesale
-user file, which preserves the distribution's configuration and confines the
-relaxation to exactly the names tasks use. (c) For curated datasets, pin
-digests (`FROM ubuntu@sha256:…`) at dataset-ingestion time, which removes the
-resolution question altogether.
+**[PARTIAL] Short names (2.1).** Qualification at build preparation is implemented and
+the doctor no longer writes `registries.conf` (§2.1). Remaining: (a) extend
+the rewrite to the direct-Dockerfile-without-agent-install path by always
+building from a prepared copy of the task context; (b) for curated datasets,
+pin digests (`FROM ubuntu@sha256:…`) at dataset-ingestion time, which removes
+the resolution question altogether and pairs with the local image-supply
+work.
 
-**SELinux sharing (2.2).** (a) Assign the trial container and its
+**[ ] SELinux sharing (2.2).** (a) Assign the trial container and its
 separate-mode verifier the *same* private MCS category pair
 (`--security-opt label=level:s0:cX,cY`, one pair generated per trial), then
 relabel with `Z`; the two cooperating containers share the data while every
@@ -181,21 +230,22 @@ launches. (b) Relabel externally once at trial-directory creation
 `PIER_PODMAN_SELINUX_RELABEL=none`, keeping label management in trusted host
 code. (c) Generate a scoped policy with udica if categories prove too coarse.
 
-**Resource limits (2.3).** (a) Document and preflight-require cgroups v2 with
-`Delegate=cpu memory` on the user's systemd slice — the doctor script is the
-natural home for the check and the `--fix`. (b) Make the unknown-state
-fallback fail closed (`False, False`) behind a flag for deployments that
-prefer refusal over unbounded runs. (c) For hosts stuck on v1, wrap trials in
-a systemd transient scope (`systemd-run --user --scope -p MemoryMax=…`) as an
-engine-external ceiling; coarser than per-container cgroups but real.
+**[PARTIAL] Resource limits (2.3).** Post-start enforcement verification, the
+fail-closed fallback flag, and doctor coverage are implemented: the doctor
+reports cgroups version and delegated controllers, and `--fix` writes a
+`Delegate=cpu cpuset io memory pids` drop-in for `user@.service` (applies at
+next login). Remaining: for hosts stuck on v1, wrap trials in a systemd
+transient scope (`systemd-run --user --scope -p MemoryMax=…`) as an
+engine-external ceiling for `AUTO` tasks; coarser than per-container cgroups
+but real.
 
-**Artifact ownership (2.4).** (a) Run a `podman unshare chown -R 0:0` recovery
+**[ ] Artifact ownership (2.4).** (a) Run a `podman unshare chown -R 0:0` recovery
 pass over artifact directories in `prepare_logs_for_host()` — host-side,
 cheap, and closes the gap for non-root agents without touching in-container
 state. (b) Alternatively `podman cp` artifacts out instead of relying on the
 bind view, since `cp` writes as the invoking user.
 
-**Exec fidelity (2.5).** Inject `-T` into programmatic execs exactly as
-`GVisorPodmanEnvironment._run_docker_compose_command` does — the change is
-three lines, interactive `attach` keeps its TTY, and transcript bytes become
-pipe-clean. Worth doing here independently of gVisor.
+**[DONE] Exec fidelity (2.5).** Implemented — programmatic execs inject `-T` in
+`PodmanEnvironment._run_docker_compose_command`, transcript bytes are
+pipe-clean, and gvisor-podman inherits the injection instead of carrying its
+own override.

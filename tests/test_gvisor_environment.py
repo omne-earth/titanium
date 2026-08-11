@@ -2059,3 +2059,73 @@ def test_plain_docker_still_allows_host_mounts(tmp_path):
     env = make_plain_env(tmp_path, mounts_json=[_mount("/var/run/docker.sock")])
 
     assert env._mounts_json[0]["source"] == "/var/run/docker.sock"
+
+
+# ---------------------------------------------------------------------------
+# Runtime evidence -- post-hoc audit of which runtime each trial ran under
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_evidence_records_both_services(tmp_path):
+    env = make_gvisor_env(tmp_path)
+    env._record_runtime_evidence("main", "runsc")
+    env._record_runtime_evidence("pier-egress-proxy", "runc")
+
+    evidence = json.loads(
+        (env.trial_paths.trial_dir / "runtime-verification.json").read_text()
+    )
+    assert evidence["engine"] == "docker"
+    assert evidence["expected_runtime"] == "runsc"
+    assert evidence["services"]["main"]["reported"] == "runsc"
+    assert evidence["services"]["pier-egress-proxy"]["reported"] == "runc"
+    assert evidence["services"]["main"]["verified_at"]
+
+
+def test_runtime_evidence_write_failure_is_not_fatal(tmp_path, monkeypatch):
+    # Bookkeeping, not a gate: a full disk must not kill a verified trial.
+    env = make_gvisor_env(tmp_path)
+    monkeypatch.setattr(
+        Path, "write_text", lambda *a, **k: (_ for _ in ()).throw(OSError("full"))
+    )
+    env._record_runtime_evidence("main", "runsc")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Image-source policy -- source-first over third-party prebuilts
+# ---------------------------------------------------------------------------
+
+
+def test_prebuilt_is_ignored_when_the_task_ships_a_dockerfile(tmp_path):
+    # The prebuilt is typically a mutable-tag build cache of that same
+    # Dockerfile on a third-party registry account; the Dockerfile is the
+    # auditable input.
+    env = make_plain_env(
+        tmp_path,
+        task_config=TaskEnvironmentConfig(
+            allow_internet=False, docker_image="alexgshaw/build-pmars:20251031"
+        ),
+    )
+    assert env._effective_docker_image is None
+    assert env._env_vars.prebuilt_image_name is None
+
+
+def test_prebuilt_opt_in_restores_upstream_parity(tmp_path, monkeypatch):
+    monkeypatch.setenv("PIER_IMAGE_SOURCE", "prebuilt")
+    env = make_plain_env(
+        tmp_path,
+        task_config=TaskEnvironmentConfig(
+            allow_internet=False, docker_image="alexgshaw/build-pmars:20251031"
+        ),
+    )
+    assert env._effective_docker_image == "alexgshaw/build-pmars:20251031"
+
+
+def test_image_only_tasks_keep_their_prebuilt(tmp_path):
+    env = make_plain_env(
+        tmp_path,
+        task_config=TaskEnvironmentConfig(
+            allow_internet=False, docker_image="ghcr.io/org/task-img:v1"
+        ),
+    )
+    (env.environment_dir / "Dockerfile").unlink()  # image-only task
+    assert env._effective_docker_image == "ghcr.io/org/task-img:v1"

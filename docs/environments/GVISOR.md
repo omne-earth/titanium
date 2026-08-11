@@ -45,9 +45,11 @@ all); bind-mount sources confined to the trial directory
 refusing to start is the only enforcement point; docker-compose tasks rejected
 outright (`docker_compose=False`) because a task's own compose file could
 re-add `privileged`, `cap_add`, `devices`, or extra volumes that an override
-cannot strip; and connectivity for `allow_internet = true` is *proven* by an
+cannot strip; connectivity for `allow_internet = true` is *proven* by an
 in-sandbox probe after runtime verification, never assumed, with failure
-tearing the environment down rather than downgrading the network mode.
+tearing the environment down rather than downgrading the network mode; and
+each passed verification gate records the engine-reported runtime identity
+into the trial's `runtime-verification.json` for post-hoc audit.
 
 ## 2. What was relaxed, where, and why
 
@@ -185,7 +187,7 @@ save/restore, GPU, and Windows paths are out of scope.
 
 ## 4. Hardening avenues
 
-**Staging channel (2.1).** (a) Quota the writable side: back
+**[ ] Staging channel (2.1).** (a) Quota the writable side: back
 `.gvisor-stage/out` with a size-capped loopback filesystem or project quota at
 trial setup, converting the disk-exhaustion vector into a bounded failure.
 (b) Narrow its lifetime: mount `out` at start but keep the host directory
@@ -200,7 +202,7 @@ framing, which the exec gate already covers), eliminating the persistent
 mount; cost is a rewrite of `transfer.py` and losing `cp -a` fidelity for
 sparse/ownership edge cases.
 
-**DNS (2.2).** (a) Run a per-trial forwarding resolver as a third compose
+**[ ] DNS (2.2).** (a) Run a per-trial forwarding resolver as a third compose
 service under runc (dnsmasq/CoreDNS), point the override's `dns:` and the
 resolv.conf repair at its bridge IP, and let *it* hold the host/upstream
 configuration — the sandbox then sees one per-trial IP, queries become
@@ -212,7 +214,7 @@ infrastructure resolvers implicitly. (c) For deployments that want DNS policy
 even on `allow_internet = true`, reuse the Squid pattern with DNS-over-HTTPS
 upstream inside the helper, giving log-and-block capability per trial.
 
-**Proxy exposure (2.3).** (a) Shrink the proxy image: a distroless or
+**[PARTIAL] Proxy exposure (2.3).** (a) Shrink the proxy image: a distroless or
 Alpine-static Squid (or a purpose-built ~200-line CONNECT proxy) removes most
 of the Ubuntu userland from the attack surface. (b) Confine it further under
 runc: `cap_drop: [ALL]`, `no-new-privileges`, read-only rootfs with tmpfs for
@@ -222,13 +224,13 @@ resolver configuration (the proxy's upstream DNS could use the §(a) helper or
 an explicit `dns:` IP), which the current code forbids only because embedded
 DNS was assumed necessary.
 
-**In-sandbox transfer trust (2.4).** (a) Add content addressing: hash staged
+**[ ] In-sandbox transfer trust (2.4).** (a) Add content addressing: hash staged
 payloads host-side before upload and after export, recording digests in trial
 artifacts so tampering is at least evident, if not preventable. (b) For
 uploads specifically, pre-stage into the *image* at build time where the task
 allows it, shrinking the set of live-transfer operations.
 
-**Host-side depth (2.5).** Add `cap_drop: [ALL]` plus a pids limit to the
+**[ ] Host-side depth (2.5).** Add `cap_drop: [ALL]` plus a pids limit to the
 override's `security_opt`/service config and verify runsc still operates
 (it should — Sentry needs no in-container capabilities); this costs one line
 in `write_compose_override` per knob and buys defense-in-depth against Docker
