@@ -30,9 +30,13 @@ unprivileged user, not host root. Nothing in Pier requires rootful Podman.
 **Runner separation (default when provisioned).** "Unprivileged user" is
 only as comforting as what that user owns — without separation it is the
 operator, with their SSH/GPG keys, API secrets, and source tree. Once
-`scripts/init/titanium.sh` has provisioned the `titanium` user, every make
-target runs the whole trial execution as that user by default — opt out with
-`RUNNER=`; unprovisioned hosts run as the invoking user unchanged. The
+`scripts/init/titanium.sh` has provisioned the `titanium` user, every
+podman-family run (`--env podman`, `--env gvisor-podman`) executes wholly as
+that user by default — opt out with `RUNNER=`; unprovisioned hosts run as
+the invoking user unchanged. The docker-daemon environments are deliberately
+outside the wrapper: they need socket access, and the runner must never
+join the docker group — that group is root-equivalent, and granting it
+would nullify the separation. The
 wrapper (`scripts/titanium-run.sh`) is one systemd scope per run: no
 per-command `sudo -u`, no API socket, so an escape lands as an account
 owning nothing but trial state. Provisioning covers: nologin user,

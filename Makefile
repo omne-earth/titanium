@@ -39,7 +39,12 @@ PIER_N ?= 1
 # been provisioned (scripts/init/titanium.sh) — secure by default, opt-out
 # with RUNNER= (empty). Unprovisioned hosts run as the invoking user.
 RUNNER ?= $(shell test -f /usr/local/share/pier/titanium.provisioned && echo titanium)
-PIER_RUN ?= $(if $(RUNNER),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )$(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR) -n $(PIER_N)
+# Wrapping is scoped to the podman family: the docker-daemon environments
+# need socket access, and the runner must never join the docker group — that
+# group is root-equivalent and would nullify the separation.
+RUNNER_ENVS := podman gvisor-podman
+PIER_WRAP := $(if $(and $(RUNNER),$(filter $(PIER_ENV),$(RUNNER_ENVS))),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )
+PIER_RUN ?= $(PIER_WRAP)$(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR) -n $(PIER_N)
 
 RUN_DIR ?= ./.run
 RUN_TASKS := $(RUN_DIR)/tasks
@@ -82,7 +87,8 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 # no daemon registration for podman: the binary at a default search path is
 # the whole requirement, and the script probes resolution through podman itself.
 .runsc-podman: .podman
-	@{ command -v runsc; } >/dev/null 2>&1 \
+	@{ command -v runsc && test -f /usr/local/share/pier/runsc.sha3-512 \
+		&& test -f /etc/containers/containers.conf.d/pier-runsc.conf; } >/dev/null 2>&1 \
 		|| bash scripts/init/runsc-podman.sh
 
 # toolchain for building wheels that ship no binary for this platform/python.
