@@ -122,6 +122,15 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 init: sync .tmux .podman .runsc .runsc-podman .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
 
+# utility: run any podman command in the runner's context — trial containers
+# and images live in titanium's storage, invisible to the operator's podman.
+#   make podman-ps ARGS=--all
+#   make podman-images
+#   make podman-logs ARGS=<container>
+# Unprovisioned hosts fall through to the operator's own podman.
+podman-%:
+	@$(if $(RUNNER),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )podman $* $(ARGS)
+
 unit-podman-env: .podman
 	$(PYTEST) tests/test_podman_environment.py
 

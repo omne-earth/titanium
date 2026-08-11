@@ -46,7 +46,10 @@ keep access to trial output — and a root-owned, runner-unwritable
 `~titanium/.config/containers`, which structurally closes the user-level
 runtime-redirect residual of GVISOR-PODMAN.md §2.3. The environment variables
 a trial legitimately needs (model API credentials, `PIER_*` knobs) are the
-only ones that cross into the scope.
+only ones that cross into the scope. Because trial containers and images
+live in the runner's storage — invisible to the operator's own podman —
+`make podman-<subcommand> [ARGS=…]` proxies any podman command into the
+runner's context for inspection (`make podman-ps ARGS=--all`).
 
 **Daemonless lifecycle.** There is no long-lived privileged daemon whose
 compromise affects every container on the host; each `podman` invocation is
