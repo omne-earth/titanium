@@ -28,18 +28,22 @@
 set -ueo pipefail
 
 RUNNER=${RUNNER:-titanium}
-RUNNER_HOME=$(getent passwd "$RUNNER" | cut -d: -f6) || {
+id -u "$RUNNER" >/dev/null 2>&1 || {
   echo "runner user '$RUNNER' does not exist — run: bash scripts/init/titanium.sh" >&2
   exit 1
 }
 
-# systemd's ExecStart= requires an absolute executable path. A relative
-# path containing a slash (`.venv/bin/pier`) is resolved against the
-# caller's working directory; a bare name (`podman`) is left to systemd-run's
-# own PATH resolution.
-if [[ "${1:-}" == */* && "${1:-}" != /* ]]; then
-  set -- "$PWD/$1" "${@:2}"
-fi
+# stdout/stderr pass through process-substitution pipes rather than the
+# caller's file descriptors: `systemd-run --pipe` hands the caller's fds to
+# PID 1, which accepts pipes and ttys but rejects regular files ("Failed to
+# start transient service unit: Remote peer disconnected") — and
+# `make smoke-* > log` is precisely that shape.
+exec > >(cat) 2> >(cat >&2)
+
+# systemd's ExecStart= requires an absolute executable path; a relative path
+# containing a slash (`.venv/bin/pier`) is resolved against the caller's
+# working directory. A bare name is left to systemd-run's PATH resolution.
+[[ "${1:-}" == */* && "${1:-}" != /* ]] && set -- "$PWD/$1" "${@:2}"
 
 PASS_VARS=(OPENROUTER_API_KEY PIER_API_BASE PIER_IMAGE_SOURCE PIER_PODMAN_SELINUX_RELABEL PIER_PODMAN_CGROUP_FAIL_CLOSED PIER_RUNSC_DIGEST_PIN)
 setenv_args=()
@@ -47,28 +51,18 @@ for var in "${PASS_VARS[@]}"; do
   [[ -n "${!var:-}" ]] && setenv_args+=("--setenv=$var")
 done
 
-# Two properties of the launch are load-bearing:
-#
-#   * The scope's entrypoint is /usr/bin/bash, not the target binary. On an
-#     SELinux-enforcing host the unit's first exec happens in init_t, which
-#     is not permitted to execute user_home_t files — and a repo venv under
-#     /home is exactly that. Entering through a system shell transitions
-#     into the unconfined service domain, which is; relabeling the venv
-#     instead would not survive the next `uv sync`.
-#
-#   * stdout and stderr pass through process-substitution pipes rather than
-#     the caller's file descriptors. `systemd-run --pipe` hands the caller's
-#     fds to PID 1, which accepts pipes and ttys but rejects regular files
-#     ("Failed to start transient service unit: Remote peer disconnected");
-#     `make smoke-* > log` is precisely that shape.
-sudo --preserve-env="$(IFS=,; echo "${PASS_VARS[*]}")" \
+# The scope's entrypoint is /usr/bin/bash, not the target binary: on an
+# SELinux-enforcing host the unit's first exec happens in init_t, which is
+# not permitted to execute user_home_t files — and a repo venv under /home
+# is exactly that. Entering through a system shell transitions into the
+# unconfined service domain, which is; relabeling the venv instead would
+# not survive the next `uv sync`. HOME needs no --setenv: systemd sets it
+# from the user database for any unit with User=. XDG_RUNTIME_DIR does —
+# systemd deliberately leaves it unset for system units, and rootless
+# podman requires it (valid because the runner lingers).
+exec sudo --preserve-env="$(IFS=,; echo "${PASS_VARS[*]}")" \
   systemd-run --uid="$RUNNER" --pipe --wait --quiet --collect \
   --working-directory="$PWD" \
-  --setenv=HOME="$RUNNER_HOME" \
   --setenv=XDG_RUNTIME_DIR="/run/user/$(id -u "$RUNNER")" \
   "${setenv_args[@]}" \
-  -- /usr/bin/bash -c 'exec "$0" "$@"' "$@" \
-  > >(cat) 2> >(cat >&2)
-status=$?
-wait
-exit "$status"
+  -- /usr/bin/bash -c 'exec "$0" "$@"' "$@"
