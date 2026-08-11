@@ -215,7 +215,7 @@ datasets/
 !examples/tasks/
 *.code-workspace
 ignore/
-!src/pier/tasks/
+!src/titanium/tasks/
 tmp/
 .DS_Store
 .mcp.json
@@ -223,7 +223,7 @@ tmp/
 dataset
 
 # Viewer static files (built in CI)
-src/pier/viewer/static/
+src/titanium/viewer/static/
 
 # Claude Code
 .claude/scheduled_tasks.lock

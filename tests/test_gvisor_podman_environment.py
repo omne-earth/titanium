@@ -13,22 +13,22 @@ from pathlib import Path
 
 import pytest
 
-from pier.environments.gvisor import podman_runtime
-from pier.environments.gvisor.environment import GVisorEnvironment
-from pier.environments.gvisor.podman import (
+from titanium.environments.gvisor import podman_runtime
+from titanium.environments.gvisor.environment import GVisorEnvironment
+from titanium.environments.gvisor.podman import (
     GVisorPodmanEnvironment,
     GVisorPodmanUnixOps,
 )
-from pier.environments.gvisor.podman_runtime import (
+from titanium.environments.gvisor.podman_runtime import (
     assert_runtime_resolvable,
     parse_network_refs,
     runtime_name_matches,
 )
-from pier.environments.gvisor.transfer import GVisorUnixOps
-from pier.environments.podman.podman import PodmanEnvironment
-from pier.models.environment_type import EnvironmentType
-from pier.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
-from pier.models.trial.paths import TrialPaths
+from titanium.environments.gvisor.transfer import GVisorUnixOps
+from titanium.environments.podman.podman import PodmanEnvironment
+from titanium.models.environment_type import EnvironmentType
+from titanium.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
+from titanium.models.trial.paths import TrialPaths
 
 MAIN_ID = "a" * 64
 PROXY_ID = "b" * 64
@@ -105,11 +105,11 @@ def test_defaults_to_the_podman_engine(tmp_path):
     assert env.runtime == "runsc"
 
 
-def test_engine_cli_honors_pier_podman_bin(tmp_path, monkeypatch):
+def test_engine_cli_honors_titanium_podman_bin(tmp_path, monkeypatch):
     # Host-side inspection and cleanup must run the same binary as the compose
     # driving, or verification could interrogate a different Podman than the
     # one that created the containers.
-    monkeypatch.setenv("PIER_PODMAN_BIN", "/opt/podman/bin/podman")
+    monkeypatch.setenv("TITANIUM_PODMAN_BIN", "/opt/podman/bin/podman")
     env = _make_env(tmp_path)
     assert env.podman_bin == "/opt/podman/bin/podman"
     assert env._engine_cli == "/opt/podman/bin/podman"
@@ -318,8 +318,8 @@ def test_service_resolution_fails_closed_on_query_failure(tmp_path, monkeypatch)
 def test_parse_network_refs_accepts_names_and_ids():
     # Podman 4.x `network ls --quiet` prints names; hex-only parsing would
     # make teardown read "nothing to remove" while networks remain.
-    out = "pier_default\n" + "c" * 12 + "\n\n  \n"
-    assert parse_network_refs(out) == ["pier_default", "c" * 12]
+    out = "titanium_default\n" + "c" * 12 + "\n\n  \n"
+    assert parse_network_refs(out) == ["titanium_default", "c" * 12]
     assert parse_network_refs("") == []
     assert parse_network_refs(None) == []
     assert parse_network_refs("two words\n") == []
@@ -330,7 +330,7 @@ def test_project_container_discovery_unions_both_label_namespaces(
 ):
     import asyncio
 
-    pier_trial_id = "d" * 12
+    titanium_trial_id = "d" * 12
     cli = RecordingCli(
         {
             "label=com.docker.compose.project": (0, f"{MAIN_ID}\n", ""),
@@ -339,9 +339,9 @@ def test_project_container_discovery_unions_both_label_namespaces(
                 f"{MAIN_ID}\n{PROXY_ID}\n",
                 "",
             ),
-            # Pier's own stamp keeps discovery alive even if podman-compose
-            # drops both of its namespaces (a container only pier labeled).
-            "label=pier.trial": (0, f"{pier_trial_id}\n", ""),
+            # Titanium's own stamp keeps discovery alive even if podman-compose
+            # drops both of its namespaces (a container only titanium labeled).
+            "label=titanium.trial": (0, f"{titanium_trial_id}\n", ""),
         }
     )
     monkeypatch.setattr(podman_runtime, "_run_cli", cli)
@@ -350,11 +350,11 @@ def test_project_container_discovery_unions_both_label_namespaces(
     ids = asyncio.run(env._query_project_container_ids())
 
     # Union, de-duplicated, order-stable.
-    assert ids == [MAIN_ID, PROXY_ID, pier_trial_id]
+    assert ids == [MAIN_ID, PROXY_ID, titanium_trial_id]
     labels = " ".join(" ".join(call) for call in cli.calls)
     assert "label=com.docker.compose.project=" in labels
     assert "label=io.podman.compose.project=" in labels
-    assert f"label=pier.trial={env._project_name}" in labels
+    assert f"label=titanium.trial={env._project_name}" in labels
 
 
 def test_project_network_discovery_returns_names(tmp_path, monkeypatch):
@@ -440,7 +440,7 @@ def test_start_time_assert_routes_through_the_probe(tmp_path, monkeypatch):
         seen["args"] = (runtime, cli)
 
     monkeypatch.setattr(
-        "pier.environments.gvisor.podman.assert_runtime_resolvable", fake_assert
+        "titanium.environments.gvisor.podman.assert_runtime_resolvable", fake_assert
     )
     env = _make_env(tmp_path)
     env._assert_runtime_registered()
@@ -471,14 +471,14 @@ def test_override_stamps_selinux_relabel_by_default(tmp_path):
 
 
 def test_override_relabel_honors_the_podman_knob(tmp_path, monkeypatch):
-    monkeypatch.setenv("PIER_PODMAN_SELINUX_RELABEL", "Z")
+    monkeypatch.setenv("TITANIUM_PODMAN_SELINUX_RELABEL", "Z")
     env = _make_env(tmp_path)
     env._prepare_gvisor()
     assert all(b["bind"] == {"selinux": "Z"} for b in _override_binds(env))
 
 
 def test_override_relabel_can_be_disabled(tmp_path, monkeypatch):
-    monkeypatch.setenv("PIER_PODMAN_SELINUX_RELABEL", "off")
+    monkeypatch.setenv("TITANIUM_PODMAN_SELINUX_RELABEL", "off")
     env = _make_env(tmp_path)
     env._prepare_gvisor()
     assert all("bind" not in b for b in _override_binds(env))
@@ -556,7 +556,7 @@ def test_preflight_checks_podman_then_the_runtime(monkeypatch):
         classmethod(lambda cls: order.append("podman")),
     )
     monkeypatch.setattr(
-        "pier.environments.gvisor.podman.assert_runtime_resolvable",
+        "titanium.environments.gvisor.podman.assert_runtime_resolvable",
         lambda runtime, cli="podman", timeout_sec=30: order.append(
             ("runtime", runtime)
         ),
@@ -572,14 +572,14 @@ def test_preflight_never_touches_the_docker_daemon(monkeypatch):
     # which asserts against `docker info`; the podman flavor must bypass it.
     monkeypatch.setattr(PodmanEnvironment, "preflight", classmethod(lambda cls: None))
     monkeypatch.setattr(
-        "pier.environments.gvisor.podman.assert_runtime_resolvable",
+        "titanium.environments.gvisor.podman.assert_runtime_resolvable",
         lambda *a, **k: None,
     )
 
     def boom(*args, **kwargs):  # pragma: no cover - the point is it never runs
         raise AssertionError("docker daemon consulted during podman preflight")
 
-    monkeypatch.setattr("pier.environments.gvisor.runtime.engine_runtimes", boom)
+    monkeypatch.setattr("titanium.environments.gvisor.runtime.engine_runtimes", boom)
 
     GVisorPodmanEnvironment.preflight()
 
@@ -627,6 +627,6 @@ def test_missing_pin_is_not_an_error(tmp_path):
 def test_pin_location_honors_the_env_knob(tmp_path, monkeypatch):
     pin, binary = _pin(tmp_path, b"sentry")
     binary.write_bytes(b"impostor")
-    monkeypatch.setenv("PIER_RUNSC_DIGEST_PIN", str(pin))
+    monkeypatch.setenv("TITANIUM_RUNSC_DIGEST_PIN", str(pin))
     with pytest.raises(RuntimeError, match="changed outside"):
         podman_runtime.assert_runtime_digest()

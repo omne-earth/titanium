@@ -2,7 +2,7 @@ schema_version = "1.1"
 artifacts = []
 
 [task]
-name = "pier/verify-podman-env"
+name = "titanium/verify-podman-env"
 description = "In-container probe of the podman environment: egress, DNS, identity, engine-socket absence, write and /proc boundaries."
 keywords = ["smoke", "sandbox", "podman"]
 [[task.authors]]

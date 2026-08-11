@@ -3,18 +3,18 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from pier.agents.installed.opencode import OpenCode
-from pier.environments.capabilities import EnvironmentResourceCapabilities
-from pier.environments.resource_policies import validate_resource_values
-from pier.models.task.config import (
+from titanium.agents.installed.opencode import OpenCode
+from titanium.environments.capabilities import EnvironmentResourceCapabilities
+from titanium.environments.resource_policies import validate_resource_values
+from titanium.models.task.config import (
     EnvironmentConfig as TaskEnvironmentConfig,
 )
-from pier.models.task.config import (
+from titanium.models.task.config import (
     TaskConfig,
     VerifierEnvironmentMode,
 )
-from pier.models.task.verifier_mode import resolve_task_verifier_mode
-from pier.models.trial.config import ResourceMode
+from titanium.models.task.verifier_mode import resolve_task_verifier_mode
+from titanium.models.trial.config import ResourceMode
 
 
 def test_task_toml_dump_uses_blank_lines_between_sections():
@@ -74,7 +74,7 @@ def test_resource_capabilities_reject_unsupported_request():
     caps = EnvironmentResourceCapabilities(cpu_limit=True, memory_limit=True)
 
     with pytest.raises(ValueError, match="CPU resource requests"):
-        from pier.environments.resource_policies import validate_resource_capabilities
+        from titanium.environments.resource_policies import validate_resource_capabilities
 
         validate_resource_capabilities(
             environment_label="docker",

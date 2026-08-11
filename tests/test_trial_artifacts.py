@@ -7,16 +7,16 @@ import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from pier.models.trial.config import ArtifactConfig
-from pier.models.trial.paths import EnvironmentPaths
-from pier.trial.artifact_handler import ArtifactHandler
+from titanium.models.trial.config import ArtifactConfig
+from titanium.models.trial.paths import EnvironmentPaths
+from titanium.trial.artifact_handler import ArtifactHandler
 
 ENV_ARTIFACTS_DIR = EnvironmentPaths().artifacts_dir
 WINDOWS_ARTIFACTS_DIR = EnvironmentPaths.for_windows().artifacts_dir
 
 
 def run_async(fn):
-    """Drive an async test with asyncio.run (pier has no pytest-asyncio)."""
+    """Drive an async test with asyncio.run (titanium has no pytest-asyncio)."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):

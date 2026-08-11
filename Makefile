@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all pier-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore
 
 -include .secrets
 
@@ -10,7 +10,7 @@ UV = $(shell command -v uv || echo $(HOME)/.local/bin/uv)
 
 PY := .venv/bin/python
 PYTEST := .venv/bin/pytest
-PIER := .venv/bin/pier
+TITANIUM := .venv/bin/titanium
 BACKEND ?= openrouter
 
 TASKS_SOURCE_DS := https://github.com/datacurve-ai/deep-swe.git
@@ -21,30 +21,30 @@ TASKS_PATH_TB2 := $(TASKS_DIR)/terminal-bench-2
 TASKS_DEFAULT := $(TASKS_PATH_DS)/tasks/anko-default-function-arguments
 
 ifeq ($(BACKEND),openrouter)
-PIER_AGENT ?= mini-swe-agent
-PIER_MODEL ?= $(OPENROUTER_MODEL)
-export PIER_API_BASE = https://openrouter.ai
+TITANIUM_AGENT ?= mini-swe-agent
+TITANIUM_MODEL ?= $(OPENROUTER_MODEL)
+export TITANIUM_API_BASE = https://openrouter.ai
 else ifeq ($(BACKEND),claude)
-PIER_AGENT ?= claude-code
-PIER_MODEL ?= opus
+TITANIUM_AGENT ?= claude-code
+TITANIUM_MODEL ?= opus
 else
 $(error BACKEND must be 'openrouter' or 'claude', got '$(BACKEND)')
 endif
 
-PIER_JOBS_DIR ?= $(RUN_DIR)/jobs
-PIER_ENV ?= gvisor-podman
-PIER_TASK ?= $(TASKS_DEFAULT)
-PIER_N ?= 1
+TITANIUM_JOBS_DIR ?= $(RUN_DIR)/jobs
+TITANIUM_ENV ?= gvisor-podman
+TITANIUM_TASK ?= $(TASKS_DEFAULT)
+TITANIUM_N ?= 1
 # Trial execution runs as the dedicated runner user whenever that user has
 # been provisioned (scripts/init/titanium.sh) — secure by default, opt-out
 # with RUNNER= (empty). Unprovisioned hosts run as the invoking user.
-RUNNER ?= $(shell test -f /usr/local/share/pier/titanium.provisioned && echo titanium)
+RUNNER ?= $(shell test -f /usr/local/share/titanium/titanium.provisioned && echo titanium)
 # Wrapping is scoped to the podman family: the docker-daemon environments
 # need socket access, and the runner must never join the docker group — that
 # group is root-equivalent and would nullify the separation.
 RUNNER_ENVS := podman gvisor-podman
-PIER_WRAP := $(if $(and $(RUNNER),$(filter $(PIER_ENV),$(RUNNER_ENVS))),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )
-PIER_RUN ?= $(PIER_WRAP)$(PIER) run --agent=$(PIER_AGENT) --model $(PIER_MODEL) --env $(PIER_ENV) --path=$(PIER_TASK) --jobs-dir=$(PIER_JOBS_DIR) -n $(PIER_N)
+TITANIUM_WRAP := $(if $(and $(RUNNER),$(filter $(TITANIUM_ENV),$(RUNNER_ENVS))),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )
+TITANIUM_RUN ?= $(TITANIUM_WRAP)$(TITANIUM) run --agent=$(TITANIUM_AGENT) --model $(TITANIUM_MODEL) --env $(TITANIUM_ENV) --path=$(TITANIUM_TASK) --jobs-dir=$(TITANIUM_JOBS_DIR) -n $(TITANIUM_N)
 
 RUN_DIR ?= ./.run
 RUN_TASKS := $(RUN_DIR)/tasks
@@ -55,8 +55,8 @@ SMOKE_TASKS ?= examples/smoke/fix-git-offline $(TASKS_DIR)/terminal-bench-2/buil
 BENCH_N ?= 8
 
 # run-session plumbing: one tmux session per RUN_DIR, one window per target
-RUN_SESSION := pier-$(subst .,,$(notdir $(RUN_DIR)))
-RUN_TMUX := tmux -L pier
+RUN_SESSION := titanium-$(subst .,,$(notdir $(RUN_DIR)))
+RUN_TMUX := tmux -L titanium
 SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 
 .uv:
@@ -87,8 +87,8 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 # no daemon registration for podman: the binary at a default search path is
 # the whole requirement, and the script probes resolution through podman itself.
 .runsc-podman: .podman
-	@{ command -v runsc && test -f /usr/local/share/pier/runsc.sha3-512 \
-		&& test -f /etc/containers/containers.conf.d/pier-runsc.conf; } >/dev/null 2>&1 \
+	@{ command -v runsc && test -f /usr/local/share/titanium/runsc.sha3-512 \
+		&& test -f /etc/containers/containers.conf.d/titanium-runsc.conf; } >/dev/null 2>&1 \
 		|| bash scripts/init/runsc-podman.sh
 
 # toolchain for building wheels that ship no binary for this platform/python.
@@ -117,7 +117,7 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 # stamp-guarded, not user-guarded: a partially provisioned host must re-run
 # the (idempotent) script, and the stamp is only written after its probe.
 .titanium: .podman
-	@test -f /usr/local/share/pier/titanium.provisioned || bash scripts/init/titanium.sh
+	@test -f /usr/local/share/titanium/titanium.provisioned || bash scripts/init/titanium.sh
 
 init: sync .tmux .podman .runsc .runsc-podman .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
@@ -138,44 +138,44 @@ unit-podman: unit-podman-env
 
 unit-all: unit-podman
 
-pier-run: | .sentinel/tasks
-	mkdir -p "$(PIER_JOBS_DIR)"
-	$(PIER_RUN)
+titanium-run: | .sentinel/tasks
+	mkdir -p "$(TITANIUM_JOBS_DIR)"
+	$(TITANIUM_RUN)
 
 smoke-podman: sync .podman $(RUN_TASKS)/$(BACKEND)/smoke-podman
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
 		tests/test_podman_environment.py \
 		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
-		--self-contained-html --cov=pier.environments.podman \
+		--self-contained-html --cov=titanium.environments.podman \
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
-	$(MAKE) pier-run PIER_ENV=podman PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
+	$(MAKE) titanium-run TITANIUM_ENV=podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 smoke-gvisor: sync .runsc $(RUN_TASKS)/$(BACKEND)/smoke-gvisor
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
 		tests/test_gvisor_environment.py tests/test_gvisor_network_policy.py \
 		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
-		--self-contained-html --cov=pier.environments.gvisor \
+		--self-contained-html --cov=titanium.environments.gvisor \
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
-	$(MAKE) pier-run PIER_ENV=gvisor PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
+	$(MAKE) titanium-run TITANIUM_ENV=gvisor TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 smoke-gvisor-podman: sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-podman
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
 		tests/test_gvisor_podman_environment.py tests/test_environment_factory.py \
 		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
-		--self-contained-html --cov=pier.environments.gvisor \
+		--self-contained-html --cov=titanium.environments.gvisor \
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
-	$(MAKE) pier-run PIER_ENV=gvisor-podman PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
+	$(MAKE) titanium-run TITANIUM_ENV=gvisor-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 # full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
 # BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.
 bench-ds: sync | .sentinel/tasks
-	$(MAKE) pier-run PIER_TASK=$(TASKS_PATH_DS)/tasks PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@ PIER_N=$(BENCH_N)
+	$(MAKE) titanium-run TITANIUM_TASK=$(TASKS_PATH_DS)/tasks TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ TITANIUM_N=$(BENCH_N)
 
 bench-tb2: sync | .sentinel/tasks
-	$(MAKE) pier-run PIER_TASK=$(TASKS_PATH_TB2) PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@ PIER_N=$(BENCH_N)
+	$(MAKE) titanium-run TITANIUM_TASK=$(TASKS_PATH_TB2) TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ TITANIUM_N=$(BENCH_N)
 
 # fan out $(SESSION_TARGETS), one tmux window each, in the RUN_DIR-scoped session
 run-session: sync .tmux | .sentinel/tasks
@@ -223,7 +223,7 @@ run-close: .tmux
 
 # Vendor every image a task set references into one archive; restore it on an
 # airgapped host so nothing is ever pulled. --prebuilt matches
-# PIER_IMAGE_SOURCE=prebuilt deployments.
+# TITANIUM_IMAGE_SOURCE=prebuilt deployments.
 IMAGES_TASKS ?= examples/smoke
 IMAGES_ARCHIVE ?= $(RUN_DIR)/images.tar
 images-vendor: sync .podman

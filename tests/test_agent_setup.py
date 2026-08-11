@@ -1,16 +1,16 @@
 """Unit tests for image-reference qualification in build preparation.
 
-Short names in the Dockerfile dialect mean Docker Hub; Pier makes that
+Short names in the Dockerfile dialect mean Docker Hub; Titanium makes that
 explicit at the byte level so no engine ever consults host-global
-search-registry configuration for Pier-prepared builds (PODMAN.md §2.1/§4).
+search-registry configuration for Titanium-prepared builds (PODMAN.md §2.1/§4).
 """
 
-from pier.environments.agent_setup import (
+from titanium.environments.agent_setup import (
     qualify_dockerfile_froms,
     qualify_image_reference,
     write_agent_dockerfile,
 )
-from pier.models.agent.install import AgentInstallSpec, InstallStep
+from titanium.models.agent.install import AgentInstallSpec, InstallStep
 
 
 def test_short_names_gain_dockers_implied_registry():

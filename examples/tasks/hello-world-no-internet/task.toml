@@ -1,12 +1,12 @@
 version = "1.0"
 
 [task]
-name = "pier/hello-world-no-internet"
+name = "titanium/hello-world-no-internet"
 authors = []
 keywords = []
 
 [metadata]
-author_name = "Pier"
+author_name = "Titanium"
 author_email = "devnull@example.com"
 difficulty = "easy"
 category = "programming"

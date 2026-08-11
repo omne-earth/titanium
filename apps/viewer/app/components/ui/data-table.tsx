@@ -174,7 +174,7 @@ interface DataTableProps<TData, TValue> {
   tableId?: string;
 }
 
-const COLUMN_SIZING_STORAGE_PREFIX = "pier.dataTable.colSizing.";
+const COLUMN_SIZING_STORAGE_PREFIX = "titanium.dataTable.colSizing.";
 
 function readStoredColumnSizing(key: string): ColumnSizingState | null {
   if (typeof window === "undefined") return null;

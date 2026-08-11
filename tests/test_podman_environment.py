@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from pier.environments.factory import _load_environment_class
-from pier.environments.podman.podman import PodmanEnvironment, _which_compose
-from pier.models.environment_type import EnvironmentType
+from titanium.environments.factory import _load_environment_class
+from titanium.environments.podman.podman import PodmanEnvironment, _which_compose
+from titanium.models.environment_type import EnvironmentType
 
 
 def _stub(**overrides):
@@ -56,19 +56,19 @@ def test_podman_run_args_are_attached_with_equals():
     assert "--podman-run-args" not in cmd
 
 
-def test_every_container_carries_the_pier_trial_label():
+def test_every_container_carries_the_titanium_trial_label():
     # Teardown discovery must not depend on podman-compose's own label
-    # namespaces surviving version drift; Pier stamps one it owns.
+    # namespaces surviving version drift; Titanium stamps one it owns.
     cmd = PodmanEnvironment._compose_base(_stub())
     joined = next(c for c in cmd if c.startswith("--podman-run-args="))
-    assert "--label pier.trial=deepswe-trial-01" in joined
+    assert "--label titanium.trial=deepswe-trial-01" in joined
 
 
-def test_pier_trial_label_composes_with_user_run_args():
+def test_titanium_trial_label_composes_with_user_run_args():
     cmd = PodmanEnvironment._compose_base(_stub(run_args="--memory-swappiness=0"))
     joined = next(c for c in cmd if c.startswith("--podman-run-args="))
     assert "--memory-swappiness=0" in joined
-    assert "--label pier.trial=deepswe-trial-01" in joined
+    assert "--label titanium.trial=deepswe-trial-01" in joined
 
 
 def test_no_option_value_is_a_bare_dash_prefixed_token():
@@ -144,7 +144,7 @@ def test_bind_mounts_are_tagged_for_selinux_relabel():
 
 
 def test_selinux_relabel_respects_an_explicit_opt_out(monkeypatch):
-    monkeypatch.setenv("PIER_PODMAN_SELINUX_RELABEL", "none")
+    monkeypatch.setenv("TITANIUM_PODMAN_SELINUX_RELABEL", "none")
     env = types.SimpleNamespace(
         _mounts_json=[{"type": "bind", "source": "/a", "target": "/b"}]
     )
@@ -187,7 +187,7 @@ def compose_dirs(monkeypatch, tmp_path):
 
 
 def test_which_compose_prefers_path(compose_dirs):
-    # PATH wins so PIER_PODMAN_COMPOSE overrides behave like normal lookups.
+    # PATH wins so TITANIUM_PODMAN_COMPOSE overrides behave like normal lookups.
     path_dir, venv_bin = compose_dirs
     on_path = _fake_exe(path_dir, "podman-compose")
     _fake_exe(venv_bin, "podman-compose")
@@ -195,7 +195,7 @@ def test_which_compose_prefers_path(compose_dirs):
 
 
 def test_which_compose_falls_back_to_interpreter_bin_dir(compose_dirs):
-    # .venv/bin is not on PATH when pier is invoked as `.venv/bin/pier`.
+    # .venv/bin is not on PATH when titanium is invoked as `.venv/bin/titanium`.
     _, venv_bin = compose_dirs
     in_venv = _fake_exe(venv_bin, "podman-compose")
     assert _which_compose("podman-compose") == str(in_venv)
@@ -206,7 +206,7 @@ def test_which_compose_returns_none_when_absent_everywhere(compose_dirs):
 
 
 def test_preflight_finds_compose_next_to_interpreter(monkeypatch, compose_dirs):
-    # Must not demand an install when podman-compose is in pier's own venv.
+    # Must not demand an install when podman-compose is in titanium's own venv.
     path_dir, venv_bin = compose_dirs
     _fake_exe(path_dir, "podman")
     _fake_exe(venv_bin, "podman-compose")
@@ -283,7 +283,7 @@ def test_cgroup_problem_reports_unreadable_files(tmp_path):
 
 @pytest.mark.asyncio
 async def test_limit_mode_fails_the_start_when_enforcement_is_absent(tmp_path):
-    from pier.models.trial.config import ResourceMode
+    from titanium.models.trial.config import ResourceMode
 
     env = PodmanEnvironment.__new__(PodmanEnvironment)
     env.environment_name = "unit"
@@ -306,7 +306,7 @@ async def test_limit_mode_fails_the_start_when_enforcement_is_absent(tmp_path):
 async def test_auto_mode_warns_instead_of_failing(tmp_path):
     import logging
 
-    from pier.models.trial.config import ResourceMode
+    from titanium.models.trial.config import ResourceMode
 
     env = PodmanEnvironment.__new__(PodmanEnvironment)
     env.environment_name = "unit"
@@ -342,7 +342,7 @@ def test_cgroup_fallback_can_fail_closed(monkeypatch):
         raise FileNotFoundError("podman")
 
     monkeypatch.setattr(subprocess, "run", boom)
-    monkeypatch.setenv("PIER_PODMAN_CGROUP_FAIL_CLOSED", "1")
+    monkeypatch.setenv("TITANIUM_PODMAN_CGROUP_FAIL_CLOSED", "1")
     caps = PodmanEnvironment.resource_capabilities()
     assert (caps.cpu_limit, caps.memory_limit) == (False, False)
 

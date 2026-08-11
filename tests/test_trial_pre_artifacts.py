@@ -13,12 +13,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from pier.models.task.paths import TaskPaths
-from pier.trial.trial import Trial
+from titanium.models.task.paths import TaskPaths
+from titanium.trial.trial import Trial
 
 
 def run_async(fn):
-    """Drive an async test with asyncio.run (pier has no pytest-asyncio)."""
+    """Drive an async test with asyncio.run (titanium has no pytest-asyncio)."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -52,10 +52,10 @@ async def test_script_is_uploaded_and_executed(tmp_path: Path) -> None:
     await Trial._run_pre_artifacts_script(trial)
     trial._environment.upload_file.assert_awaited_once_with(
         source_path=tmp_path / "pre_artifacts.sh",
-        target_path="/tmp/.pier-pre-artifacts.sh",
+        target_path="/tmp/.titanium-pre-artifacts.sh",
     )
     trial._environment.exec.assert_awaited_once_with(
-        command="bash /tmp/.pier-pre-artifacts.sh",
+        command="bash /tmp/.titanium-pre-artifacts.sh",
         timeout_sec=300,
     )
 

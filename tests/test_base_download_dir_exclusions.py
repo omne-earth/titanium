@@ -10,15 +10,15 @@ from uuid import UUID
 
 import pytest
 
-from pier.environments.base import BaseEnvironment, ExecResult
-from pier.environments.capabilities import EnvironmentCapabilities
-from pier.models.environment_type import EnvironmentType
-from pier.models.task.config import EnvironmentConfig, TaskOS
-from pier.models.trial.paths import TrialPaths
+from titanium.environments.base import BaseEnvironment, ExecResult
+from titanium.environments.capabilities import EnvironmentCapabilities
+from titanium.models.environment_type import EnvironmentType
+from titanium.models.task.config import EnvironmentConfig, TaskOS
+from titanium.models.trial.paths import TrialPaths
 
 
 def run_async(fn):
-    """Drive an async test with asyncio.run (pier has no pytest-asyncio)."""
+    """Drive an async test with asyncio.run (titanium has no pytest-asyncio)."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):

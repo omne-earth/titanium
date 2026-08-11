@@ -378,7 +378,7 @@ function IconHeader({
 // ---- Task column width: a tiny external store so the Task header can
 // drive the cell width without re-creating the columns array on every
 // render (or moving the column defs inside the component).
-const TASK_WIDTH_STORAGE_KEY = "pier.job.taskColWidth";
+const TASK_WIDTH_STORAGE_KEY = "titanium.job.taskColWidth";
 const TASK_WIDTH_DEFAULT = 280;
 const TASK_WIDTH_MIN = 120;
 const TASK_WIDTH_MAX = 1200;
@@ -1267,7 +1267,7 @@ export function JobHeatmap({
       isFetching={isFetching}
       emptyTitle="No heat map cells"
       emptyDescription="No trials match the current filters."
-      storageKeyPrefix="pier.heatmap"
+      storageKeyPrefix="titanium.heatmap"
       autoRowLabelWidth={autoRowLabelWidth}
       autoColumnHeaderHeight={autoColHeaderHeight}
     />

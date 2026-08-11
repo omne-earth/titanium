@@ -36,7 +36,7 @@ RUNSC_PATH=$(command -v runsc)
 # binary but makes every later change detectable. Never overwrite an existing
 # pin from here — replacing the binary and re-running init must not silently
 # re-bless it; delete the pin deliberately to rotate.
-PIN=/usr/local/share/pier/runsc.sha3-512
+PIN=/usr/local/share/titanium/runsc.sha3-512
 if [[ ! -f "$PIN" ]]; then
   sudo mkdir -p "$(dirname "$PIN")"
   python3 -c 'import hashlib, sys
@@ -48,7 +48,7 @@ fi
 # Register the runtime in the root-owned system configuration instead of
 # relying on Podman's compiled-in path search: restores a root-gated registry
 # analogous to Docker's /etc/docker/daemon.json.
-DROPIN=/etc/containers/containers.conf.d/pier-runsc.conf
+DROPIN=/etc/containers/containers.conf.d/titanium-runsc.conf
 if [[ ! -f "$DROPIN" ]]; then
   sudo mkdir -p "$(dirname "$DROPIN")"
   printf '[engine.runtimes]\nrunsc = ["%s"]\n' "$RUNSC_PATH" | sudo tee "$DROPIN" >/dev/null
@@ -66,7 +66,7 @@ fi
 # preflight does: an image-free create against an empty rootfs. This catches a
 # containers.conf that shadows the default paths with a broken entry.
 rootfs=$(mktemp -d)
-name="pier-runsc-probe-$$"
+name="titanium-runsc-probe-$$"
 trap 'podman rm --force "$name" >/dev/null 2>&1; rm -rf "$rootfs"' EXIT
 podman create --name "$name" --network none --runtime runsc --rootfs "$rootfs" true >/dev/null
 podman rm --force "$name" >/dev/null

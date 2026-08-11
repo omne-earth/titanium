@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from pier.agents.installed.codex import Codex
-from pier.agents.installed.gemini_cli import GeminiCli
-from pier.agents.installed.mini_swe_agent import MiniSweAgent
-from pier.agents.installed.opencode import OpenCode
+from titanium.agents.installed.codex import Codex
+from titanium.agents.installed.gemini_cli import GeminiCli
+from titanium.agents.installed.mini_swe_agent import MiniSweAgent
+from titanium.agents.installed.opencode import OpenCode
 
 
 def domains(agent) -> set[str]:

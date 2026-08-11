@@ -777,7 +777,7 @@ function CritiqueHeatmap({
       isFetching={isPlaceholderData}
       emptyTitle="No critique heat map cells"
       emptyDescription="No critique results are available for this run."
-      storageKeyPrefix="pier.critiqueHeatmap"
+      storageKeyPrefix="titanium.critiqueHeatmap"
       autoRowLabelWidth={autoRowLabelWidth}
       autoColumnHeaderHeight={autoColHeaderHeight}
     />

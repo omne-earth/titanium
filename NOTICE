@@ -1,7 +1,8 @@
-Pier
+Titanium
+Copyright 2026 Omne (501c3)
 
-Pier includes code derived from Harbor:
-https://github.com/harbor-framework/harbor
+Titanium is derived from Pier (github.com/datacurve-ai/pier), which includes
+code derived from Harbor: https://github.com/harbor-framework/harbor
 
 Harbor is licensed under the Apache License, Version 2.0.
-Pier contains modifications to the original Harbor code.
+Titanium contains modifications to the original Pier and Harbor code.

@@ -15,21 +15,21 @@ from pathlib import Path
 
 import pytest
 
-from pier.environments.base import ExecResult
-from pier.environments.docker.docker import DockerEnvironment
-from pier.environments.docker.docker_unix import UnixOps
-from pier.environments.gvisor import runtime as gvisor_runtime
-from pier.environments.gvisor.environment import GVisorEnvironment, VerificationState
-from pier.environments.gvisor.transfer import (
+from titanium.environments.base import ExecResult
+from titanium.environments.docker.docker import DockerEnvironment
+from titanium.environments.docker.docker_unix import UnixOps
+from titanium.environments.gvisor import runtime as gvisor_runtime
+from titanium.environments.gvisor.environment import GVisorEnvironment, VerificationState
+from titanium.environments.gvisor.transfer import (
     GVisorUnixOps,
     safe_copy_tree,
     safe_place_file,
 )
-from pier.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
-from pier.models.task.config import TaskOS
-from pier.models.trial.paths import TrialPaths
+from titanium.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
+from titanium.models.task.config import TaskOS
+from titanium.models.trial.paths import TrialPaths
 
-GVISOR_MODULE = "pier.environments.gvisor.environment"
+GVISOR_MODULE = "titanium.environments.gvisor.environment"
 
 MAIN_ID = "a" * 64
 PROXY_ID = "b" * 64
@@ -69,7 +69,7 @@ class RecordingExec:
     ``exec`` code path can be driven end to end for downloads too.
     """
 
-    _OUT_RE = re.compile(r"/\.pier-stage/out/[0-9a-f]+")
+    _OUT_RE = re.compile(r"/\.titanium-stage/out/[0-9a-f]+")
 
     def __init__(self, stdout: bytes = b"", returncode: int = 0, stage_root=None):
         self.calls: list[list[str]] = []
@@ -92,13 +92,13 @@ class RecordingExec:
 class FakeSandbox:
     """Records ``exec`` calls and simulates the staging mounts' host side.
 
-    Export commands name a ``/.pier-stage/out/<op>`` directory; the fake maps
+    Export commands name a ``/.titanium-stage/out/<op>`` directory; the fake maps
     that back to its host path and materialises ``export`` there, which is what
     the real sandbox would do through the writable bind mount.
     """
 
-    _OUT_RE = re.compile(r"/\.pier-stage/out/[0-9a-f]+")
-    _IN_RE = re.compile(r"/\.pier-stage/in/[0-9a-f]+")
+    _OUT_RE = re.compile(r"/\.titanium-stage/out/[0-9a-f]+")
+    _IN_RE = re.compile(r"/\.titanium-stage/in/[0-9a-f]+")
 
     def __init__(self, env, *, export: dict[str, str] | None = None, return_code=0):
         self._env = env
@@ -317,13 +317,13 @@ def test_gvisor_override_renders_both_staging_mounts(tmp_path):
         {
             "type": "bind",
             "source": str(env.stage_in.resolve()),
-            "target": "/.pier-stage/in",
+            "target": "/.titanium-stage/in",
             "read_only": True,
         },
         {
             "type": "bind",
             "source": str(env.stage_out.resolve()),
-            "target": "/.pier-stage/out",
+            "target": "/.titanium-stage/out",
         },
     ]
     assert env.stage_in.is_dir()
@@ -536,7 +536,7 @@ def test_missing_proxy_container_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setattr(env, "_run_docker_compose_command", fake_compose)
     _stub_runtime(monkeypatch, lambda cid: "runsc")
 
-    with pytest.raises(RuntimeError, match="could not resolve the 'pier-egress-proxy'"):
+    with pytest.raises(RuntimeError, match="could not resolve the 'titanium-egress-proxy'"):
         asyncio.run(env._ensure_verified())
 
     assert DOWN in commands
@@ -741,7 +741,7 @@ def test_verification_does_not_recurse_through_its_own_execs(tmp_path, monkeypat
                 return ExecResult(stdout=text, return_code=0)
             if inner.startswith("printf"):
                 return ExecResult(stdout="", return_code=0)
-            return ExecResult(stdout="PIER_GVISOR_NET_OK\n", return_code=0)
+            return ExecResult(stdout="TITANIUM_GVISOR_NET_OK\n", return_code=0)
         return ExecResult(stdout="", return_code=0)
 
     monkeypatch.setattr(env, "_run_docker_compose_command", fake_compose)
@@ -1437,7 +1437,7 @@ def test_reset_for_new_start_attempt_resets_stopping_from_a_previous_stop(tmp_pa
 def test_retried_start_on_same_instance_reverifies_instead_of_reusing_failed_state(
     tmp_path, monkeypatch
 ):
-    """Mirrors Pier's own retry: TrialExecution.start_environment() calls
+    """Mirrors Titanium's own retry: TrialExecution.start_environment() calls
     ``start()`` again on the *same* environment instance after a timeout.
 
     The first attempt's ``super().start()`` (Compose ``up``) succeeds, but
@@ -1499,14 +1499,14 @@ def test_plain_docker_proxy_env_uses_service_name(tmp_path):
     env.network_allowlist.domains.append("api.anthropic.com")
     env._prepare_egress_proxy_compose()
 
-    assert "pier-egress-proxy" in env.agent_process_env(None)["HTTP_PROXY"]
+    assert "titanium-egress-proxy" in env.agent_process_env(None)["HTTP_PROXY"]
 
 
 def test_gvisor_proxy_env_uses_literal_ipv4(tmp_path, monkeypatch):
     env = make_gvisor_env(tmp_path)
     env.network_allowlist.domains.append("api.anthropic.com")
     env._prepare_egress_proxy_compose()
-    assert "pier-egress-proxy" in env.agent_process_env(None)["HTTP_PROXY"]
+    assert "titanium-egress-proxy" in env.agent_process_env(None)["HTTP_PROXY"]
     token_before = env._proxy_token()
     assert token_before
 
@@ -1518,10 +1518,10 @@ def test_gvisor_proxy_env_uses_literal_ipv4(tmp_path, monkeypatch):
         lambda cid: (
             {
                 "p_default": {"IPAddress": "172.31.0.9"},
-                "p_pier-egress-internal": {"IPAddress": "172.30.0.5"},
+                "p_titanium-egress-internal": {"IPAddress": "172.30.0.5"},
             }
             if cid == PROXY_ID
-            else {"p_pier-egress-internal": {"IPAddress": "172.30.0.4"}}
+            else {"p_titanium-egress-internal": {"IPAddress": "172.30.0.4"}}
         ),
     )
 
@@ -1529,7 +1529,7 @@ def test_gvisor_proxy_env_uses_literal_ipv4(tmp_path, monkeypatch):
 
     proxy_url = env.agent_process_env(None)["HTTP_PROXY"]
     assert "@172.30.0.5:8080" in proxy_url
-    assert "pier-egress-proxy" not in proxy_url
+    assert "titanium-egress-proxy" not in proxy_url
     # The token survives the re-addressing: it is recovered from the URL the
     # Docker path already built, so docker.py needs no gVisor-specific field.
     assert env._proxy_token() == token_before
@@ -2069,7 +2069,7 @@ def test_plain_docker_still_allows_host_mounts(tmp_path):
 def test_runtime_evidence_records_both_services(tmp_path):
     env = make_gvisor_env(tmp_path)
     env._record_runtime_evidence("main", "runsc")
-    env._record_runtime_evidence("pier-egress-proxy", "runc")
+    env._record_runtime_evidence("titanium-egress-proxy", "runc")
 
     evidence = json.loads(
         (env.trial_paths.trial_dir / "runtime-verification.json").read_text()
@@ -2077,7 +2077,7 @@ def test_runtime_evidence_records_both_services(tmp_path):
     assert evidence["engine"] == "docker"
     assert evidence["expected_runtime"] == "runsc"
     assert evidence["services"]["main"]["reported"] == "runsc"
-    assert evidence["services"]["pier-egress-proxy"]["reported"] == "runc"
+    assert evidence["services"]["titanium-egress-proxy"]["reported"] == "runc"
     assert evidence["services"]["main"]["verified_at"]
 
 
@@ -2110,7 +2110,7 @@ def test_prebuilt_is_ignored_when_the_task_ships_a_dockerfile(tmp_path):
 
 
 def test_prebuilt_opt_in_restores_upstream_parity(tmp_path, monkeypatch):
-    monkeypatch.setenv("PIER_IMAGE_SOURCE", "prebuilt")
+    monkeypatch.setenv("TITANIUM_IMAGE_SOURCE", "prebuilt")
     env = make_plain_env(
         tmp_path,
         task_config=TaskEnvironmentConfig(

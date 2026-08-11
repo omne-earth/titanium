@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from pier.agents.installed.cursor_cli import CursorCli
-from pier.agents.factory import AgentFactory
-from pier.models.agent.name import AgentName
+from titanium.agents.installed.cursor_cli import CursorCli
+from titanium.agents.factory import AgentFactory
+from titanium.models.agent.name import AgentName
 
 
 def test_cursor_cli_is_registered(tmp_path: Path):
@@ -98,7 +98,7 @@ def test_cursor_cli_converts_stream_json_to_atif(tmp_path: Path):
             "tool_call": {
                 "readToolCall": {
                     "args": {"path": "README.md"},
-                    "result": {"success": {"content": "# Pier"}},
+                    "result": {"success": {"content": "# Titanium"}},
                 }
             },
             "session_id": "session-1",

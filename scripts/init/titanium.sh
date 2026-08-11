@@ -30,7 +30,7 @@ sudo loginctl enable-linger "$RUNNER"
 
 # 4. Cgroup delegation for user@.service — same drop-in the doctor provisions;
 #    duplicated here so titanium works on a host that never ran --bootstrap.
-DELEGATE_DROPIN=/etc/systemd/system/user@.service.d/pier-delegate.conf
+DELEGATE_DROPIN=/etc/systemd/system/user@.service.d/titanium-delegate.conf
 if [[ ! -f "$DELEGATE_DROPIN" ]]; then
   sudo mkdir -p "$(dirname "$DELEGATE_DROPIN")"
   printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | sudo tee "$DELEGATE_DROPIN" >/dev/null
@@ -73,6 +73,6 @@ sudo systemd-run --uid="$RUNNER" --pipe --wait --quiet --collect \
 # 8. Stamp only after the probe proved the whole shape works: the Makefile
 #    guard tests this file, so a partially provisioned host re-runs the
 #    script (idempotent) instead of being silently skipped.
-sudo mkdir -p /usr/local/share/pier
-sudo touch /usr/local/share/pier/titanium.provisioned
+sudo mkdir -p /usr/local/share/titanium
+sudo touch /usr/local/share/titanium/titanium.provisioned
 echo "titanium provisioned — make targets now default to RUNNER=titanium"

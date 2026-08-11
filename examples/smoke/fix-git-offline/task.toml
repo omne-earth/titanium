@@ -2,7 +2,7 @@ schema_version = "1.1"
 artifacts = []
 
 [task]
-name = "pier/fix-git-offline"
+name = "titanium/fix-git-offline"
 description = "Evaluates the ability to recover lost Git commits from a detached HEAD state and merge them back into the master branch."
 keywords = ["coding", "version-control", "software-engineering"]
 [[task.authors]]

@@ -229,13 +229,13 @@ function getPageUrl(searchParams: URLSearchParams, newPage: number): string {
   return `?${params.toString()}`;
 }
 
-function getPierCommand(
+function getTitaniumCommand(
   taskName: string,
   source?: string,
   agentName?: string,
   modelName?: string
 ): string {
-  const parts = ["pier run"];
+  const parts = ["titanium run"];
   if (source) {
     parts.push(`-d ${source}`);
   }
@@ -398,7 +398,7 @@ export default function Task() {
         </div>
       </div>
       <CodeBlock
-        code={getPierCommand(taskName!, source, agentName, fullModelName)}
+        code={getTitaniumCommand(taskName!, source, agentName, fullModelName)}
         lang="bash"
         className="-mb-px"
       />

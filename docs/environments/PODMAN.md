@@ -1,9 +1,9 @@
 # Podman environment: protections, relaxations, and hardening avenues
 
-Selector `--env podman`, class `pier.environments.podman.podman.PodmanEnvironment`,
+Selector `--env podman`, class `titanium.environments.podman.podman.PodmanEnvironment`,
 provisioned and audited by `scripts/doctor/podman.sh` (report-only by default, `--bootstrap` to provision;
 formerly `--fix`). This document records what the vanilla setup
-protects, exactly where Pier relaxed it to make trials run, and concrete ways
+protects, exactly where Titanium relaxed it to make trials run, and concrete ways
 each relaxation could be closed. Its siblings are
 [GVISOR.md](GVISOR.md) and [GVISOR-PODMAN.md](GVISOR-PODMAN.md); the
 gvisor-podman document assumes this one and describes only its deltas.
@@ -11,8 +11,8 @@ gvisor-podman document assumes this one and describes only its deltas.
 ## 1. Baseline: what the vanilla setup provides
 
 "Vanilla" here means stock Podman driven the way this environment drives it,
-before any Pier-specific configuration. That baseline is meaningfully stronger
-than the Docker environment's in three ways, and Pier preserves all three.
+before any Titanium-specific configuration. That baseline is meaningfully stronger
+than the Docker environment's in three ways, and Titanium preserves all three.
 
 **No control socket anywhere in the path.** `podman-compose` emits `podman`
 CLI calls against libpod in-process, so there is no Docker API socket and no
@@ -25,7 +25,7 @@ uses them.
 
 **Rootless by default.** Podman's native mode maps container root to the
 invoking user through a user namespace; a full container escape lands as an
-unprivileged user, not host root. Nothing in Pier requires rootful Podman.
+unprivileged user, not host root. Nothing in Titanium requires rootful Podman.
 
 **Runner separation (default when provisioned).** "Unprivileged user" is
 only as comforting as what that user owns — without separation it is the
@@ -45,7 +45,7 @@ repo, read-write plus default ACLs on `.run/` so operator and runner both
 keep access to trial output — and a root-owned, runner-unwritable
 `~titanium/.config/containers`, which structurally closes the user-level
 runtime-redirect residual of GVISOR-PODMAN.md §2.3. The environment variables
-a trial legitimately needs (model API credentials, `PIER_*` knobs) are the
+a trial legitimately needs (model API credentials, `TITANIUM_*` knobs) are the
 only ones that cross into the scope. Because trial containers and images
 live in the runner's storage — invisible to the operator's own podman —
 `make podman-<subcommand> [ARGS=…]` proxies any podman command into the
@@ -55,7 +55,7 @@ runner's context for inspection (`make podman-ps ARGS=--all`).
 compromise affects every container on the host; each `podman` invocation is
 its own process tree under the invoking user.
 
-On top of the engine baseline, the environment keeps Pier's standard network
+On top of the engine baseline, the environment keeps Titanium's standard network
 posture: `allow_internet = false` tasks run with `network_mode: none`;
 allowlist tasks put `main` on an `internal: true` network with a Squid proxy
 (runc/crun, per-trial basic-auth token, domain allowlist) as the only route
@@ -64,7 +64,7 @@ no-network mode cannot be undone by pod-level namespace sharing.
 
 ## 2. What was relaxed, where, and why
 
-### 2.1 Short-name resolution: retired — Pier qualifies its image references
+### 2.1 Short-name resolution: retired — Titanium qualifies its image references
 
 What vanilla does: Podman's compiled-in default is `short-name-mode =
 "enforcing"`, which refuses to resolve an unqualified image name (`FROM
@@ -72,7 +72,7 @@ ubuntu:24.04`) without an interactive registry choice. That is a supply-chain
 protection: a short name is ambiguous across registries, and enforcing mode
 makes the ambiguity a human decision instead of a silent pick.
 
-What Pier does now: nothing is relaxed. Short names in the Dockerfile dialect
+What Titanium does now: nothing is relaxed. Short names in the Dockerfile dialect
 tasks are written in mean Docker Hub, so build preparation makes that meaning
 explicit at the byte level (`qualify_image_reference` /
 `qualify_dockerfile_froms` in `agent_setup.py`): the agent-install rewrite
@@ -84,7 +84,7 @@ standard flow, and the doctor no longer writes `registries.conf` at all — it
 warns when a previously written permissive configuration is still present.
 
 Residual: a task built directly from its own Dockerfile with *no* agent
-install bypasses the rewrite (Pier builds the task's context verbatim), so a
+install bypasses the rewrite (Titanium builds the task's context verbatim), so a
 short name there still resolves — or under enforcing, fails — through host
 configuration. The doctor's message names this case; the fix is qualifying
 the task's own `FROM` line, not relaxing the host.
@@ -94,7 +94,7 @@ The same trust posture governs *which* image is used at all
 environment): when a task ships both a Dockerfile and a `docker_image`
 prebuilt, the prebuilt — typically a mutable-tag build cache of that same
 Dockerfile on a third-party registry account — is ignored and the Dockerfile
-is built locally with qualified FROMs. `PIER_IMAGE_SOURCE=prebuilt` opts
+is built locally with qualified FROMs. `TITANIUM_IMAGE_SOURCE=prebuilt` opts
 into upstream-parity byte-exactness where that matters more than
 auditability; image-only tasks are unaffected either way. The remote
 Daytona/Modal environments retain their own prebuilt handling and are
@@ -111,7 +111,7 @@ restore loads where nothing can be pulled.
 
 Where: `PodmanEnvironment._apply_selinux_relabel()` (`podman.py`) stamps
 `bind: {selinux: "z"}` on every bind mount in the trial's mount set; the knob
-is `PIER_PODMAN_SELINUX_RELABEL` (`z` default, `Z` accepted, anything else
+is `TITANIUM_PODMAN_SELINUX_RELABEL` (`z` default, `Z` accepted, anything else
 disables).
 
 What vanilla does: Podman does not relabel bind mounts at all. On an enforcing
@@ -129,7 +129,7 @@ Blast radius: relabeling *modifies the host directories' labels in place* —
 this is not a per-mount view. Anything under the trial's mounted directories
 becomes `container_file_t` with the shared level, readable and writable by
 *any* container on the host, not just this trial's pair. The scope is confined
-to trial directories (Pier controls what gets mounted), but for the lifetime
+to trial directories (Titanium controls what gets mounted), but for the lifetime
 of those labels the SELinux boundary between unrelated containers does not
 apply to that data.
 
@@ -143,13 +143,13 @@ rootful daemon owns the cgroup tree.
 
 What happens here: rootless Podman enforces limits only on cgroups v2 with
 the cpu and memory controllers delegated to the user; on v1, or without
-delegation, it *warns and silently drops the limit*. Pier's mitigation is to
+delegation, it *warns and silently drops the limit*. Titanium's mitigation is to
 report `cpu_limit=False` / `memory_limit=False` in that situation so tasks
 declaring `LIMIT`/`GUARANTEE` enforcement are rejected up front instead of
 running unbounded. When Podman cannot even be queried, the code assumes the
 common modern case (`True, True`) rather than blocking — an availability-over-
 enforcement choice; deployments that prefer refusal set
-`PIER_PODMAN_CGROUP_FAIL_CLOSED=1` to make that fallback report no support.
+`TITANIUM_PODMAN_CGROUP_FAIL_CLOSED=1` to make that fallback report no support.
 
 Capability reporting is backed by post-start verification
 (`_verify_resource_limits`, called from `start()`): when a task declares a
@@ -227,7 +227,7 @@ other container on the host is excluded — this restores the inter-container
 boundary at the cost of plumbing a per-trial level through both container
 launches. (b) Relabel externally once at trial-directory creation
 (`chcon -R`) with a per-trial level and set
-`PIER_PODMAN_SELINUX_RELABEL=none`, keeping label management in trusted host
+`TITANIUM_PODMAN_SELINUX_RELABEL=none`, keeping label management in trusted host
 code. (c) Generate a scoped policy with udica if categories prove too coarse.
 
 **[PARTIAL] Resource limits (2.3).** Post-start enforcement verification, the

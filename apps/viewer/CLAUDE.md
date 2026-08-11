@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Pier Viewer is a React SPA for browsing and inspecting Pier evaluation jobs, trials, and agent trajectories. It operates in two modes: "jobs" mode (browse evaluation results) and "tasks" mode (browse task definitions). The mode is determined by the backend API config.
+Titanium Viewer is a React SPA for browsing and inspecting Titanium evaluation jobs, trials, and agent trajectories. It operates in two modes: "jobs" mode (browse evaluation results) and "tasks" mode (browse task definitions). The mode is determined by the backend API config.
 
 ## Commands
 
@@ -16,7 +16,7 @@ bun install
 bun dev
 
 # Full dev with backend API (from repo root)
-pier view ./jobs --dev
+titanium view ./jobs --dev
 
 # Production build (output: build/client/)
 bun run build
@@ -24,8 +24,8 @@ bun run build
 # Type checking
 bun run typecheck
 
-# Deploy to pier view (copies build to src/pier/viewer/static/)
-pier view ./jobs --build
+# Deploy to titanium view (copies build to src/titanium/viewer/static/)
+titanium view ./jobs --build
 ```
 
 There are no tests or linting configured in this package. The parent monorepo uses Ruff for Python; this frontend has no equivalent setup.
