@@ -45,7 +45,7 @@ exec > >(cat) 2> >(cat >&2)
 # working directory. A bare name is left to systemd-run's PATH resolution.
 [[ "${1:-}" == */* && "${1:-}" != /* ]] && set -- "$PWD/$1" "${@:2}"
 
-PASS_VARS=(OPENROUTER_API_KEY TITANIUM_API_BASE TITANIUM_IMAGE_SOURCE TITANIUM_PODMAN_SELINUX_RELABEL TITANIUM_PODMAN_CGROUP_FAIL_CLOSED TITANIUM_RUNSC_DIGEST_PIN)
+PASS_VARS=(OPENROUTER_API_KEY ANTHROPIC_API_KEY TITANIUM_API_BASE TITANIUM_IMAGE_SOURCE TITANIUM_PODMAN_SELINUX_RELABEL TITANIUM_PODMAN_CGROUP_FAIL_CLOSED TITANIUM_RUNSC_DIGEST_PIN)
 setenv_args=()
 for var in "${PASS_VARS[@]}"; do
   [[ -n "${!var:-}" ]] && setenv_args+=("--setenv=$var")
