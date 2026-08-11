@@ -1,10 +1,10 @@
 # gVisor environment: protections, relaxations, and hardening avenues
 
 Selector `--env gvisor`, class
-`pier.environments.gvisor.environment.GVisorEnvironment`, provisioned by
+`titanium.environments.gvisor.environment.GVisorEnvironment`, provisioned by
 `scripts/init/runsc.sh` (installs a checksum-verified `runsc`, registers it
 with the Docker daemon). This document records what vanilla runsc-under-Docker
-protects, exactly where Pier relaxed it to make trials run, and concrete ways
+protects, exactly where Titanium relaxed it to make trials run, and concrete ways
 each relaxation could be closed. Siblings: [PODMAN.md](PODMAN.md),
 [GVISOR-PODMAN.md](GVISOR-PODMAN.md).
 
@@ -38,8 +38,8 @@ runs exactly once with explicit states, and a failed environment can never
 become ready. Teardown is fail-closed against the exact Compose project label
 and refuses to report clean while resources remain.
 
-Protections Pier *added* on top of vanilla: `security_opt:
-no-new-privileges:true` on `main` (vanilla Pier Docker sets no security_opt at
+Protections Titanium *added* on top of vanilla: `security_opt:
+no-new-privileges:true` on `main` (vanilla Titanium Docker sets no security_opt at
 all); bind-mount sources confined to the trial directory
 (`_validate_mounts`) because a Compose override cannot remove a volume, so
 refusing to start is the only enforcement point; docker-compose tasks rejected
@@ -56,15 +56,15 @@ into the trial's `runtime-verification.json` for post-hoc audit.
 ### 2.1 Two staging bind mounts puncture the sandbox-private filesystem
 
 Where: `write_compose_override` (`runtime.py`) mounts
-`<trial>/.gvisor-stage/in` read-only at `/.pier-stage/in` and
-`<trial>/.gvisor-stage/out` writable at `/.pier-stage/out`;
+`<trial>/.gvisor-stage/in` read-only at `/.titanium-stage/in` and
+`<trial>/.gvisor-stage/out` writable at `/.titanium-stage/out`;
 `GVisorUnixOps` (`transfer.py`) moves every upload and download through them.
 
 What vanilla does: nothing crosses the rootfs boundary. Bind mounts default to
 `--file-access-mounts=shared`, so mounting one is precisely the act of opening
 a coherent, bidirectional host↔sandbox channel.
 
-Why it was relaxed: Pier's contract requires file transfer with a *running*
+Why it was relaxed: Titanium's contract requires file transfer with a *running*
 environment (task setup, artifact export, verifier inputs), and `docker
 compose cp` is unusable against the private rootfs in either direction. There
 is deliberately no `docker cp` fast path even for paths present in the image,
@@ -83,7 +83,7 @@ later *consumes* staged bytes (verifiers, viewers) is parsing
 attacker-controlled data, and the writable mount is a disk-space vector
 bounded only by the host filesystem.
 
-Note also that Pier's standard log/artifact binds (agent dir, verifier dir,
+Note also that Titanium's standard log/artifact binds (agent dir, verifier dir,
 artifacts) exist here exactly as in the Docker environment, made
 world-writable by the `chmod 777` in `DockerEnvironment.start()` — the gVisor
 environment constrains their *sources* to the trial directory but does not
@@ -166,10 +166,10 @@ shared baseline. The Podman flavor opts in per service
 unlike Docker — labels the container process unconditionally, which runsc
 rejects; see GVISOR-PODMAN.md §2.2.
 
-The absence of an SELinux label is upstream behavior, not Pier's choice: runsc
+The absence of an SELinux label is upstream behavior, not Titanium's choice: runsc
 advertises `selinux: false` in its OCI features, so Docker assigns no process
 label to the sandbox — there is nothing to disable and nothing confining
-Sentry beyond its own seccomp filters and namespaces. Pier adds
+Sentry beyond its own seccomp filters and namespaces. Titanium adds
 no-new-privileges but no `cap_drop`, no pids limit, and no custom seccomp on
 the sandbox process. The threat model leans on Sentry being the boundary;
 these would be defense-in-depth for the *host-side* runsc processes.
@@ -208,7 +208,7 @@ resolv.conf repair at its bridge IP, and let *it* hold the host/upstream
 configuration — the sandbox then sees one per-trial IP, queries become
 attributable and filterable, and host resolver addresses stay hidden. The
 proxy-verification pattern (§2.3) already shows how to keep such a helper off
-the sandbox runtime. (b) Cheaper variant: default `--ek dns=` from Pier
+the sandbox runtime. (b) Cheaper variant: default `--ek dns=` from Titanium
 configuration (operator-chosen resolver) so trials never inherit
 infrastructure resolvers implicitly. (c) For deployments that want DNS policy
 even on `allow_internet = true`, reuse the Squid pattern with DNS-over-HTTPS
@@ -218,7 +218,7 @@ upstream inside the helper, giving log-and-block capability per trial.
 Alpine-static Squid (or a purpose-built ~200-line CONNECT proxy) removes most
 of the Ubuntu userland from the attack surface. (b) Confine it further under
 runc: `cap_drop: [ALL]`, `no-new-privileges`, read-only rootfs with tmpfs for
-Squid's runtime files — all expressible in the proxy compose Pier already
+Squid's runtime files — all expressible in the proxy compose Titanium already
 writes. (c) Revisit sandboxing the proxy itself under runsc with a *static*
 resolver configuration (the proxy's upstream DNS could use the §(a) helper or
 an explicit `dns:` IP), which the current code forbids only because embedded

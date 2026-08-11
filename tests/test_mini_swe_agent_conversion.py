@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pier.agents.installed.mini_swe_agent import (
+from titanium.agents.installed.mini_swe_agent import (
     MiniSweAgent,
     convert_mini_swe_agent_to_atif,
 )

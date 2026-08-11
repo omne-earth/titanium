@@ -9,18 +9,18 @@ import sys
 
 import pytest
 
-from pier.environments.docker.docker import DockerEnvironment
-from pier.environments.factory import (
+from titanium.environments.docker.docker import DockerEnvironment
+from titanium.environments.factory import (
     _ENVIRONMENT_REGISTRY,
     EnvironmentFactory,
     _load_environment_class,
 )
-from pier.environments.gvisor.environment import GVisorEnvironment
-from pier.environments.gvisor.runtime import resolve_engine_cli
-from pier.models.environment_type import EnvironmentType
-from pier.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
-from pier.models.trial.config import EnvironmentConfig as TrialEnvironmentConfig
-from pier.models.trial.paths import TrialPaths
+from titanium.environments.gvisor.environment import GVisorEnvironment
+from titanium.environments.gvisor.runtime import resolve_engine_cli
+from titanium.models.environment_type import EnvironmentType
+from titanium.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
+from titanium.models.trial.config import EnvironmentConfig as TrialEnvironmentConfig
+from titanium.models.trial.paths import TrialPaths
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="the gVisor environment requires a Linux host"
@@ -89,7 +89,7 @@ def test_gvisor_needs_no_optional_extra():
 
 
 def test_gvisor_podman_is_registered_in_the_factory():
-    from pier.environments.gvisor.podman import GVisorPodmanEnvironment
+    from titanium.environments.gvisor.podman import GVisorPodmanEnvironment
 
     assert EnvironmentType.GVISOR_PODMAN in _ENVIRONMENT_REGISTRY
     assert (
@@ -100,7 +100,7 @@ def test_gvisor_podman_is_registered_in_the_factory():
 
 
 def test_env_gvisor_podman_resolves_through_the_factory(tmp_path):
-    from pier.environments.gvisor.podman import GVisorPodmanEnvironment
+    from titanium.environments.gvisor.podman import GVisorPodmanEnvironment
 
     env = _from_config(
         tmp_path, TrialEnvironmentConfig(type=EnvironmentType.GVISOR_PODMAN)
@@ -114,7 +114,7 @@ def test_env_gvisor_podman_resolves_through_the_factory(tmp_path):
 
 def test_env_gvisor_still_resolves_to_the_docker_flavor(tmp_path):
     # Adding the podman flavor must not change what --env gvisor selects.
-    from pier.environments.gvisor.podman import GVisorPodmanEnvironment
+    from titanium.environments.gvisor.podman import GVisorPodmanEnvironment
 
     env = _from_config(tmp_path, TrialEnvironmentConfig(type=EnvironmentType.GVISOR))
 

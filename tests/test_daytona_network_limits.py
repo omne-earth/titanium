@@ -2,13 +2,13 @@ import logging
 import socket
 import asyncio
 
-from pier.environments.daytona import (
+from titanium.environments.daytona import (
     DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS,
     DaytonaEnvironment,
     _DaytonaDinD,
     resolve_network_allowlist_to_daytona_cidrs,
 )
-from pier.models.agent.network import NetworkAllowlist
+from titanium.models.agent.network import NetworkAllowlist
 
 
 def _addr(ip: str):
@@ -55,7 +55,7 @@ def test_daytona_network_params_use_resolved_allowlist(monkeypatch):
     env.logger = logging.getLogger("test")
 
     monkeypatch.setattr(
-        "pier.environments.daytona.resolve_network_allowlist_to_daytona_cidrs",
+        "titanium.environments.daytona.resolve_network_allowlist_to_daytona_cidrs",
         lambda domains: (
             {"api.openai.com": ["203.0.113.10"]},
             ["203.0.113.10/32"],
@@ -79,7 +79,7 @@ def test_daytona_network_params_block_when_no_cidrs(monkeypatch):
     env.logger = logging.getLogger("test")
 
     monkeypatch.setattr(
-        "pier.environments.daytona.resolve_network_allowlist_to_daytona_cidrs",
+        "titanium.environments.daytona.resolve_network_allowlist_to_daytona_cidrs",
         lambda domains: ({}, []),
     )
 

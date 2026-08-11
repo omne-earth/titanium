@@ -1,12 +1,12 @@
 version = "1.0"
 
 [task]
-name = "pier/cursor-web-tools-no-internet"
+name = "titanium/cursor-web-tools-no-internet"
 authors = []
 keywords = []
 
 [metadata]
-author_name = "Pier"
+author_name = "Titanium"
 author_email = "devnull@example.com"
 difficulty = "easy"
 category = "programming"

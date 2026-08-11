@@ -6,7 +6,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/publish.sh [options]
 
-Build and publish datacurve-pier to PyPI, then tag and create a GitHub release.
+Build and publish titanium to PyPI, then tag and create a GitHub release.
 
 Options:
   --bump patch|minor|major  Bump the project version before building.
@@ -83,9 +83,9 @@ echo "Building viewer assets..."
   bun run build
 )
 
-rm -rf src/pier/viewer/static
-mkdir -p src/pier/viewer/static
-cp -R apps/viewer/build/client/. src/pier/viewer/static/
+rm -rf src/titanium/viewer/static
+mkdir -p src/titanium/viewer/static
+cp -R apps/viewer/build/client/. src/titanium/viewer/static/
 
 rm -rf dist build
 uv build

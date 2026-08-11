@@ -1,7 +1,7 @@
 from collections import defaultdict
 
-from pier.job import Job
-from pier.models.job.config import JobConfig
+from titanium.job import Job
+from titanium.models.job.config import JobConfig
 
 
 def test_resume_cleanup_preserves_critiques_metadata_dir(tmp_path):

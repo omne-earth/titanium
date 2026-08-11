@@ -2,7 +2,7 @@ schema_version = "1.1"
 artifacts = []
 
 [task]
-name = "pier/verify-gvisor-env"
+name = "titanium/verify-gvisor-env"
 description = "In-container probe of the gvisor environment: egress, DNS, identity, engine-socket absence, write and /proc boundaries."
 keywords = ["smoke", "sandbox", "gvisor"]
 [[task.authors]]

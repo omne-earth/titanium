@@ -1,131 +1,52 @@
-# pier
+# Titanium
 
-Pier is a [Harbor](https://www.harborframework.com/docs/tasks)-compatible framework for evaluating coding agents in sandboxed environments. It reads Harbor's task format and runs trials against it.
+Run coding agents against benchmark tasks inside real sandboxes, and keep the full trajectory of every run for analysis.
 
-```bash
-pier run -p path/to/task --agent claude-code --env modal
-```
-
-## Why pier
-
-Pier is a fork. We wanted a smaller, more opinionated base to build on. On top of Harbor, Pier adds:
-
-- **Installed agents in air-gapped tasks (`allow_internet = false`).** When the agent runs *inside* the sandbox (Claude Code, Codex, etc.), both the install step and the inference call need the network. Pier lets agents declare their install scripts and a network allowlist, which `docker` and `modal` environments honor when setting up the sandbox.
-- **Augmented ATIF v1.7.** Strict one step per API turn, strict reasoning vs agent message separation, no fabricated assistant text, `peak_context_tokens`, `summarization_count`, `llm_call_count`, real upstream timestamps.
-- **A chat-style trajectory viewer** (`pier view`).
-- **`pier critique run`** for inspecting completed trials with a fresh agent in a fresh sandbox.
-
-## What works today
-
-- **Task format:** Harbor-compatible.
-- **Environments:** `docker`, `podman`, `gvisor`, `gvisor-podman`, `modal`. Per-agent install specs and network allowlists are honored on all of them, so installed agents work under `allow_internet = false`. The two gVisor environments run the untrusted `main` service under the runsc sandbox with host-side runtime verification — `gvisor` drives Docker, `gvisor-podman` drives rootless Podman through `podman-compose` with no engine socket anywhere in the path (provision with `bash scripts/init/runsc-podman.sh`).
-- **Agents:** `nop`, `oracle`, `claude-code`, `codex`, `cursor-cli`, `gemini-cli`, `opencode`, `mini-swe-agent`. All emit augmented ATIF v1.7.
-- **Datasets:** local Harbor-format task directories via `-p` / `--path`.
-- **CLI:** `pier run`, `pier job`, `pier view`, `pier critique run`, `pier check` / `pier analyze` (vendored from Harbor)
-
-Pier does not currently resolve or download Harbor registry datasets directly.
+Titanium builds each task's environment, installs the agent, runs it under the isolation level you choose, verifies the result, and records everything under `jobs/<name>/<trial>/`. The point of difference is the sandbox: you pick how much isolation a run gets, from a plain container up to a gVisor kernel with the whole run privilege-separated from your account.
 
 ## Install
 
 ```bash
-uv tool install datacurve-pier
-# or
-pip install datacurve-pier
+uv tool install titanium   # or: pip install titanium
 ```
 
 ## Run
 
 ```bash
-export ANTHROPIC_API_KEY=...
-pier run -p path/to/task --agent claude-code --env modal --env-file .env
+# one task
+titanium run -p path/to/task --agent claude-code --env gvisor-podman
+
+# a dataset, sampled
+titanium run -p path/to/dataset --n-tasks 10 --sample-seed 0
 ```
 
-Run a local dataset, optionally a deterministic random subset:
+Trials land in `jobs/<timestamp-or-name>/<trial-id>/`. See `titanium run --help`, plus `titanium job`, `titanium view`, and `titanium critique` for the rest.
+
+## Environments
+
+Every environment installs agents, honors per-task network allowlists, and runs air-gapped (`allow_internet = false`) tasks. They differ in *how strongly the workload is isolated from the host* — pick by threat model, not preference.
+
+| | `docker` | `podman` | `gvisor` | `gvisor-podman` |
+|---|---|---|---|---|
+| **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel |
+| **Engine** | Docker daemon | rootless Podman, no socket | Docker daemon | rootless Podman, no socket |
+| **Runtime** | runc | crun | runsc | runsc |
+| **A container escape lands as** | root | unprivileged user | host-side runsc processes, behind Sentry | unprivileged user, behind Sentry |
+| **Root daemon in the trust chain** | yes | no | yes | no |
+| **Runner separation** (run as a throwaway user) | — | ✓ | — | ✓ |
+| **Air-gapped image supply** (vendor / restore) | — | ✓ | — | ✓ |
+
+`gvisor-podman` is the default and the strongest: a gVisor kernel over rootless Podman with no engine socket, and — once provisioned — the entire run executes as a dedicated `titanium` user that owns nothing but trial state, so even a full sandbox escape never reaches your keys or source. `docker`/`gvisor` remain the compatibility path and gVisor's most polished host. A fifth environment, `modal`, runs the same task off-host on [Modal](https://modal.com) — a third-party cloud provider, not affiliated with Titanium — when you want to fan trials out across cloud workers or reach GPUs.
+
+Isolation is only as good as its trust chain, so Titanium verifies rather than assumes: the sandbox runtime is confirmed from the host before any code runs, `runsc` is pinned by digest, declared resource limits are read back from the kernel, and image references are fully qualified and built from source rather than pulled from mutable third-party tags. The per-environment protections, the relaxations made to run trials, and the avenues still open are documented in [`docs/environments/`](docs/environments/).
+
+## Setup
 
 ```bash
-pier run -p path/to/dataset --agent claude-code --env modal
-pier run -p path/to/dataset --n-tasks 10 --sample-seed 0
+make init          # provision the host (engines, runsc, runner user)
+make smoke-env     # end-to-end check across podman / gvisor / gvisor-podman
 ```
 
-To use a Harbor registry dataset, download it with Harbor first, then point Pier at it:
+## License
 
-```bash
-uv run --directory ~/code/harbor harbor download swebenchpro -o ~/code/pier/datasets
-uv run pier run -p datasets/swebenchpro --n-tasks 10 --sample-seed 0
-```
-
-Trials land under `jobs/<timestamp_or_name>/<trial_id>/`. See `pier run --help`, `pier job --help`, `pier critique --help`, and `pier view --help` for everything else.
-
-## Agent runtime configuration
-
-Use `agent.model_name` for trial metadata, `agent.env` for runtime env vars, and agent-specific `kwargs` for tool config. Pier's network allowlist also reads URLs out of those configs (Codex `config_toml`, OpenCode `opencode_config`, mini-swe `config_yaml`), so any base URL you set is allowlisted without code changes.
-
-A few things we've learned plumbing this through Respan and OpenRouter:
-
-**Claude Code** routes through the Anthropic face from Respan. Plan mode is disabled by default (`--disallowedTools EnterPlanMode`).
-
-```yaml
-- name: claude-code
-  model_name: claude-opus-4-7
-  env:
-    ANTHROPIC_AUTH_TOKEN: ${RESPAN_API_KEY}
-    ANTHROPIC_BASE_URL: https://endpoint.respan.ai/api/anthropic
-    ANTHROPIC_CUSTOM_HEADERS: "X-Respan-Route-Provider: vertex_ai"
-  kwargs:
-    reasoning_effort: max
-```
-
-**Codex** needs a `[model_providers.<name>]` block with `wire_api = "responses"` (not WebSockets, which Codex defaults to and Respan doesn't speak).
-
-```yaml
-- name: codex
-  model_name: openai/gpt-5.5
-  env: { RESPAN_API_KEY: ${RESPAN_API_KEY} }
-  kwargs:
-    config_toml: |
-      model_provider = "respan"
-      [model_providers.respan]
-      name = "Respan Gateway"
-      base_url = "https://endpoint.respan.ai/api/"
-      wire_api = "responses"
-      env_key = "RESPAN_API_KEY"
-    reasoning_effort: xhigh
-```
-
-**Gemini CLI**:
-
-```yaml
-- name: gemini-cli
-  model_name: gemini/gemini-3.1-pro-preview
-  env:
-    GEMINI_API_KEY: ${RESPAN_API_KEY}
-    GOOGLE_GENERATIVE_AI_API_KEY: ${RESPAN_API_KEY}
-    GEMINI_API_BASE: https://endpoint.respan.ai/api/google/vertexai/v1beta
-    GOOGLE_GEMINI_BASE_URL: https://endpoint.respan.ai/api/google/vertexai/
-```
-
-**Cursor CLI** uses the installed `cursor-agent` binary, so it fits the same
-inside-the-sandbox path as Claude Code, Codex, Gemini CLI, and OpenCode. Use
-`cursor/composer-2.5` for Composer 2.5 trial metadata and pass `CURSOR_API_KEY`
-through your env file.
-
-```yaml
-- name: cursor-cli
-  model_name: cursor/composer-2.5
-  env:
-    CURSOR_API_KEY: ${CURSOR_API_KEY}
-```
-
-**OpenCode** uses `opencode_config` to add unknown providers or override known ones. To redirect Google to Respan, override just `options.baseURL`; to add a fully custom provider, use `opencode_config.provider.<name>` with the npm package, options, and models.
-
-**mini-swe-agent** picks a native adapter from the model-name prefix: `openai/...` → `litellm_response` (OpenAI Responses end-to-end), `openrouter/...` → `openrouter` (BYOK costs from `cost_details.upstream_inference_cost`), everything else → LiteLLM auto.
-
-For Gemini 3 via mini-swe-agent/LiteLLM, omitting `reasoning_effort` uses the Gemini API default high/dynamic thinking level, but it does not request readable thought summaries. Set `kwargs.reasoning_effort: high` explicitly when you want LiteLLM to send `includeThoughts` and preserve returned summaries as reasoning content.
-
-```yaml
-- name: mini-swe-agent
-  model_name: openrouter/qwen/qwen3.6-plus
-  env: { OPENROUTER_API_KEY: ${OPENROUTER_API_KEY} }
-  kwargs:
-    set_cache_control: default_end
-```
+Apache-2.0. Titanium is derived from [Pier](https://github.com/datacurve-ai/pier), which is derived from [Harbor](https://github.com/harbor-framework/harbor); see [`NOTICE`](NOTICE).

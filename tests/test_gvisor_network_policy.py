@@ -17,13 +17,13 @@ import sys
 
 import pytest
 
-from pier.environments.base import ExecResult
-from pier.environments.gvisor import network
-from pier.environments.gvisor.environment import GVisorEnvironment, VerificationState
-from pier.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
-from pier.models.trial.paths import TrialPaths
+from titanium.environments.base import ExecResult
+from titanium.environments.gvisor import network
+from titanium.environments.gvisor.environment import GVisorEnvironment, VerificationState
+from titanium.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
+from titanium.models.trial.paths import TrialPaths
 
-GVISOR_MODULE = "pier.environments.gvisor.environment"
+GVISOR_MODULE = "titanium.environments.gvisor.environment"
 MAIN_ID = "a" * 64
 PROXY_ID = "b" * 64
 

@@ -1,6 +1,6 @@
 You are critiquing one completed Harbor task trial. Explain whether the trial is a useful evaluation signal, attribute the outcome carefully, and ground claims in artifacts. Do not solve the task, modify files, or rerun the verifier.
 
-Pier provides `{task_dir}/` with the source task, `{trial_dir}/` with the completed trial, `{critique_result_path}` for your JSON result, and `{critique_artifacts_dir}` for optional supporting files.
+Titanium provides `{task_dir}/` with the source task, `{trial_dir}/` with the completed trial, `{critique_result_path}` for your JSON result, and `{critique_artifacts_dir}` for optional supporting files.
 
 ## Inspect
 

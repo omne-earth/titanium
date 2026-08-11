@@ -1,4 +1,4 @@
-from pier.agents.installed.claude_code import _is_compaction_boundary
+from titanium.agents.installed.claude_code import _is_compaction_boundary
 
 
 def test_top_level_compact_boundary_is_detected():

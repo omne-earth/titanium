@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host preflight for running Pier on Podman without a socket.
+# Host preflight for running Titanium on Podman without a socket.
 # Checks the things that actually break, in the order they break.
 #
 #   ./podman.sh              # report only
@@ -13,7 +13,7 @@ set -uo pipefail
 FIX=0
 [[ "${1:-}" == "--bootstrap" || "${1:-}" == "--fix" ]] && FIX=1
 
-# podman-compose and pier are project deps — prefer the repo venv over system PATH
+# podman-compose and titanium are project deps — prefer the repo venv over system PATH
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [[ -d "$REPO_ROOT/.venv/bin" ]] && PATH="$REPO_ROOT/.venv/bin:$PATH"
 
@@ -116,7 +116,7 @@ BACKEND=$(podman info --format '{{.Host.NetworkBackend}}' 2>/dev/null)
 case "$BACKEND" in
   netavark)
     if podman info --format '{{.Host.NetworkBackendInfo.DNS.Path}}' 2>/dev/null | grep -q .; then
-      ok "netavark + aardvark-dns — 'pier-egress-proxy' will resolve"
+      ok "netavark + aardvark-dns — 'titanium-egress-proxy' will resolve"
     else
       bad "netavark present but aardvark-dns missing — install aardvark-dns, or air-gapped tasks will fail at agent install"
     fi ;;
@@ -126,7 +126,7 @@ esac
 
 echo
 echo "== short-name resolution =="
-# Pier fully qualifies its own image references at build preparation (the
+# Titanium fully qualifies its own image references at build preparation (the
 # agent-install Dockerfile rewrite, the prebuilt image name, and the egress
 # proxy image), so the standard flow needs no search-registry configuration
 # and the doctor no longer writes any. The residual: a task built directly
@@ -139,10 +139,10 @@ mode=$(grep -hs '^[[:space:]]*short-name-mode' "$EFFECTIVE_CONF" | tail -1 | sed
 mode=${mode:-enforcing}  # podman's compiled-in default
 
 if [[ "$mode" == "enforcing" ]]; then
-  ok "short-name-mode=enforcing (podman's supply-chain default) — Pier qualifies its image references, so the standard flow never needs a search registry.
+  ok "short-name-mode=enforcing (podman's supply-chain default) — Titanium qualifies its image references, so the standard flow never needs a search registry.
         Only tasks built from their own Dockerfile without an agent install would hit enforcing; qualify their FROM lines instead of relaxing this."
 else
-  warn "$EFFECTIVE_CONF relaxes short names (short-name-mode=$mode) — no longer needed by Pier, which qualifies its image references.
+  warn "$EFFECTIVE_CONF relaxes short names (short-name-mode=$mode) — no longer needed by Titanium, which qualifies its image references.
         Every unqualified pull on this host resolves without confirmation; consider restoring enforcing mode."
 fi
 
@@ -150,19 +150,19 @@ echo
 echo "== cgroup delegation =="
 # Rootless Podman enforces --cpus/--memory only on cgroups v2 with the cpu and
 # memory controllers delegated to the user; otherwise it warns and silently
-# drops the limit. Pier reports the capability honestly (LIMIT tasks are
+# drops the limit. Titanium reports the capability honestly (LIMIT tasks are
 # rejected up front) and verifies enforcement after every start, but only
 # delegation makes limits actually work.
 CG=$(podman info --format '{{.Host.CgroupsVersion}}|{{.Host.CgroupControllers}}' 2>/dev/null)
 CG_VERSION=${CG%%|*}
 CG_CONTROLLERS=${CG#*|}
-DELEGATE_DROPIN=/etc/systemd/system/user@.service.d/pier-delegate.conf
+DELEGATE_DROPIN=/etc/systemd/system/user@.service.d/titanium-delegate.conf
 if [[ "$CG_VERSION" != "v2" ]]; then
   warn "cgroups ${CG_VERSION:-<unknown>} — rootless Podman cannot enforce cpu/memory limits at all.
         LIMIT/GUARANTEE tasks are rejected; AUTO tasks run unbounded. Boot with
         systemd.unified_cgroup_hierarchy=1 to get v2."
 elif [[ "$CG_CONTROLLERS" == *cpu* && "$CG_CONTROLLERS" == *memory* ]]; then
-  ok "cgroups v2 with cpu+memory delegated ($CG_CONTROLLERS) — limits enforce, and Pier verifies them post-start"
+  ok "cgroups v2 with cpu+memory delegated ($CG_CONTROLLERS) — limits enforce, and Titanium verifies them post-start"
 else
   if [[ $FIX -eq 1 ]]; then
     sudo mkdir -p "$(dirname "$DELEGATE_DROPIN")"
@@ -181,20 +181,20 @@ echo
 echo "== selinux =="
 if command -v getenforce >/dev/null && [[ "$(getenforce)" == "Enforcing" ]]; then
   ok "SELinux enforcing — bind mounts are tagged bind.selinux=z, Podman relabels them at container start.
-        Opt out with PIER_PODMAN_SELINUX_RELABEL=none if you relabel externally."
+        Opt out with TITANIUM_PODMAN_SELINUX_RELABEL=none if you relabel externally."
 else
   ok "SELinux not enforcing (or not present)"
 fi
 
 echo
-echo "== pier backend =="
-python3 -c "from pier.environments.podman import PodmanEnvironment as E; E.preflight(); print('  ok    PodmanEnvironment.preflight() passed')" 2>&1 \
-  || bad "PodmanEnvironment.preflight() failed — is pier installed?"
+echo "== titanium backend =="
+python3 -c "from titanium.environments.podman import PodmanEnvironment as E; E.preflight(); print('  ok    PodmanEnvironment.preflight() passed')" 2>&1 \
+  || bad "PodmanEnvironment.preflight() failed — is titanium installed?"
 
 echo
 if [[ $FAILED -eq 0 ]]; then
   echo "All clear. Run:"
-  echo "  pier job start -c examples/jobs/mini-swe-agent-podman.yaml"
+  echo "  titanium job start -c examples/jobs/mini-swe-agent-podman.yaml"
 else
   echo "Fix the failures above first."
   exit 1

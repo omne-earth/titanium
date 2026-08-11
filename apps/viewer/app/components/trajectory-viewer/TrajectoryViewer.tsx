@@ -6,7 +6,7 @@
  *   - the steps themselves, grouped into turns and rendered with a left
  *     gutter for cadence / step number
  *
- * Pier's host route wraps this in `<Card><CardHeader>Trajectory</CardHeader>`
+ * Titanium's host route wraps this in `<Card><CardHeader>Trajectory</CardHeader>`
  * with the "N steps / $X total" subtitle, so we don't render any chrome
  * here at depth 0 — the viewer is pure content.
  *
@@ -24,7 +24,7 @@ import { TrajectoryImageProvider, type TrajectoryImageContext } from "./Trajecto
 import type { ResolvedToolResult, ViewStep, ViewTrajectory } from "./types";
 
 export interface TrajectoryViewerProps {
-  /** Either a raw ATIF (pier API shape) or a pre-adapted view one. */
+  /** Either a raw ATIF (titanium API shape) or a pre-adapted view one. */
   trajectory: ApiTrajectory | ViewTrajectory;
   /** Trial coordinates used to fetch inline images. When omitted, image
    *  parts render a `[path]` placeholder. */
@@ -175,7 +175,7 @@ interface StepDurationInfo {
 }
 
 /**
- * Per-step duration bar — pier's original timeline. One segment per
+ * Per-step duration bar — titanium's original timeline. One segment per
  * ATIF step. Width ∝ each step's wall-clock distance from the previous
  * step. Colors oscillate through 4 neutral shades in a 1-2-3-4-3-2
  * period-of-6 pattern so adjacent segments are visually distinguishable
@@ -323,7 +323,7 @@ function firstEpoch(traj: ViewTrajectory): number | undefined {
 }
 
 function oscillatingColor(index: number): string {
-  // Pier's original "1-2-3-4-3-2" period of 6.
+  // Titanium's original "1-2-3-4-3-2" period of 6.
   const colors = [
     "var(--color-neutral-400)",
     "var(--color-neutral-500)",

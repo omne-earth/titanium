@@ -777,7 +777,7 @@ export default function Home() {
               Jobs
             </h1>
             <p className="text-sm text-muted-foreground">
-              Browse and inspect Pier jobs
+              Browse and inspect Titanium jobs
             </p>
           </div>
           <div className="flex flex-col justify-between items-start xl:items-end gap-6">
@@ -956,11 +956,11 @@ export default function Home() {
                   <code
                     className="bg-muted px-1 py-0.5 cursor-default hover:bg-ring/20 hover:text-foreground transition-colors"
                     onClick={() => {
-                      navigator.clipboard.writeText("pier run -d <dataset>");
+                      navigator.clipboard.writeText("titanium run -d <dataset>");
                       toast("Copied to clipboard");
                     }}
                   >
-                    pier run -d &lt;dataset&gt;
+                    titanium run -d &lt;dataset&gt;
                   </code>
                 </EmptyDescription>
               </EmptyHeader>

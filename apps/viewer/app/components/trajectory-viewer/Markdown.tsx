@@ -1,10 +1,10 @@
 /**
  * Compact markdown renderer used inside the trajectory viewer.
  *
- * Pier's `~/components/ui/markdown.tsx` wraps everything in a card; we
+ * Titanium's `~/components/ui/markdown.tsx` wraps everything in a card; we
  * want inline-flowing prose that sits naturally inside an assistant
  * turn, so we reimplement the bits we need with shadcn / tailwind tokens
- * and delegate fenced code blocks to pier's existing `CodeBlock`.
+ * and delegate fenced code blocks to titanium's existing `CodeBlock`.
  */
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";

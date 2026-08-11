@@ -7,7 +7,7 @@
 # Collected: FROM images of every task environment Dockerfile (multi-stage
 # references excluded, qualification identical to build preparation), the
 # egress proxy base, and — only with --prebuilt, matching
-# PIER_IMAGE_SOURCE=prebuilt — each task's docker_image. Image-only tasks
+# TITANIUM_IMAGE_SOURCE=prebuilt — each task's docker_image. Image-only tasks
 # (no Dockerfile) always contribute their docker_image: there is nothing
 # else to build from.
 set -ueo pipefail
@@ -23,7 +23,7 @@ refs=$("$PY" - "$TASKS_DIR" "$PREBUILT" <<'EOF'
 import re, sys
 from pathlib import Path
 
-from pier.environments.agent_setup import (
+from titanium.environments.agent_setup import (
     _AS_STAGE_RE,
     _FROM_LINE_RE,
     qualify_image_reference,
@@ -33,7 +33,7 @@ tasks_dir = Path(sys.argv[1])
 include_prebuilt = sys.argv[2] == "--prebuilt"
 refs: set[str] = set()
 
-# The egress proxy base (pier-owned, always in play for allowlist tasks).
+# The egress proxy base (titanium-owned, always in play for allowlist tasks).
 refs.add("docker.io/library/alpine:3.22")
 
 for toml in tasks_dir.rglob("task.toml"):

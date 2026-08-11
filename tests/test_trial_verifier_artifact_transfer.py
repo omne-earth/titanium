@@ -2,7 +2,7 @@
 
 Vendored from harbor's tests/unit/test_trial_verifier_artifact_transfer.py and
 the agent-env-stop lifecycle tests from tests/unit/test_trial_verifier_separate.py,
-adapted to pier's Trial API (no pytest-asyncio, no with_default_user shim).
+adapted to titanium's Trial API (no pytest-asyncio, no with_default_user shim).
 """
 
 import asyncio
@@ -11,22 +11,22 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from pier.environments.base import ExecResult
-from pier.models.task.config import TaskOS
-from pier.models.trial.config import TaskConfig as TrialTaskConfig
-from pier.models.trial.config import (
+from titanium.environments.base import ExecResult
+from titanium.models.task.config import TaskOS
+from titanium.models.trial.config import TaskConfig as TrialTaskConfig
+from titanium.models.trial.config import (
     AgentConfig,
     EnvironmentConfig,
     TrialConfig,
     VerifierConfig,
 )
-from pier.models.trial.paths import EnvironmentPaths
-from pier.models.trial.result import AgentInfo
-from pier.trial.trial import Trial
+from titanium.models.trial.paths import EnvironmentPaths
+from titanium.models.trial.result import AgentInfo
+from titanium.trial.trial import Trial
 
 
 def run_async(fn):
-    """Drive an async test with asyncio.run (pier has no pytest-asyncio)."""
+    """Drive an async test with asyncio.run (titanium has no pytest-asyncio)."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -151,11 +151,11 @@ async def _run_trial(task_dir, trials_dir, fake_create):
     )
     with (
         patch(
-            "pier.trial.trial.EnvironmentFactory.create_environment_from_config",
+            "titanium.trial.trial.EnvironmentFactory.create_environment_from_config",
             side_effect=fake_create,
         ),
         patch(
-            "pier.trial.execution.AgentFactory.create_agent_from_config",
+            "titanium.trial.execution.AgentFactory.create_agent_from_config",
             return_value=_mock_agent(),
         ),
     ):

@@ -1,7 +1,7 @@
 # gVisor-Podman environment: protections, relaxations, and hardening avenues
 
 Selector `--env gvisor-podman`, class
-`pier.environments.gvisor.podman.GVisorPodmanEnvironment`, provisioned by
+`titanium.environments.gvisor.podman.GVisorPodmanEnvironment`, provisioned by
 `scripts/init/runsc-podman.sh` (checksum-verified `runsc` at
 `/usr/local/bin`, a path Podman resolves by default — no daemon-style
 registration exists or is needed). This environment composes the other two by
@@ -61,7 +61,7 @@ deliberately keeps its TTY.
 ### 2.2 SELinux at the seam: staging mounts relabeled, process label disabled
 
 Where (mounts): `GVisorPodmanEnvironment._prepare_gvisor` passes
-`selinux_relabel` (default `z`, from `PIER_PODMAN_SELINUX_RELABEL`) into
+`selinux_relabel` (default `z`, from `TITANIUM_PODMAN_SELINUX_RELABEL`) into
 `write_compose_override`, which stamps `bind: {selinux: …}` on both staging
 binds.
 
@@ -128,18 +128,18 @@ container per check — writes to Podman storage that vanilla preflights don't
 make.
 
 Hardened since: the install script pins the binary's SHA3-512 at
-`/usr/local/share/pier/runsc.sha3-512` (trust-on-first-use when runsc
+`/usr/local/share/titanium/runsc.sha3-512` (trust-on-first-use when runsc
 pre-existed; an existing pin is never overwritten, so replacing the binary
 and re-running init cannot silently re-bless it), and
 `assert_runtime_digest` — run at CLI preflight and again at every start —
 fails closed when the pinned binary changed or vanished. A missing pin file
 is the only pass-through, for hosts provisioned before pinning
-(`PIER_RUNSC_DIGEST_PIN` relocates it). The script also registers the
+(`TITANIUM_RUNSC_DIGEST_PIN` relocates it). The script also registers the
 resolved path in root-owned `/etc/containers/containers.conf.d/
-pier-runsc.conf`, restoring a root-gated registry analogous to Docker's, and
+titanium-runsc.conf`, restoring a root-gated registry analogous to Docker's, and
 warns when a user-level `containers.conf` mentions runsc. Residual trust:
 the user-level override is warned about, not blocked (Podman's precedence is
-not Pier's to change), and an attacker with root can rewrite pin and binary
+not Titanium's to change), and an attacker with root can rewrite pin and binary
 together — the pin raises "anyone who can write the path" to "root", not to
 impossible.
 
@@ -180,7 +180,7 @@ running-only default the verification contract states. None of these relax a
 boundary; they widen *queries* so the existing fail-closed guarantees keep
 holding on Podman's output formats. Container discovery no longer trusts
 podman-compose's stamping at all: every container also carries a
-``pier.trial=<project>`` label that Pier itself passes through
+``titanium.trial=<project>`` label that Titanium itself passes through
 ``--podman-run-args`` (PodmanEnvironment._compose_base), and the discovery
 union includes it. The residual trust is scoped to *networks*, which
 podman-compose creates without run-args and which therefore still carry only
@@ -244,7 +244,7 @@ surface is ever judged worth it.
 (c) is implemented: after each verification gate passes, the shared gVisor
 base writes `runtime-verification.json` into the trial directory recording
 the engine-reported runtime identity for `main` and the proxy verbatim (a
-name when selected by name, a resolved path when selected by path — Pier
+name when selected by name, a resolved path when selected by path — Titanium
 does not re-derive paths from names, which would re-implement the engine's
 search order). Post-hoc audit sees what the engine claimed each trial ran
 under; (a)'s digest pin is what would upgrade the claim to proof.
@@ -274,9 +274,9 @@ gate for this environment's files. The smoke task
 inside, and §2.7's one-off run proves it passes on such a host; what's missing
 is making that run continuous rather than on-record-once.
 
-**[PARTIAL] Label-stamping dependency (2.5).** Implemented for containers: Pier stamps
-`pier.trial=<project>` through `--podman-run-args` and the discovery union
+**[PARTIAL] Label-stamping dependency (2.5).** Implemented for containers: Titanium stamps
+`titanium.trial=<project>` through `--podman-run-args` and the discovery union
 queries it, so container teardown owns a label no podman-compose version
 change can take away. Remaining: networks are created by podman-compose
 without run-args, so network discovery still rides the compose namespaces —
-closable by creating the network Pier-side before `up` with its own label.
+closable by creating the network Titanium-side before `up` with its own label.

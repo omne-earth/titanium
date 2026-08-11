@@ -3,25 +3,25 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from pier.models.job.config import RetryConfig
-from pier.models.job.lock import JobLock, TaskLock, TrialLock
-from pier.critique.models import CritiqueConfig, CritiqueItemResult, CritiqueJobResult
-from pier.critique.runner import (
+from titanium.models.job.config import RetryConfig
+from titanium.models.job.lock import JobLock, TaskLock, TrialLock
+from titanium.critique.models import CritiqueConfig, CritiqueItemResult, CritiqueJobResult
+from titanium.critique.runner import (
     CRITIQUE_ARTIFACTS_DIRNAME,
     CritiquePaths,
     CritiqueRunner,
     CritiqueTrial,
 )
-from pier.models.task.id import LocalTaskId
-from pier.models.trial.config import (
+from titanium.models.task.id import LocalTaskId
+from titanium.models.trial.config import (
     AgentConfig,
     EnvironmentConfig,
     TaskConfig,
     TrialConfig,
     VerifierConfig,
 )
-from pier.models.trial.paths import EnvironmentPaths
-from pier.models.trial.result import AgentInfo, ExceptionInfo, TrialResult
+from titanium.models.trial.paths import EnvironmentPaths
+from titanium.models.trial.result import AgentInfo, ExceptionInfo, TrialResult
 
 
 def _critique_item_result(

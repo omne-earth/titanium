@@ -1,16 +1,16 @@
 import asyncio
 import json
 
-from pier.environments.agent_setup import (
+from titanium.environments.agent_setup import (
     EGRESS_PROXY_PORT,
     EGRESS_PROXY_SERVICE,
     docker_run_command,
     proxy_environment,
     write_docker_proxy_compose,
 )
-from pier.environments.base import ExecResult
-from pier.environments.docker.docker import DockerEnvironment
-from pier.environments.modal import ModalEnvironment, _ModalDinD, _ModalDirect
+from titanium.environments.base import ExecResult
+from titanium.environments.docker.docker import DockerEnvironment
+from titanium.environments.modal import ModalEnvironment, _ModalDinD, _ModalDirect
 
 
 def test_docker_proxy_compose_does_not_inject_proxy_env_into_main(tmp_path):
@@ -25,7 +25,7 @@ def test_docker_proxy_compose_does_not_inject_proxy_env_into_main(tmp_path):
     compose = json.loads(path.read_text())
     main = compose["services"]["main"]
     assert "environment" not in main
-    assert main["networks"] == ["pier-egress-internal"]
+    assert main["networks"] == ["titanium-egress-internal"]
     assert EGRESS_PROXY_SERVICE in main["depends_on"]
 
 

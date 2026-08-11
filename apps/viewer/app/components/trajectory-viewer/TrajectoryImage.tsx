@@ -1,7 +1,7 @@
 /**
  * Inline image rendering for trajectory content + observation parts.
  *
- * Pier's API exposes a trial's working directory at
+ * Titanium's API exposes a trial's working directory at
  *   `/api/jobs/{job}/trials/{trial}/files/agent/{path}?step={stepName}`
  * — a stable URL shape, so the viewer just builds it directly instead of
  * asking the host for a renderer callback.
@@ -21,7 +21,7 @@ export interface TrajectoryImageContext {
   jobName: string;
   trialName: string;
   /** ATIF step identifier when the trial is being viewed at a specific
-   *  step (preview-style). Pier serializes intermediate snapshots that
+   *  step (preview-style). Titanium serializes intermediate snapshots that
    *  way; live trials leave it null. */
   stepName?: string | null;
 }
@@ -56,7 +56,7 @@ export function TrajectoryImage({ path }: TrajectoryImageProps) {
 
   if (!ctx) {
     // No provider — render a quiet placeholder rather than throwing,
-    // so embedding the viewer outside pier (e.g. unit tests) stays safe.
+    // so embedding the viewer outside titanium (e.g. unit tests) stays safe.
     return (
       <div className="my-2 rounded border border-dashed border-muted-foreground/40 bg-muted/40 p-2 text-xs text-muted-foreground">
         <ImageOff className="mr-1 inline h-3 w-3" />

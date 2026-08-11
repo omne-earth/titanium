@@ -15,7 +15,7 @@
 #
 # Privilege inventory: the single `sudo systemd-run` below is the only
 # privileged command in the run path — its sole job is asking PID 1 to start
-# the scope and drop to the runner. Everything inside the scope (pier,
+# the scope and drop to the runner. Everything inside the scope (titanium,
 # podman-compose, builds, conmon, the containers) runs unprivileged as the
 # runner. The remaining privileged machinery is not specific to this wrapper:
 # the setuid `newuidmap`/`newgidmap` helpers that all rootless podman uses,
@@ -23,7 +23,7 @@
 # the scope manager.
 #
 # Environment crossing the boundary is allowlisted: PASS_VARS names the
-# variables a trial legitimately needs (model API credentials and PIER_*
+# variables a trial legitimately needs (model API credentials and TITANIUM_*
 # knobs); nothing else from the operator's environment reaches the scope.
 set -ueo pipefail
 
@@ -41,11 +41,11 @@ id -u "$RUNNER" >/dev/null 2>&1 || {
 exec > >(cat) 2> >(cat >&2)
 
 # systemd's ExecStart= requires an absolute executable path; a relative path
-# containing a slash (`.venv/bin/pier`) is resolved against the caller's
+# containing a slash (`.venv/bin/titanium`) is resolved against the caller's
 # working directory. A bare name is left to systemd-run's PATH resolution.
 [[ "${1:-}" == */* && "${1:-}" != /* ]] && set -- "$PWD/$1" "${@:2}"
 
-PASS_VARS=(OPENROUTER_API_KEY PIER_API_BASE PIER_IMAGE_SOURCE PIER_PODMAN_SELINUX_RELABEL PIER_PODMAN_CGROUP_FAIL_CLOSED PIER_RUNSC_DIGEST_PIN)
+PASS_VARS=(OPENROUTER_API_KEY TITANIUM_API_BASE TITANIUM_IMAGE_SOURCE TITANIUM_PODMAN_SELINUX_RELABEL TITANIUM_PODMAN_CGROUP_FAIL_CLOSED TITANIUM_RUNSC_DIGEST_PIN)
 setenv_args=()
 for var in "${PASS_VARS[@]}"; do
   [[ -n "${!var:-}" ]] && setenv_args+=("--setenv=$var")

@@ -488,7 +488,7 @@ function TrajectoryPanel({
   // out agent steps from total ATIF records because adapters (claude-code,
   // codex) emit non-agent records too — system events, observations — and
   // the agent-step count is what most people want when comparing runs.
-  // The viewer fetches inline images itself via pier's
+  // The viewer fetches inline images itself via titanium's
   // `/api/jobs/.../files/agent/<path>?step=<step>` endpoint, so we just
   // hand it the trial coordinates as `imageContext`.
   const recordCount = trajectory.steps.length;
@@ -1910,8 +1910,8 @@ function ArtifactsViewer({
   );
 }
 
-function getPierCommand(trial: TrialResult): string {
-  const parts = ["pier run"];
+function getTitaniumCommand(trial: TrialResult): string {
+  const parts = ["titanium run"];
 
   if (trial.source) {
     parts.push(`-d ${trial.source}`);
@@ -2138,7 +2138,7 @@ function TrialContent({
   return (
     <>
       <CodeBlock
-        code={getPierCommand(trial)}
+        code={getTitaniumCommand(trial)}
         lang="bash"
         className="-mb-px -mx-px"
       />
