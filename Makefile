@@ -32,7 +32,7 @@ $(error BACKEND must be 'openrouter' or 'claude', got '$(BACKEND)')
 endif
 
 PIER_JOBS_DIR ?= $(RUN_DIR)/jobs
-PIER_ENV ?= podman
+PIER_ENV ?= gvisor-podman
 PIER_TASK ?= $(TASKS_DEFAULT)
 PIER_N ?= 1
 # Trial execution runs as the dedicated runner user whenever that user has
@@ -169,7 +169,7 @@ smoke-gvisor-podman: sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-pod
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) pier-run PIER_ENV=gvisor-podman PIER_TASK=$(RUN_TASKS)/$(BACKEND)/$@ PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@
 
-# full-dataset benchmarks (default env podman; run `make init` to provision).
+# full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
 # BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.
 bench-ds: sync | .sentinel/tasks
 	$(MAKE) pier-run PIER_TASK=$(TASKS_PATH_DS)/tasks PIER_JOBS_DIR=$(PIER_JOBS_DIR)/$(BACKEND)/$@ PIER_N=$(BENCH_N)
