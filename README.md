@@ -17,8 +17,10 @@ uv run titanium --help     # or: uv tool install .   to put it on your PATH
 
 ## Provision the host
 
+On a fresh Fedora host:
+
 ```bash
-make init
+bash scripts/init/bootstrap.sh
 ```
 
 Idempotent, and safe to re-run after a partial failure. It provisions, in order: rootless Podman; a digest-pinned `runsc` registered with both engines; the dedicated `titanium` runner user (`scripts/init/titanium.sh` — a nologin account with its own subuid range and container storage, used for privilege separation below); and Docker, only needed for the `docker`/`gvisor` environments.
