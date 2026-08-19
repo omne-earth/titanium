@@ -38,7 +38,14 @@ id -u "$RUNNER" >/dev/null 2>&1 || {
 # PID 1, which accepts pipes and ttys but rejects regular files ("Failed to
 # start transient service unit: Remote peer disconnected") — and
 # `make smoke-* > log` is precisely that shape.
-exec > >(cat) 2> >(cat >&2)
+#
+# stdin gets the same treatment for a different failure: driven over ssh
+# (`ssh host make smoke-...`) the inherited stdin is an sshd-created pipe
+# labeled sshd_session_t, which SELinux forbids dbus-broker to read when
+# systemd-run passes the fd ("Failed to start transient service unit:
+# Connection reset by peer"). A pipe created here carries this shell's own
+# context, which dbus-broker may read.
+exec < <(cat) > >(cat) 2> >(cat >&2)
 
 # systemd's ExecStart= requires an absolute executable path; a relative path
 # containing a slash (`.venv/bin/titanium`) is resolved against the caller's

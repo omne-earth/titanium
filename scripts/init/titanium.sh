@@ -64,11 +64,16 @@ mkdir -p "$REPO_ROOT/.run"
 sudo setfacl -R -m "u:$RUNNER:rwX" -m "d:u:$RUNNER:rwX" -m "d:u:$OPERATOR:rwX" "$REPO_ROOT/.run"
 
 # 7. Prove rootless podman works for the runner, in its own session scope —
-#    the same invocation shape titanium-run.sh uses for trials.
+#    the same invocation shape titanium-run.sh uses for trials. stdio is
+#    detached from the caller's fds: over ssh those are sshd-created pipes
+#    (sshd_session_t), which SELinux forbids dbus-broker to read when
+#    systemd-run passes them ("Connection reset by peer"); pipefail keeps
+#    the probe's failure fatal through the `cat`.
 sudo systemd-run --uid="$RUNNER" --pipe --wait --quiet --collect \
   --setenv=HOME="$RUNNER_HOME" \
   --setenv=XDG_RUNTIME_DIR="/run/user/$(id -u "$RUNNER")" \
-  podman info --format 'runner podman ok: rootless={{.Host.Security.Rootless}} cgroups={{.Host.CgroupsVersion}}'
+  podman info --format 'runner podman ok: rootless={{.Host.Security.Rootless}} cgroups={{.Host.CgroupsVersion}}' \
+  </dev/null 2>&1 | cat
 
 # 8. Stamp only after the probe proved the whole shape works: the Makefile
 #    guard tests this file, so a partially provisioned host re-runs the
