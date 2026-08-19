@@ -2,6 +2,10 @@
 set -ueox pipefail
 command -v docker >/dev/null || { echo "run scripts/init/docker.sh first"; exit 1; }
 
+# Pinned release, not `latest` — keep in lockstep with scripts/init/runsc-podman.sh
+# (rationale documented there).
+RUNSC_VERSION=${RUNSC_VERSION:-20260727.0}
+
 if ! command -v runsc >/dev/null; then
   # Download and checksum-verify in a temp dir, then rename into place: a
   # failed or torn download never leaves a partial binary on PATH.
@@ -10,7 +14,7 @@ if ! command -v runsc >/dev/null; then
   cd "$tmp"
 
   ARCH=$(uname -m)
-  URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
+  URL=https://storage.googleapis.com/gvisor/releases/release/${RUNSC_VERSION}/${ARCH}
   wget ${URL}/runsc ${URL}/runsc.sha512 \
        ${URL}/containerd-shim-runsc-v1 ${URL}/containerd-shim-runsc-v1.sha512
   sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
@@ -25,6 +29,10 @@ if ! command -v runsc >/dev/null; then
 fi
 
 command -v runsc >/dev/null || exit 1
+
+if ! runsc --version | grep -q "release-${RUNSC_VERSION}\b"; then
+  echo "warning: installed $(runsc --version | head -1) != pinned release-${RUNSC_VERSION}" >&2
+fi
 
 # Register the runtime only when missing; merge into any existing daemon.json
 # instead of clobbering it, and write via temp + rename (atomic) so a crash
