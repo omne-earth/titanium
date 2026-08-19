@@ -78,11 +78,10 @@ PY
   echo "deregistered runsc from docker"
 fi
 
-# 6. The operator's docker-group grant (docker.sh). Like the grant, the
-#    revocation goes live at the next login session.
-if id -nG "$OPERATOR" | grep -qw docker; then
-  sudo gpasswd -d "$OPERATOR" docker
-  echo "removed $OPERATOR from the docker group (active sessions keep it until re-login)"
-fi
+# The operator's docker-group grant (docker.sh) is deliberately NOT revoked:
+# the grant only goes live across a reboot, so revoke-and-reinit would cost a
+# reboot cycle every reset. It is also root-equivalent access the operator
+# already holds via sudo — nothing is gained by clawing it back. Revoke by
+# hand if the machine is leaving titanium duty: sudo gpasswd -d $USER docker
 
 echo "host deprovisioned — packages and services left installed"

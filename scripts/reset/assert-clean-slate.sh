@@ -31,8 +31,8 @@ for path in \
 done
 grep -qs '"runsc"' /etc/docker/daemon.json \
   && flag "/etc/docker/daemon.json still registers runsc"
-id -nG "$(id -un)" | grep -qw docker \
-  && flag "$(id -un) is still in the docker group"
+# The operator's docker-group membership is intentionally left in place by
+# deprovision (reboot-coupled; see deprovision.sh) — not checked here.
 
 # --- host: ACL residue on the repo and its ancestors -------------------------
 # After userdel a leftover grant shows as a numeric uid, so match both forms.
