@@ -235,3 +235,4 @@ src/titanium/viewer/static/
 .secrets
 .artifacts/
 .logs/
+.archive/
