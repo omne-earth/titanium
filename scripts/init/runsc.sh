@@ -2,9 +2,14 @@
 set -ueox pipefail
 command -v docker >/dev/null || { echo "run scripts/init/docker.sh first"; exit 1; }
 
-# Pinned release, not `latest` — keep in lockstep with scripts/init/runsc-podman.sh
-# (rationale documented there).
-RUNSC_VERSION=${RUNSC_VERSION:-20260727.0}
+# Pinned release, not `latest` — the pin lives in runtime.env, shared with
+# scripts/init/runsc-podman.sh (rationale documented there).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+[[ -f "$REPO_ROOT/runtime.env" ]] || {
+  echo "missing $REPO_ROOT/runtime.env — the checked-in runtime dependency pins" >&2
+  exit 1
+}
+source "$REPO_ROOT/runtime.env"
 
 if ! command -v runsc >/dev/null; then
   # Download and checksum-verify in a temp dir, then rename into place: a

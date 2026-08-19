@@ -4,10 +4,16 @@ command -v podman >/dev/null || { echo "install podman first (make .podman)"; ex
 
 # Pinned release, not `latest`: hosts provisioned on different days must land
 # on the same runsc, or fleet behavior varies with provisioning date and the
-# digest pin below blesses whatever happened to be current. To upgrade: bump
-# the version here, then on each host replace the binary and rotate the
-# digest pin (see the pin block below).
-RUNSC_VERSION=${RUNSC_VERSION:-20260727.0}
+# digest pin below blesses whatever happened to be current. The pin lives in
+# runtime.env (checked in, single source of truth); refusing to run without
+# it beats silently installing a guessed version. To upgrade: bump it there,
+# then on each host replace the binary and rotate the digest pin (see below).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+[[ -f "$REPO_ROOT/runtime.env" ]] || {
+  echo "missing $REPO_ROOT/runtime.env — the checked-in runtime dependency pins" >&2
+  exit 1
+}
+source "$REPO_ROOT/runtime.env"
 
 # Podman needs no daemon registration: it resolves the "runsc" runtime name
 # from containers.conf and a compiled-in table of default binary paths that

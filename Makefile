@@ -87,7 +87,8 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 # no daemon registration for podman: the binary at a default search path is
 # the whole requirement, and the script probes resolution through podman itself.
 .runsc-podman: .podman
-	@{ command -v runsc && test -f /usr/local/share/titanium/runsc.sha3-512 \
+	@{ command -v runsc && test -x /usr/local/bin/runsc-ignorecg \
+		&& test -f /usr/local/share/titanium/runsc.sha3-512 \
 		&& test -f /etc/containers/containers.conf.d/titanium-runsc.conf; } >/dev/null 2>&1 \
 		|| bash scripts/init/runsc-podman.sh
 
@@ -246,9 +247,11 @@ clean:
 
 # collect: sweep every repo-local artifact dot-folder (.run, .tasks, …) into
 # a timestamped archive instead of deleting it — the collection maneuver
-# before a reset, or on its own to shelve a finished campaign. Skipped:
-# .git and .archive are structural; .venv is rebuilt byte-equivalent by
-# `make sync` and carries nothing worth keeping (reset removes it).
+# before a reset, or on its own to shelve a finished campaign. Only
+# *untracked* dot-folders qualify: anything holding tracked files (.vscode,
+# .github, …) is source, not artifact. Also skipped: .git and .archive are
+# structural; .venv is rebuilt byte-equivalent by `make sync` and carries
+# nothing worth keeping (reset removes it).
 collect:
 	@stamp=$$(date +%Y-%m-%d__%H-%M-%S)
 	dest="$(ARCHIVE_DIR)/$$stamp"
@@ -256,6 +259,10 @@ collect:
 	for d in .*/; do
 		case "$$d" in ./|../|.git/|.archive/|.venv/) continue ;; esac
 		test -d "$$d" || continue
+		if git ls-files --error-unmatch "$$d" >/dev/null 2>&1 || [ -n "$$(git ls-files "$$d" | head -1)" ]; then
+			echo "skipping $$d (tracked)"
+			continue
+		fi
 		mkdir -p "$$dest"
 		mv "$$d" "$$dest/"
 		echo "archived $$d -> $$dest/"

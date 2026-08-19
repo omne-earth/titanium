@@ -17,6 +17,14 @@ FIX=0
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [[ -d "$REPO_ROOT/.venv/bin" ]] && PATH="$REPO_ROOT/.venv/bin:$PATH"
 
+# Version floors and pins live in runtime.env (checked in); a preflight that
+# guesses its own minimums would drift from what init actually installs.
+[[ -f "$REPO_ROOT/runtime.env" ]] || {
+  echo "missing $REPO_ROOT/runtime.env — the checked-in runtime dependency pins" >&2
+  exit 1
+}
+source "$REPO_ROOT/runtime.env"
+
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$1"; }
 warn() { printf '  \033[33mwarn\033[0m  %s\n' "$1"; }
 bad()  { printf '  \033[31mfail\033[0m  %s\n' "$1"; FAILED=1; }
@@ -30,10 +38,10 @@ command -v podman >/dev/null \
 if command -v podman-compose >/dev/null; then
   # --version prints podman's own version line first; take podman-compose's.
   PCV=$(podman-compose --version 2>/dev/null | grep 'podman-compose' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-  if [[ "$(printf '%s\n1.6.0\n' "$PCV" | sort -V | head -1)" == "1.6.0" ]]; then
+  if [[ "$(printf '%s\n%s\n' "$PCV" "$PODMAN_COMPOSE_MIN_VERSION" | sort -V | head -1)" == "$PODMAN_COMPOSE_MIN_VERSION" ]]; then
     ok "podman-compose $PCV"
   else
-    bad "podman-compose $PCV is < 1.6.0 (needs depends_on: service_healthy)"
+    bad "podman-compose $PCV is < $PODMAN_COMPOSE_MIN_VERSION (needs depends_on: service_healthy)"
   fi
 else
   bad "podman-compose not on PATH — pip install podman-compose"
