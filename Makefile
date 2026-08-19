@@ -76,8 +76,11 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 	bash scripts/doctor/podman.sh --bootstrap
 
 # guards keep re-runs sudo-free; the scripts themselves are also idempotent.
+# The group check matters after `make reset`: packages and the service
+# survive a reset, but the operator's docker-group grant does not.
 .docker:
-	@{ command -v docker && systemctl is-active -q docker; } >/dev/null 2>&1 \
+	@{ command -v docker && systemctl is-active -q docker \
+		&& id -nG "$$USER" | grep -qw docker; } >/dev/null 2>&1 \
 		|| bash scripts/init/docker.sh
 
 .runsc: .docker
