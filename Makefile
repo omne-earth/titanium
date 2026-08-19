@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean
 
 -include .secrets
 
@@ -231,6 +231,51 @@ images-vendor: sync .podman
 
 images-restore: .podman
 	bash scripts/images/restore.sh $(IMAGES_ARCHIVE)
+
+# ----------------------------------------------------------------- teardown
+ARCHIVE_DIR ?= ./.archive
+
+# clean: drop repo-local caches (test, lint, bytecode). Leaves .venv (sync's
+# domain), artifacts (.run — collect's domain), and global caches (~/.cache/uv)
+# alone. reset needs no clean: its git clean subsumes this.
+clean:
+	@rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage .coverage.*
+	find . \( -path ./.venv -o -path ./.git -o -path ./.archive \) -prune \
+		-o -type d -name __pycache__ -print0 | xargs -0r rm -rf
+	echo "caches removed"
+
+# collect: sweep every repo-local artifact dot-folder (.run, .tasks, …) into
+# a timestamped archive instead of deleting it — the collection maneuver
+# before a reset, or on its own to shelve a finished campaign. Skipped:
+# .git and .archive are structural; .venv is rebuilt byte-equivalent by
+# `make sync` and carries nothing worth keeping (reset removes it).
+collect:
+	@stamp=$$(date +%Y-%m-%d__%H-%M-%S)
+	dest="$(ARCHIVE_DIR)/$$stamp"
+	moved=0
+	for d in .*/; do
+		case "$$d" in ./|../|.git/|.archive/|.venv/) continue ;; esac
+		test -d "$$d" || continue
+		mkdir -p "$$dest"
+		mv "$$d" "$$dest/"
+		echo "archived $$d -> $$dest/"
+		moved=1
+	done
+	test "$$moved" = 1 || echo "nothing to collect"
+
+# reset: undo `make init` transitively and return the checkout to
+# fresh-clone equivalence, keeping only .secrets and .archive (collect runs
+# first, so artifacts are shelved, not lost). Host side, the inverse of the
+# init chain: runner user + ACLs + linger, delegation drop-in, runsc binaries
+# and both engine registrations, digest pin, provisioned stamp, operator's
+# docker group grant. Distro packages (podman, docker, tmux, uv, gcc) stay —
+# reset owns titanium's state, not the machine's package set. Tracked-file
+# edits are never touched; only untracked/ignored state is cleaned. Ends by
+# asserting the slate is actually clean.
+reset: collect
+	bash scripts/reset/deprovision.sh
+	git clean -xdf -e .secrets -e .archive
+	bash scripts/reset/assert-clean-slate.sh
 
 sync: .deps .uv
 	$(UV) sync
