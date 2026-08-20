@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -130,6 +130,11 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 # the (idempotent) script, and the stamp is only written after its probe.
 .titanium: .podman
 	@test -f /usr/local/share/titanium/titanium.provisioned || bash scripts/init/titanium.sh
+
+# fresh-host entry point: installs make/podman via dnf, then chains into init.
+# (If make itself is missing, run: bash scripts/init/bootstrap.sh)
+bootstrap:
+	bash scripts/init/bootstrap.sh
 
 init: sync .tmux .podman .runsc .runsc-podman .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
