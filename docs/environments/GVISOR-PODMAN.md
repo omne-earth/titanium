@@ -233,7 +233,9 @@ and verify-gvisor-podman-env's in-sandbox boundary assertion — at reward
 1.0 with zero errored trials and zero containers or networks left after
 teardown. Rootless behavior under enforcement is proven, not just
 designed. Revalidated 2026-08-19/20 at runsc release-20260810.0: two Fedora
-44 rootless, SELinux-enforcing hosts, provisioned from scratch
+44 rootless, SELinux-enforcing hosts — the main host, and a nested VM driven
+entirely over ssh (the invocation shape that surfaced the sshd_session_t
+stdio denial the run shim now guards against) — provisioned from scratch
 (`make reset` → `make bootstrap`), then full `make smoke-env` — all three
 environments at reward 1.0 with zero exceptions on both hosts, through the
 `-ignore-cgroups` registration this document now describes.
