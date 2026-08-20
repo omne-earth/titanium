@@ -202,7 +202,8 @@ now applied here for fidelity, and gvisor-podman inherits it.
 
 Linux containers only — `capabilities.windows` is `False` and the constructor
 rejects `[environment].os = "windows"` tasks. podman-compose must be ≥ 1.6.0
-(for `depends_on: service_healthy`, which the proxy health gate uses).
+(for `depends_on: service_healthy`, which the proxy health gate uses; the
+floor is pinned in `runtime.env` and enforced by the doctor).
 Service-name DNS for the egress proxy needs netavark + aardvark-dns; CNI hosts
 need the dnsname plugin or a migration (the doctor checks this).
 `podman-compose` lacks `--project-directory`, so the subprocess cwd stands in

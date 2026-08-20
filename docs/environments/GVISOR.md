@@ -2,8 +2,8 @@
 
 Selector `--env gvisor`, class
 `titanium.environments.gvisor.environment.GVisorEnvironment`, provisioned by
-`scripts/init/runsc.sh` (installs a checksum-verified `runsc`, registers it
-with the Docker daemon). This document records what vanilla runsc-under-Docker
+`scripts/init/runsc.sh` (installs a release-pinned — `runtime.env` — and
+checksum-verified `runsc`, registers it with the Docker daemon). This document records what vanilla runsc-under-Docker
 protects, exactly where Titanium relaxed it to make trials run, and concrete ways
 each relaxation could be closed. Siblings: [PODMAN.md](PODMAN.md),
 [GVISOR-PODMAN.md](GVISOR-PODMAN.md).

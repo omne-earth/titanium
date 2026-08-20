@@ -2,9 +2,10 @@
 
 Selector `--env gvisor-podman`, class
 `titanium.environments.gvisor.podman.GVisorPodmanEnvironment`, provisioned by
-`scripts/init/runsc-podman.sh` (checksum-verified `runsc` at
-`/usr/local/bin`, a path Podman resolves by default — no daemon-style
-registration exists or is needed). This environment composes the other two by
+`scripts/init/runsc-podman.sh` (a release-pinned — `runtime.env` — and
+checksum-verified `runsc` at `/usr/local/bin`, registered in root-owned
+`containers.conf.d` through an `-ignore-cgroups` wrapper; §2.3 and §2.6
+carry the why). This environment composes the other two by
 MRO — gVisor's sandboxing over Podman's driving — so **everything in
 [GVISOR.md](GVISOR.md) and [PODMAN.md](PODMAN.md) applies here**: the staging
 channel, the DNS repair, the proxy-outside-the-sandbox decision, the
@@ -134,9 +135,14 @@ and re-running init cannot silently re-bless it), and
 `assert_runtime_digest` — run at CLI preflight and again at every start —
 fails closed when the pinned binary changed or vanished. A missing pin file
 is the only pass-through, for hosts provisioned before pinning
-(`TITANIUM_RUNSC_DIGEST_PIN` relocates it). The script also registers the
-resolved path in root-owned `/etc/containers/containers.conf.d/
-titanium-runsc.conf`, restoring a root-gated registry analogous to Docker's, and
+(`TITANIUM_RUNSC_DIGEST_PIN` relocates it). The installed release is itself
+pinned (`runtime.env`), so hosts provisioned on different days cannot
+silently diverge — the digest pin blesses a chosen release, not whatever
+`latest` served that day. The script also registers the runtime in root-owned
+`/etc/containers/containers.conf.d/titanium-runsc.conf` — pointing at a
+root-owned wrapper (`/usr/local/bin/runsc-ignorecg`) that execs the pinned
+binary with `-ignore-cgroups` (§2.6) — restoring a root-gated registry
+analogous to Docker's, and
 warns when a user-level `containers.conf` mentions runsc. Residual trust:
 the user-level override is warned about, not blocked (Podman's precedence is
 not Titanium's to change), and an attacker with root can rewrite pin and binary
@@ -190,17 +196,23 @@ the compose namespaces.
 
 Inherited: `resource_capabilities` resolves to `PodmanEnvironment`'s cgroup
 detection (PODMAN.md §2.3), so v1/undelegated hosts reject `LIMIT` tasks and
-run `AUTO` tasks unbounded. The wrinkle this environment adds: even where
-controllers *are* delegated, limits are now applied by `runsc` inside a user
-namespace, and gVisor documents that cgroup configuration errors on this path
-may be ignored rather than fatal. The capability report can therefore be
-optimistic in ways the plain Podman environment's isn't — controllers
-detected, limit accepted, enforcement silently absent. Two backstops:
-runsc is registered without `--ignore-cgroups`, so where cgroup application
-fails loudly it fails loudly; and the post-start enforcement verification
-inherited from PODMAN.md §2.3 reads `main`'s `cpu.max`/`memory.max` from the
-host after every start, so the silent-ignore path is detected — fatal for
-`LIMIT`/`GUARANTEE` tasks, a logged warning for `AUTO` — rather than trusted.
+run `AUTO` tasks unbounded. The wrinkle this environment adds: rootless runsc
+cannot drive the default systemd cgroup path *at all*. Its systemd driver
+connects to the system D-Bus, where polkit denies an unprivileged
+`StartTransientUnit` outright ("interactive authentication required") — and
+even where polkit permits it, the resulting cgroup belongs to the system
+manager, so rootless runsc cannot write `cgroup.subtree_control` inside it.
+Every rootless create fails, surfacing as `podman wait --condition=running`
+blocking until the environment-start timeout. Init therefore registers the
+runtime through a root-owned wrapper that passes `-ignore-cgroups` (§2.3):
+runsc creates no cgroups and applies no limits, and enforcement rests on
+what the engine applies to the container's scope. The backstop is the
+post-start enforcement verification inherited from PODMAN.md §2.3, which
+reads `main`'s `cpu.max`/`memory.max` from the host after every start —
+fatal for `LIMIT`/`GUARANTEE` tasks, a logged warning for `AUTO` — so absent
+enforcement is loud, never trusted. On current Fedora rootless hosts that
+read-back does report unenforced limits for `AUTO` tasks; the gap is §4's
+remaining transient-scope avenue, and it is a loud gap, not a silent one.
 
 ### 2.7 Validation posture: rootful- and rootless-verified
 
@@ -220,7 +232,11 @@ is on record from the same day: unit suite green and all three smoke trials
 and verify-gvisor-podman-env's in-sandbox boundary assertion — at reward
 1.0 with zero errored trials and zero containers or networks left after
 teardown. Rootless behavior under enforcement is proven, not just
-designed.
+designed. Revalidated 2026-08-19/20 at runsc release-20260810.0: two Fedora
+44 rootless, SELinux-enforcing hosts, provisioned from scratch
+(`make reset` → `make bootstrap`), then full `make smoke-env` — all three
+environments at reward 1.0 with zero exceptions on both hosts, through the
+`-ignore-cgroups` registration this document now describes.
 
 ## 3. Inherited and functional limitations (not relaxations)
 
@@ -263,9 +279,11 @@ reaches its own staging, while other labeled containers lose access.
 **[DONE] Cgroup honesty (2.6).** Implemented via the inherited post-start
 enforcement verification (PODMAN.md §2.3): declared limits are read back
 from `main`'s cgroup files host-side after every start, so the silent-ignore
-path is detectable and fatal where enforcement was promised. Remaining: the
-systemd transient-scope ceiling from PODMAN.md §4 as an engine-external
-backstop for `AUTO` tasks on hosts that cannot enforce.
+path is detectable and fatal where enforcement was promised. Remaining:
+actual enforcement on this path — with `-ignore-cgroups` the read-back is
+the only line, so the systemd transient-scope ceiling from PODMAN.md §4 is
+now the avenue for enforcing (not merely detecting) limits on rootless
+hosts.
 
 **[ ] Rootless proof (2.7).** Not code: stand up a rootless, cgroups-v2-delegated,
 SELinux-enforcing host in CI and put `make smoke-gvisor-podman` in the merge
