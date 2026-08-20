@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt
 
 -include .secrets
 
@@ -74,6 +74,14 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 # needs the venv — keep after `sync` in prerequisite lists
 .podman:
 	bash scripts/doctor/podman.sh --bootstrap
+
+# hosting libvirt guests next to the Docker daemon titanium installs breaks
+# their forwarding (Docker's FORWARD drop) and can lose their firewalld zone;
+# report-only by default, ARGS=--fix repairs atomically (running guests are
+# reattached across the network restart). Not part of init: only hypervisor
+# hosts need it.
+doctor-libvirt:
+	@bash scripts/doctor/libvirt-docker.sh $(ARGS)
 
 # guards keep re-runs sudo-free; the scripts themselves are also idempotent.
 # The group check matters after `make reset`: packages and the service
