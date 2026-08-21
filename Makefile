@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -75,9 +75,20 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 .podman:
 	bash scripts/doctor/podman.sh --bootstrap
 
+# hosting libvirt guests next to the Docker daemon titanium installs breaks
+# their forwarding (Docker's FORWARD drop) and can lose their firewalld zone;
+# report-only by default, ARGS=--fix repairs atomically (running guests are
+# reattached across the network restart). Not part of init: only hypervisor
+# hosts need it.
+doctor-libvirt:
+	@bash scripts/doctor/libvirt-docker.sh $(ARGS)
+
 # guards keep re-runs sudo-free; the scripts themselves are also idempotent.
+# The group check matters after `make reset`: packages and the service
+# survive a reset, but the operator's docker-group grant does not.
 .docker:
-	@{ command -v docker && systemctl is-active -q docker; } >/dev/null 2>&1 \
+	@{ command -v docker && systemctl is-active -q docker \
+		&& id -nG "$$USER" | grep -qw docker; } >/dev/null 2>&1 \
 		|| bash scripts/init/docker.sh
 
 .runsc: .docker
@@ -87,7 +98,8 @@ SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
 # no daemon registration for podman: the binary at a default search path is
 # the whole requirement, and the script probes resolution through podman itself.
 .runsc-podman: .podman
-	@{ command -v runsc && test -f /usr/local/share/titanium/runsc.sha3-512 \
+	@{ command -v runsc && test -x /usr/local/bin/runsc-ignorecg \
+		&& test -f /usr/local/share/titanium/runsc.sha3-512 \
 		&& test -f /etc/containers/containers.conf.d/titanium-runsc.conf; } >/dev/null 2>&1 \
 		|| bash scripts/init/runsc-podman.sh
 
@@ -118,6 +130,11 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 # the (idempotent) script, and the stamp is only written after its probe.
 .titanium: .podman
 	@test -f /usr/local/share/titanium/titanium.provisioned || bash scripts/init/titanium.sh
+
+# fresh-host entry point: installs make/podman via dnf, then chains into init.
+# (If make itself is missing, run: bash scripts/init/bootstrap.sh)
+bootstrap:
+	bash scripts/init/bootstrap.sh
 
 init: sync .tmux .podman .runsc .runsc-podman .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
@@ -231,6 +248,57 @@ images-vendor: sync .podman
 
 images-restore: .podman
 	bash scripts/images/restore.sh $(IMAGES_ARCHIVE)
+
+# ----------------------------------------------------------------- teardown
+ARCHIVE_DIR ?= ./.archive
+
+# clean: drop repo-local caches (test, lint, bytecode). Leaves .venv (sync's
+# domain), artifacts (.run — collect's domain), and global caches (~/.cache/uv)
+# alone. reset needs no clean: its git clean subsumes this.
+clean:
+	@rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage .coverage.*
+	find . \( -path ./.venv -o -path ./.git -o -path ./.archive \) -prune \
+		-o -type d -name __pycache__ -print0 | xargs -0r rm -rf
+	echo "caches removed"
+
+# collect: sweep every repo-local artifact dot-folder (.run, .tasks, …) into
+# a timestamped archive instead of deleting it — the collection maneuver
+# before a reset, or on its own to shelve a finished campaign. Only
+# *untracked* dot-folders qualify: anything holding tracked files (.vscode,
+# .github, …) is source, not artifact. Also skipped: .git and .archive are
+# structural; .venv is rebuilt byte-equivalent by `make sync` and carries
+# nothing worth keeping (reset removes it).
+collect:
+	@stamp=$$(date +%Y-%m-%d__%H-%M-%S)
+	dest="$(ARCHIVE_DIR)/$$stamp"
+	moved=0
+	for d in .*/; do
+		case "$$d" in ./|../|.git/|.archive/|.venv/) continue ;; esac
+		test -d "$$d" || continue
+		if git ls-files --error-unmatch "$$d" >/dev/null 2>&1 || [ -n "$$(git ls-files "$$d" | head -1)" ]; then
+			echo "skipping $$d (tracked)"
+			continue
+		fi
+		mkdir -p "$$dest"
+		mv "$$d" "$$dest/"
+		echo "archived $$d -> $$dest/"
+		moved=1
+	done
+	test "$$moved" = 1 || echo "nothing to collect"
+
+# reset: undo `make init` transitively and return the checkout to
+# fresh-clone equivalence, keeping only .secrets and .archive (collect runs
+# first, so artifacts are shelved, not lost). Host side, the inverse of the
+# init chain: runner user + ACLs + linger, delegation drop-in, runsc binaries
+# and both engine registrations, digest pin, provisioned stamp, operator's
+# docker group grant. Distro packages (podman, docker, tmux, uv, gcc) stay —
+# reset owns titanium's state, not the machine's package set. Tracked-file
+# edits are never touched; only untracked/ignored state is cleaned. Ends by
+# asserting the slate is actually clean.
+reset: collect
+	bash scripts/reset/deprovision.sh
+	git clean -xdf -e .secrets -e .archive
+	bash scripts/reset/assert-clean-slate.sh
 
 sync: .deps .uv
 	$(UV) sync
