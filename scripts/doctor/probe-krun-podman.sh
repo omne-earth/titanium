@@ -38,18 +38,21 @@ NET=$PFX-net
 TMP=$(mktemp -d)
 
 cleanup() {
-  podman rm --force --time 2 $PFX-main $PFX-peer $PFX-limits >/dev/null 2>&1
+  podman rm --force --time 2 $PFX-main $PFX-peer $PFX-limits \
+    $PFX-vmjson $PFX-vsock >/dev/null 2>&1
+  podman rmi --force $PFX-socat-img >/dev/null 2>&1
   podman network rm --force "$NET" >/dev/null 2>&1
   rm -rf "$TMP"
 }
 trap cleanup EXIT
 
-# Poll the main container's logs for a PROBE:<marker> line; print the value
-# after '=' when present. Returns non-zero on timeout.
+# Poll a container's logs for a PROBE:<marker> line; print the value after
+# '=' when present. Returns non-zero on timeout. Container defaults to the
+# main probe container.
 marker() {
-  local name=$1 timeout=${2:-20} i=0 line
+  local name=$1 timeout=${2:-20} from=${3:-$PFX-main} i=0 line
   while [ "$i" -lt "$timeout" ]; do
-    line=$(podman logs $PFX-main 2>/dev/null | grep -o "PROBE:$name\(=.*\)\?$" | tail -1)
+    line=$(podman logs "$from" 2>/dev/null | grep -o "PROBE:$name\(=.*\)\?$" | tail -1)
     if [[ -n "$line" ]]; then printf '%s' "${line#PROBE:$name}" | sed 's/^=//'; return 0; fi
     sleep 1; i=$((i+1))
   done
@@ -245,6 +248,85 @@ SELFHTTP=$(marker SELFHTTP 20 || echo "no-marker")
 [[ "$SELFHTTP" == "krun-http-ok" ]] \
   && ok "guest reaches its own server over loopback" \
   || find_ "guest loopback fetch of its own server returned '${SELFHTTP}'"
+
+echo "== probe: vsock control channel (row 0 candidate) =="
+# libkrun maps guest vsock ports to host unix sockets (krun_add_vsock_port);
+# TSI itself rides vsock, so the channel exists in this stack. Whether the
+# crun-krun handler exposes it to an OCI container is the question. Facts
+# collected: what this build's installed docs say about vsock and the
+# .krun_vm.json config surface; whether the handler honors .krun_vm.json
+# at all (VM sizing knobs, observable from the guest); whether the guest
+# kernel exposes /dev/vsock; whether guest userspace can bind and connect
+# AF_VSOCK (socat, built into a probe image).
+echo "        krun --version: $(krun --version 2>/dev/null | head -1)"
+DOCS=$(rpm -qd crun-krun crun 2>/dev/null)
+if [[ -n "$DOCS" ]]; then
+  KDOC=$(zgrep -l -i 'krun_vm' $DOCS 2>/dev/null | head -1)
+  VDOC=$(zgrep -h -i 'vsock' $DOCS 2>/dev/null | head -3)
+  [[ -n "$KDOC" ]] \
+    && ok "installed docs describe the .krun_vm.json surface ($KDOC)" \
+    || find_ "installed docs do not mention .krun_vm.json"
+  if [[ -n "$VDOC" ]]; then
+    ok "installed docs mention vsock:"
+    echo "        $VDOC"
+  else
+    find_ "installed docs never mention vsock — no documented mapping surface in crun-krun $(krun --version 2>/dev/null | grep -oE '[0-9.]+' | head -1)"
+  fi
+else
+  warn "crun-krun not rpm-managed here — no installed docs to consult"
+fi
+
+printf '{"width":1,"ram_mib":333}\n' > "$TMP/krun_vm.json"
+podman create --name $PFX-vmjson --network none --runtime krun "$IMAGE" sh -c \
+  'echo "PROBE:NPROC=$(nproc)"; echo "PROBE:MEMTOTAL=$(grep MemTotal /proc/meminfo)"; echo "PROBE:VSOCKDEV=$(ls /dev/vsock 2>&1)"; sleep 60' >/dev/null \
+  && podman cp "$TMP/krun_vm.json" $PFX-vmjson:/.krun_vm.json \
+  && podman start $PFX-vmjson >/dev/null
+if [[ $? -eq 0 ]]; then
+  NPROC=$(marker NPROC 20 $PFX-vmjson || echo none)
+  MEMT=$(marker MEMTOTAL 10 $PFX-vmjson || echo none)
+  MEMKB=$(echo "$MEMT" | grep -oE '[0-9]+' | head -1); MEMKB=${MEMKB:-0}
+  echo "        guest sizing: nproc=$NPROC $MEMT (host nproc=$(nproc))"
+  # Judged per key: a partially honored file is a different fact from an
+  # ignored one.
+  if [[ "$MEMKB" -gt 250000 && "$MEMKB" -lt 450000 ]]; then
+    ok ".krun_vm.json ram_mib honored (asked 333, guest MemTotal ${MEMKB}kB)"
+  else
+    find_ ".krun_vm.json ram_mib not honored (asked 333, guest MemTotal ${MEMKB}kB)"
+  fi
+  [[ "$NPROC" == "1" ]] \
+    && ok ".krun_vm.json width honored (nproc=1)" \
+    || find_ ".krun_vm.json width not honored (asked 1, guest nproc=$NPROC)"
+  VSOCKDEV=$(marker VSOCKDEV 10 $PFX-vmjson || echo none)
+  [[ "$VSOCKDEV" == "/dev/vsock" ]] \
+    && ok "guest exposes /dev/vsock" \
+    || find_ "no /dev/vsock in the guest ($VSOCKDEV)"
+else
+  bad "could not stage .krun_vm.json into a created krun container"
+fi
+
+mkdir -p "$TMP/socat-img"
+printf 'FROM %s\nRUN apk add --no-cache socat\n' "$IMAGE" > "$TMP/socat-img/Dockerfile"
+if podman build -q -t $PFX-socat-img "$TMP/socat-img" >/dev/null 2>&1; then
+  podman run -d --name $PFX-vsock --network none --runtime krun $PFX-socat-img sh -c '
+timeout 2 socat VSOCK-LISTEN:1234 - </dev/null >/dev/null 2>/tmp/e
+echo "PROBE:VSOCKBIND=rc=$? err=$(head -1 /tmp/e)"
+socat -u - VSOCK-CONNECT:2:9999 </dev/null >/dev/null 2>/tmp/e2
+echo "PROBE:VSOCKCONN=rc=$? err=$(head -1 /tmp/e2)"
+sleep 60' >/dev/null
+  VSOCKBIND=$(marker VSOCKBIND 20 $PFX-vsock || echo none)
+  # A held listener dies by the probe's own timeout: GNU timeout exits 124,
+  # busybox timeout TERM-kills the child (rc=143, socat reports signal 15).
+  # An address-family failure surfaces immediately with a socat E line.
+  if [[ "$VSOCKBIND" == rc=124* || ( "$VSOCKBIND" == rc=143* && "$VSOCKBIND" == *"signal 15"* ) ]]; then
+    ok "guest userspace binds AF_VSOCK (listener held until the probe timeout)"
+  else
+    find_ "guest AF_VSOCK bind: $VSOCKBIND"
+  fi
+  VSOCKCONN=$(marker VSOCKCONN 20 $PFX-vsock || echo none)
+  echo "        guest connect to host CID 2 (unmapped port, expect refusal): $VSOCKCONN"
+else
+  bad "could not build the socat probe image (needs egress)"
+fi
 
 echo "== probe: cgroup limit enforcement, no wrapper (table row 8) =="
 if podman run -d --name $PFX-limits --network none --runtime krun --cpus 0.5 -m 256m \
