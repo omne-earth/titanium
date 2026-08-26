@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -102,6 +102,13 @@ doctor-libvirt:
 		&& test -f /usr/local/share/titanium/runsc.sha3-512 \
 		&& test -f /etc/containers/containers.conf.d/titanium-runsc.conf; } >/dev/null 2>&1 \
 		|| bash scripts/init/runsc-podman.sh
+
+# internal: evidence probes for the relaxation table in
+# docs/environments/KRUN-PODMAN.md §5. Each run prints per-probe facts that
+# convert that table's pending rows into decision records. Drives podman and
+# the krun runtime directly — no trials, no runner shim.
+_probe-krun-podman: .krun-podman
+	@bash scripts/doctor/probe-krun-podman.sh
 
 # krun (crun + libkrun): dnf-installed, digest-pinned, registered in the same
 # root-gated drop-in directory as runsc. The script also checks /dev/kvm.
