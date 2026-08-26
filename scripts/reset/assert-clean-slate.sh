@@ -25,6 +25,7 @@ for path in \
   /usr/local/bin/runsc-ignorecg \
   /usr/local/bin/containerd-shim-runsc-v1 \
   /etc/containers/containers.conf.d/titanium-runsc.conf \
+  /etc/containers/containers.conf.d/titanium-krun.conf \
   /etc/systemd/system/user@.service.d/titanium-delegate.conf \
   /usr/local/share/titanium; do
   [[ -e "$path" ]] && flag "$path remains"
@@ -32,7 +33,10 @@ done
 grep -qs '"runsc"' /etc/docker/daemon.json \
   && flag "/etc/docker/daemon.json still registers runsc"
 # The operator's docker-group membership is intentionally left in place by
-# deprovision (reboot-coupled; see deprovision.sh) — not checked here.
+# deprovision (reboot-coupled; see deprovision.sh) — not checked here. The
+# operator's kvm-group grant (krun-podman.sh, only on hosts that narrow
+# /dev/kvm) follows the same rationale and is not checked either. The
+# crun-krun package stays, like every distro package.
 
 # --- host: ACL residue on the repo and its ancestors -------------------------
 # After userdel a leftover grant shows as a numeric uid, so match both forms.

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Undo the host-level provisioning of `make init` — the inverse of
-# scripts/init/{titanium,runsc-podman,runsc,docker}.sh, in reverse order.
+# scripts/init/{titanium,krun-podman,runsc-podman,runsc,docker}.sh, in
+# reverse order.
 # Repo-local state is `make reset`'s job (collect + git clean); this script
 # touches only the host. Idempotent: every step skips when already absent.
 # Deliberately NOT undone: distro packages (podman, docker, tmux, uv, gcc)
@@ -53,10 +54,16 @@ if [[ -f /etc/systemd/system/user@.service.d/titanium-delegate.conf ]]; then
   echo "removed user@.service delegation drop-in"
 fi
 
-# 4. runsc for podman (runsc-podman.sh): registration before binaries, so no
-#    window where the runtime name resolves to a missing path; then the
-#    wrapper, the binaries, and the digest pin + provisioned stamp directory.
+# 4. Podman runtimes (runsc-podman.sh, krun-podman.sh): registrations before
+#    binaries, so no window where a runtime name resolves to a missing path;
+#    then the wrapper, the runsc binaries, and the digest pins + provisioned
+#    stamp directory (the krun pin lives there too). The krun binary itself
+#    is the distro's crun-krun package and stays, per the package policy in
+#    the header; its registration and pin are titanium's and go. The kvm
+#    group grants die with the runner account (§2) and, for the operator,
+#    follow the docker-group rationale below — not revoked.
 sudo rm -f /etc/containers/containers.conf.d/titanium-runsc.conf
+sudo rm -f /etc/containers/containers.conf.d/titanium-krun.conf
 sudo rm -f /usr/local/bin/runsc-ignorecg \
   /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1
 sudo rm -rf /usr/local/share/titanium
