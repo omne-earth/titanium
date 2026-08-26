@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -158,9 +158,12 @@ podman-%:
 unit-podman-env: .podman
 	$(PYTEST) tests/test_podman_environment.py
 
+unit-krun-podman-env: .krun-podman
+	$(PYTEST) tests/test_krun_podman_environment.py tests/test_environment_factory.py
+
 unit-podman: unit-podman-env
 
-unit-all: unit-podman
+unit-all: unit-podman unit-krun-podman-env
 
 titanium-run: | .sentinel/tasks
 	mkdir -p "$(TITANIUM_JOBS_DIR)"

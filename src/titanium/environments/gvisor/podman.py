@@ -70,6 +70,22 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
 
     _SUPPORTED_ENGINES: tuple[str, ...] = ("podman",)
 
+    # Seams for the krun flavor (KrunPodmanEnvironment), which shares the
+    # whole Podman driving and changes only what the runtime changes. The
+    # defaults are the runsc values.
+    #
+    # _PREFLIGHT_RUNTIME: the runtime name the classmethod preflight probes.
+    # _DISABLE_PROCESS_LABEL: whether the compose override carries
+    #   ``label=disable``. runsc rejects a labeled spec, so it must; crun
+    #   supports SELinux, so the krun flavor keeps the label on.
+    _PREFLIGHT_RUNTIME: str = DEFAULT_RUNTIME
+    _DISABLE_PROCESS_LABEL: bool = True
+
+    @classmethod
+    def _assert_runtime_digest(cls) -> None:
+        """Assert this flavor's digest pin; the krun flavor points elsewhere."""
+        assert_runtime_digest()
+
     def __init__(self, *args, engine: str = "podman", **kwargs):
         # The engine kwarg stays accepted for symmetry with --env gvisor, but
         # only "podman" resolves here: resolve_engine_cli (called by the
@@ -107,9 +123,9 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
         """
         PodmanEnvironment.preflight()
         assert_runtime_resolvable(
-            DEFAULT_RUNTIME, os.environ.get("TITANIUM_PODMAN_BIN", "podman")
+            cls._PREFLIGHT_RUNTIME, os.environ.get("TITANIUM_PODMAN_BIN", "podman")
         )
-        assert_runtime_digest()
+        cls._assert_runtime_digest()
 
     # -- engine seam overrides ---------------------------------------------
 
@@ -119,7 +135,7 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
         # The digest check then proves the binary answering to that name is
         # still the one the install script recorded.
         assert_runtime_resolvable(self._runtime, self._engine_cli)
-        assert_runtime_digest()
+        self._assert_runtime_digest()
 
     async def _container_runtime(self, container_id: str) -> str | None:
         # Podman's {{.HostConfig.Runtime}} is a compat placeholder ("oci");
@@ -203,7 +219,7 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
             stage_out=self._stage_out,
             dns=self._resolvers,
             selinux_relabel=relabel if relabel in ("z", "Z") else None,
-            disable_process_label=True,
+            disable_process_label=self._DISABLE_PROCESS_LABEL,
         )
 
     # -- ownership ----------------------------------------------------------
