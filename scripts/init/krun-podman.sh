@@ -31,10 +31,14 @@ if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
   echo "warning: added $(id -un) to '$KVM_GROUP' for /dev/kvm — log in again before you run trials" >&2
 fi
 
-# Same check for the titanium runner user, when it is provisioned. The
-# runner has no login sessions: trials start through systemd-run, which
-# reads group membership fresh from the user database, so the grant applies
-# from the next trial with no further step.
+# Same check for the titanium runner user. This branch serves the upgrade
+# flow: a host provisioned before krun support runs `make init` again, the
+# .titanium sentinel skips titanium.sh, and only this script sees the
+# already-existing runner. Fresh hosts take the mirror grant in
+# scripts/init/titanium.sh, which runs after this script and creates the
+# runner. The runner has no login sessions: trials start through
+# systemd-run, which reads group membership fresh from the user database,
+# so the grant applies from the next trial with no further step.
 if id titanium >/dev/null 2>&1; then
   if ! sudo -u titanium test -r /dev/kvm || ! sudo -u titanium test -w /dev/kvm; then
     KVM_GROUP=$(stat -c %G /dev/kvm)
