@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -103,6 +103,13 @@ doctor-libvirt:
 		&& test -f /etc/containers/containers.conf.d/titanium-runsc.conf; } >/dev/null 2>&1 \
 		|| bash scripts/init/runsc-podman.sh
 
+# krun (crun + libkrun): dnf-installed, digest-pinned, registered in the same
+# root-gated drop-in directory as runsc. The script also checks /dev/kvm.
+.krun-podman: .podman
+	@{ command -v krun && test -f /usr/local/share/titanium/krun.sha3-512 \
+		&& test -f /etc/containers/containers.conf.d/titanium-krun.conf; } >/dev/null 2>&1 \
+		|| bash scripts/init/krun-podman.sh
+
 # toolchain for building wheels that ship no binary for this platform/python.
 .deps:
 	@{ command -v gcc && command -v make && command -v python3 && \
@@ -136,7 +143,7 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 bootstrap:
 	bash scripts/init/bootstrap.sh
 
-init: sync .tmux .podman .runsc .runsc-podman .titanium | .sentinel/tasks
+init: sync .tmux .podman .runsc .runsc-podman .krun-podman .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
 
 # utility: run any podman command in the runner's context — trial containers
