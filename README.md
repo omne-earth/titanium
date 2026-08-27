@@ -25,13 +25,13 @@ make bootstrap    # installs make and podman, then chains into `make init`
 
 If `make` itself is missing, run `bash scripts/init/bootstrap.sh` instead. Both are idempotent. Re-run them safely after a partial failure. They provision, in order: rootless Podman; a digest-pinned `runsc` registered with both engines; a digest-pinned `krun` (KVM microVM runtime, dnf-installed, rpm-witnessed) for the `krun-podman` environment; the dedicated `titanium` runner user (a nologin account with its own subuid range and container storage); and Docker, needed only for the `docker`/`gvisor` environments.
 
-Runtime versions come from `runtime.env`, checked in at the repo root. It pins the gVisor release and the podman-compose floor, so two hosts provisioned from the same commit get the same runtime.
+Runtime versions come from `runtime.env`, checked in at the repo root. It pins the gVisor release and floors podman-compose and krun, so two hosts provisioned from the same commit get the same runtime.
 
 Then prove the whole chain end to end:
 
 ```bash
 cp .secrets.template .secrets   # fill in OPENROUTER_MODEL and OPENROUTER_API_KEY
-make smoke-env                  # runs the podman, gvisor, and gvisor-podman smokes
+make smoke-env                  # runs the podman, gvisor, gvisor-podman, and krun-podman smokes
 ```
 
 `make BACKEND=claude smoke-env` uses the `claude-code` agent instead of `mini-swe-agent`. It authenticates with `ANTHROPIC_API_KEY` from your environment or `.secrets`.
@@ -74,7 +74,7 @@ To return a host to a clean slate — before a from-scratch validation, after ch
 make reset      # undo `make init` transitively; verify the clean slate
 ```
 
-`reset` first runs `make collect`, which moves all artifact dot-folders (`.run`, `.tasks`, …) into `.archive/<timestamp>/` — nothing is deleted. It then deprovisions the host (runner user, runsc, registrations, digest pin), cleans the checkout back to fresh-clone equivalence, and asserts the result. It keeps `.secrets`, `.archive`, your tracked edits, distro packages, and the operator's docker-group grant. `make collect` also works on its own, to shelve a finished campaign. `make clean` drops repo-local caches only.
+`reset` first runs `make collect`, which moves all artifact dot-folders (`.run`, `.tasks`, …) into `.archive/<timestamp>/` — nothing is deleted. It then deprovisions the host (runner user, both sandbox runtimes' registrations and digest pins, the runsc binaries), cleans the checkout back to fresh-clone equivalence, and asserts the result. It keeps `.secrets`, `.archive`, your tracked edits, distro packages, and the operator's docker-group grant. `make collect` also works on its own, to shelve a finished campaign. `make clean` drops repo-local caches only.
 
 The recommended validation cycle for a runtime change is: `make reset` → `make bootstrap` → `make smoke-env`.
 
@@ -94,18 +94,18 @@ Every environment installs agents, honors per-task network allowlists, and runs 
 | **Runner separation** (run as a throwaway user) | — | ✓ | — | ✓ | ✓ |
 | **Air-gapped image supply** (vendor / restore) | — | ✓ | — | ✓ | ✓ |
 
-`gvisor-podman` is the default and the strongest validated option: a gVisor kernel over rootless Podman with no engine socket. On a provisioned host the entire run executes as the dedicated `titanium` user, so even a full sandbox escape never reaches your keys or source. `docker`/`gvisor` remain the compatibility path and gVisor's most polished host. `krun-podman` swaps Sentry for hardware virtualization: each container runs in a KVM microVM with a real guest kernel and a confined SELinux domain. It is batch-only (the runtime has no exec; commands ride a measured file protocol) and not yet live-validated — its probe record is [docs/environments/KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md). A further environment, `modal`, runs the same task off-host on [Modal](https://modal.com) — a third-party cloud provider, not affiliated with Titanium — for cloud fan-out or GPUs.
+`gvisor-podman` is the default and the most battle-tested: a gVisor kernel over rootless Podman with no engine socket. On a provisioned host the entire run executes as the dedicated `titanium` user, so even a full sandbox escape never reaches your keys or source. `docker`/`gvisor` remain the compatibility path and gVisor's most polished host. `krun-podman` is the validated alternative with a different boundary: each container runs in a KVM microVM with a real guest kernel, a confined SELinux domain, a tightened seccomp profile on the VMM, and no host command channel into the running guest (the runtime has no exec; commands ride a measured file protocol, so the flavor is batch-only). The trade is explicit — stronger against kernel-syscall escapes, in exchange for the host's KVM subsystem in the trust chain. Choose by threat model; the probe record is [docs/environments/KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md). A further environment, `modal`, runs the same task off-host on [Modal](https://modal.com) — a third-party cloud provider, not affiliated with Titanium — for cloud fan-out or GPUs.
 
 ## Trust chain
 
 Isolation is only as good as its trust chain, so Titanium verifies rather than assumes:
 
 - The sandbox runtime is confirmed from the host before any code runs.
-- `runsc` is version-pinned in `runtime.env` and digest-pinned at install; preflight fails closed if the binary changed.
+- `runsc` is version-pinned in `runtime.env` and digest-pinned at install; `krun` is version-floored, rpm-witnessed, and digest-pinned the same way. Preflight fails closed if either binary changed.
 - Declared resource limits are read back from the kernel. Tasks that require limits fail loudly when the kernel does not enforce them.
 - Image references are fully qualified and built from source, never pulled from mutable third-party tags.
 
-**The boundary** is containment of untrusted agent code and privilege separation on a *shared kernel* — a gVisor application kernel plus rootless, throwaway-user execution. It is not a VM or hypervisor boundary, and not a formally verified one. The per-environment protections, the relaxations made to run trials, the blast radius of each, and the avenues still open are documented in [`docs/environments/`](docs/environments/).
+**The boundary** is containment of untrusted agent code plus privilege separation. For the gvisor family it is a *shared kernel* behind a gVisor application kernel — not a VM boundary. For `krun-podman` it is exactly a hypervisor boundary: a KVM microVM per container. Neither is formally verified. The per-environment protections, the relaxations made to run trials, the blast radius of each, and the avenues still open are documented in [`docs/environments/`](docs/environments/).
 
 ## License
 

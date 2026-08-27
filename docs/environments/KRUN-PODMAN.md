@@ -120,6 +120,23 @@ GVISOR-PODMAN.md §2.1). Under krun it is the same fidelity fix it is for
 plain podman. crun tolerates the pty, and `-T` keeps transcript bytes
 pipe-clean.
 
+### 2.7 A tightened seccomp profile on the VMM
+
+The VMM process is the host-facing attack surface (§1). The probe record
+shows podman's default seccomp filter already applies to it, and this
+flavor tightens it: the compose override applies
+`src/titanium/environments/krun/seccomp.json`, the default profile minus
+unconditional allowances a VMM never needs after crun's setup — `ptrace`,
+`process_vm_readv`/`writev`, `keyctl`, `memfd_secret`, `mount`,
+`umount`/`umount2`, `pivot_root`, `unshare`, `setns`. The battery
+validates boot, virtiofs, cp, TSI egress, and AF_VSOCK under it, and the
+live syscall capture (steady state: `epoll_wait`, `ioctl`, `read`,
+`write`) stays allowed with a wide margin. The runsc flavors are
+untouched: the seam defaults to no extra `security_opt`. What no profile
+can shrink: the guest attacks KVM through the virtualization interface,
+not through the VMM's syscalls — that surface is the price of the
+boundary type.
+
 ## 3. Inherited and functional limitations
 
 Everything in GVISOR-PODMAN.md §3 and PODMAN.md §3 applies, and GVISOR.md
@@ -146,9 +163,12 @@ krun-specific limits:
   silently never executes. Only the egress proxy uses one today, and it
   runs under crun.
 * Signals stop at the VMM. `podman stop` sends SIGTERM to the VMM
-  process, and the signal never reaches the workload. Every stop is hard.
-  Teardown already force-removes, so nothing in the lifecycle depends on
-  a shutdown window.
+  process, and the signal never reaches the workload. Every stop is hard,
+  and this flavor says so up front: the compose override declares
+  `stop_signal: SIGKILL` on `main`, so teardown skips the dead grace
+  period instead of waiting ten seconds for a SIGTERM the guest cannot
+  see (observed live, 2026-08-26). Teardown already force-removes, so
+  nothing in the lifecycle depends on a shutdown window.
 * Rootfs I/O crosses virtiofs, and each container carries a VM's memory
   footprint. Syscall-heavy workloads trade gVisor's syscall tax for
   virtualization and virtiofs overhead.
@@ -195,14 +215,14 @@ SSH channel stays documented as its upgrade.
 
 | # | Relaxation | Forced by | Result (measured) | Reconciled |
 |---|------------|-----------|-------------------|------------|
-| 0 | Precondition, not a relaxation: the whole wiring rides compose exec (agent commands, in-sandbox probes, transfer pipeline) | — | **The handler does not implement exec.** But the trial uses exec as a *serial chain*: install, setup, agent config plus one long launch, pre-artifacts, verifier. It is never concurrent and never mid-run interactive (audited: `trial.py`, `installed/base.py`, per-agent run paths). The mailbox channel that can carry that chain is measured: bind-mount writes are visible host→guest and guest→host within ~1s while the guest runs. Resolved: the mailbox `exec()` override is implemented in the subclass (closing record) | Unit-proven — the mailbox override is implemented and unit-tested; live proof lands with the first smoke trial |
-| 1 | GVISOR §2.1 — staging binds puncture the rootfs | runsc rootfs is sandbox-private; `cp` unusable | Cause absent: `podman cp` is coherent in both directions against a *running* guest. Uploads land root-owned inside. Root-written and uid-1000-written exports arrive invoker-owned. Directories export intact | With row 0 — wiring stays inherited; the override is in, live proof pending |
-| 2 | GVISOR §2.4 — transfers execute as root inside the sandbox | Same cause as row 1 | Cause absent: host-side `cp` needs no guest cooperation | With row 0 — follows row 1 |
+| 0 | Precondition, not a relaxation: the whole wiring rides compose exec (agent commands, in-sandbox probes, transfer pipeline) | — | **The handler does not implement exec.** But the trial uses exec as a *serial chain*: install, setup, agent config plus one long launch, pre-artifacts, verifier. It is never concurrent and never mid-run interactive (audited: `trial.py`, `installed/base.py`, per-agent run paths). The mailbox channel that can carry that chain is measured: bind-mount writes are visible host→guest and guest→host within ~1s while the guest runs. Resolved: the mailbox `exec()` override is implemented in the subclass (closing record) | **Yes — live-proven.** `make smoke-krun-podman` (2026-08-26): three trials, zero errors, clean teardown; the mailbox carried agent install, the full agent run, transfers, and the verifier |
+| 1 | GVISOR §2.1 — staging binds puncture the rootfs | runsc rootfs is sandbox-private; `cp` unusable | Cause absent: `podman cp` is coherent in both directions against a *running* guest. Uploads land root-owned inside. Root-written and uid-1000-written exports arrive invoker-owned. Directories export intact | Yes — wiring inherited, live-proven with row 0 |
+| 2 | GVISOR §2.4 — transfers execute as root inside the sandbox | Same cause as row 1 | Cause absent: host-side `cp` needs no guest cooperation | Yes — with row 1 |
 | 3 | GVISOR §2.2 — resolv.conf repair, host resolvers in `dns:` | netstack cannot reach DNAT-to-loopback engine DNS | Cause replaced, not absent: TSI resolves host-side and bypasses aardvark names (a peer name fails, an external name resolves). Thus the lineage wiring — proxy by literal IP, sandbox never needing DNS — is required under krun for a new reason. Decision (operator, 2026-08-26): keep the lineage wiring | Yes — decision recorded, wiring kept, nothing pending |
 | 4 | GVISOR §2.3 — egress proxy off the sandbox runtime | The proxy needs engine DNS, which runsc breaks | Enabler dead: inbound TCP to a krun guest fails in every shape. Connect is refused (httpd), data is never delivered (nc), and the guest's own loopback is refused. A krun guest cannot host a TCP service. The proxy stays crun, and port-serving workloads are out of scope (§3) | Yes — proxy stays crun; the limit is documented in §3 and no onboarded task hits it |
 | 5 | GVISOR-PODMAN §2.2 — `label=disable` on `main` | runsc rejects a labeled spec | Confirmed removed: `main` runs confined as `container_kvm_t` with an MCS pair under Enforcing | Yes — shipped and confirmed |
-| 6 | GVISOR-PODMAN §2.2 — staging `z` relabel | Staging existing + podman not relabeling binds | Follows row 1: returns with staging, as inherited. The relabel is measured working: the mailbox probe mounts with `z` under Enforcing | With row 0 — follows row 1 |
-| 7 | GVISOR-PODMAN §2.4 — exports chowned to `0:0` | Staging ops under the rootless mapping | Follows row 1: returns with staging, as inherited | With row 0 — follows row 1 |
+| 6 | GVISOR-PODMAN §2.2 — staging `z` relabel | Staging existing + podman not relabeling binds | Follows row 1: returns with staging, as inherited. The relabel is measured working, and the first live run found and fixed a latent lineage bug here: staged uploads carried their source's SELinux label (`copytree` copies xattrs), which the runsc flavors' `label=disable` masked and krun's kept label exposed. The staging ops now re-align staged trees to the staging mount's context | Yes — with row 1 |
+| 7 | GVISOR-PODMAN §2.4 — exports chowned to `0:0` | Staging ops under the rootless mapping | Follows row 1: returns with staging, as inherited | Yes — with row 1 |
 | 8 | GVISOR-PODMAN §2.6 — `-ignore-cgroups` wrapper | Rootless runsc cannot drive systemd cgroups | Confirmed absent: declared `cpu.max`/`memory.max` read back enforced, with no wrapper | Yes — shipped and confirmed |
 | 9 | PODMAN §2.2 — task-mount `z` relabel | Podman engine property | Present — engine, not runtime. Keep | Yes — engine-forced keep |
 | 10 | PODMAN §2.3 — rootless limits gap | Host/engine property | Present. Keep (row 8's read-back is the backstop) | Yes — engine-forced keep |
@@ -225,10 +245,14 @@ cancellation is cooperative, each command pays ~1s of poll latency
 (measured), and interactive `attach` stays unsupported. Trust is
 unchanged: the guest cooperates or lies, exactly as with exec. Nothing
 evidentiary rides the channel, and every verification gate stays
-host-side. Status: implemented and unit-tested —
-`KrunPodmanEnvironment.exec()` and the runner live in `krun/podman.py`,
-and the parent suites pin the seam defaults. Live proof lands with the
-first smoke trial.
+host-side. Status: live-proven. `make smoke-krun-podman` on 2026-08-26
+ran three trials with zero errors and a clean teardown: the mailbox
+carried the agent install, the full agent run, the staging transfers,
+and the verifier. `verify-krun-podman-env` scored 1.0 asserting the
+microVM signatures from inside; `fix-git-offline` scored 1.0 through the
+egress proxy; `build-pmars` scored 0.0 on a model instruction-following
+miss with a failure signature identical to its gvisor-podman runs — the
+environment is not implicated.
 
 Why this is enough is worth recording. Exec is Harbor's portability
 contract, inherited through two forks (titanium ← pier ← Harbor). It is

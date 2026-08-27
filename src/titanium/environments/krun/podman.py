@@ -50,6 +50,7 @@ import itertools
 import os
 import shlex
 import uuid
+from pathlib import Path
 
 from titanium.environments.base import ExecResult
 from titanium.environments.gvisor.podman import GVisorPodmanEnvironment
@@ -66,6 +67,17 @@ DEFAULT_RUNTIME = "krun"
 KRUN_DIGEST_PIN = "/usr/local/share/titanium/krun.sha3-512"
 
 KRUN_INIT_SCRIPT = "scripts/init/krun-podman.sh"
+
+# Tightened seccomp profile for the VMM process, applied through the
+# compose override. Subtractive: podman's default profile (which the
+# probe record confirms already filters the VMM) minus unconditional
+# allowances a VMM never needs after crun's setup -- ptrace,
+# process_vm_readv/writev, keyctl, memfd_secret, mount, umount, umount2,
+# pivot_root, unshare, setns. Generated from containers-common's
+# /usr/share/containers/seccomp.json (Fedora 44, 2026-08-26); regenerate
+# by re-running the subtraction against a newer default. The battery
+# validates boot, virtiofs, vsock, and TSI egress under it.
+KRUN_SECCOMP_PROFILE = Path(__file__).parent / "seccomp.json"
 
 # The mailbox: the libkrun handler has no exec, so commands travel as
 # files. The host writes command files under the read-only staging mount;
@@ -187,6 +199,17 @@ class KrunPodmanEnvironment(GVisorPodmanEnvironment):
         # different user. The residual: images without `su` fail non-root
         # exec requests loudly.
         return "0"
+
+    def _extra_security_opt(self) -> list[str]:
+        # The VMM is the host-facing attack surface; see the profile's
+        # provenance comment above.
+        return [f"seccomp={KRUN_SECCOMP_PROFILE}"]
+
+    def _main_stop_signal(self) -> str | None:
+        # Signals stop at the VMM: the guest never sees SIGTERM, so the
+        # default stop grace is a 10-second dead wait before the SIGKILL
+        # that was always coming. Say so up front.
+        return "SIGKILL"
 
     def _prepare_gvisor(self) -> None:
         host_cmd_dir = self._stage_in / MAILBOX_DIR_NAME

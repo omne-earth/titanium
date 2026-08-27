@@ -102,6 +102,24 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
         """
         return None
 
+    def _main_stop_signal(self) -> str | None:
+        """Override for ``main``'s stop signal in the compose override.
+
+        None keeps the engine default (SIGTERM, then SIGKILL after the
+        grace period). The krun flavor declares SIGKILL: signals stop at
+        the VMM and the guest never sees a SIGTERM, so the grace period
+        is a dead wait.
+        """
+        return None
+
+    def _extra_security_opt(self) -> list[str]:
+        """Additional security_opt entries for ``main``.
+
+        Empty for the runsc flavors. The krun flavor appends its tightened
+        seccomp profile for the VMM process here.
+        """
+        return []
+
     def __init__(self, *args, engine: str = "podman", **kwargs):
         # The engine kwarg stays accepted for symmetry with --env gvisor, but
         # only "podman" resolves here: resolve_engine_cli (called by the
@@ -238,6 +256,8 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
             disable_process_label=self._DISABLE_PROCESS_LABEL,
             main_command=self._main_command(),
             main_user=self._main_user(),
+            main_stop_signal=self._main_stop_signal(),
+            extra_security_opt=self._extra_security_opt(),
         )
 
     # -- ownership ----------------------------------------------------------

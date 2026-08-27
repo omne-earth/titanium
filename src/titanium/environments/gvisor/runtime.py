@@ -40,7 +40,7 @@ from pathlib import Path, PurePosixPath
 # writes this into /etc/docker/daemon.json).
 DEFAULT_RUNTIME = "runsc"
 
-COMPOSE_OVERRIDE_NAME = "compose-gvisor.json"
+COMPOSE_OVERRIDE_NAME = "compose-runtime.json"
 
 # Per-trial staging root on the host, under the trial directory so that
 # concurrent trials can never share a path.
@@ -141,6 +141,8 @@ def write_compose_override(
     disable_process_label: bool = False,
     main_command: list[str] | None = None,
     main_user: str | None = None,
+    main_stop_signal: str | None = None,
+    extra_security_opt: Iterable[str] | None = None,
 ) -> Path:
     """Write the Compose override that puts ``main`` under *runtime*.
 
@@ -163,8 +165,8 @@ def write_compose_override(
     None. The value mirrors ``TITANIUM_PODMAN_SELINUX_RELABEL`` semantics ('z' or
     'Z'); anything else is ignored rather than emitted.
 
-    ``main_command`` and ``main_user`` override ``main``'s command and user
-    when set. The krun flavor uses them for its mailbox exec runner (the
+    ``main_command``, ``main_user``, and ``main_stop_signal`` override
+    ``main``'s command, user, and stop signal when set. The krun flavor uses them for its mailbox exec runner (the
     handler has no exec; see KRUN-PODMAN.md §5). Both default to None, so
     the runsc flavors emit neither key and stay byte-identical.
 
@@ -195,6 +197,7 @@ def write_compose_override(
     security_opt = list(SECURITY_OPT)
     if disable_process_label:
         security_opt.append("label=disable")
+    security_opt.extend(extra_security_opt or ())
 
     main: dict[str, object] = {
         "runtime": runtime,
@@ -205,6 +208,8 @@ def write_compose_override(
         main["command"] = list(main_command)
     if main_user is not None:
         main["user"] = main_user
+    if main_stop_signal is not None:
+        main["stop_signal"] = main_stop_signal
     nameservers = list(dns or [])
     if nameservers:
         main["dns"] = nameservers

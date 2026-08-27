@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -57,7 +57,7 @@ BENCH_N ?= 8
 # run-session plumbing: one tmux session per RUN_DIR, one window per target
 RUN_SESSION := titanium-$(subst .,,$(notdir $(RUN_DIR)))
 RUN_TMUX := tmux -L titanium
-SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
+SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman
 
 .uv:
 	@command -v uv >/dev/null || { \
@@ -206,6 +206,15 @@ smoke-gvisor-podman: sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-pod
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) titanium-run TITANIUM_ENV=gvisor-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
+smoke-krun-podman: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		tests/test_krun_podman_environment.py tests/test_environment_factory.py \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=titanium.environments.krun \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	$(MAKE) titanium-run TITANIUM_ENV=krun-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+
 # full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
 # BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.
 bench-ds: sync | .sentinel/tasks
@@ -242,7 +251,7 @@ run-session: sync .tmux | .sentinel/tasks
 	echo "  windows: Ctrl-b n / Ctrl-b p to cycle, Ctrl-b w to list"
 	echo "  detach:  Ctrl-b d (runs keep going)"
 
-smoke-env: SESSION_TARGETS = smoke-podman smoke-gvisor smoke-gvisor-podman
+smoke-env: SESSION_TARGETS = smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman
 smoke-env: run-session
 
 bench-all: SESSION_TARGETS = bench-ds bench-tb2
