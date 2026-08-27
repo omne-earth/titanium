@@ -87,6 +87,15 @@ make reset      # undo `make init` transitively; verify the clean slate
 
 The recommended validation cycle for a runtime change is: `make reset` → `make bootstrap` → `make smoke-env`.
 
+### Image supply: vendor and restore
+
+`make images-vendor` collects every image reference a task set can reach — Dockerfile FROMs (qualified exactly as build preparation qualifies them), image-only tasks' prebuilts, and the egress-proxy base — into one `podman save` archive. `make images-restore` loads that archive into the runner's storage. Two uses:
+
+- **Air-gapped hosts**: vendor on a connected host, restore where nothing can be pulled.
+- **Cache warming after a reset**: `reset` deletes the runner user with its home, and the runner's entire image store lives there — so every podman-family run after a reset starts from a cold cache (the Docker daemon's root-owned cache survives, which is why the docker-driven environments restart faster). `make images-restore` right after `make init` puts the podman family back on warm starts.
+
+Knobs: `IMAGES_TASKS` (default `examples/smoke`) selects the task set; `IMAGES_ARCHIVE` (default `.run/images.tar`) the archive path. Note the interaction with reset: `collect` sweeps `.run/` into `.archive/<timestamp>/`, so an archive vendored before a reset survives it — restore with `make images-restore IMAGES_ARCHIVE=.archive/<timestamp>/.run/images.tar`, or vendor to a path outside `.run` to begin with.
+
 If the host also runs libvirt guests, the Docker daemon breaks their network forwarding. Diagnose with `make doctor-libvirt`; repair with `make doctor-libvirt ARGS=--fix`. The fix is atomic: running guests stay attached across the network restart.
 
 ## Environments
