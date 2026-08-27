@@ -93,6 +93,8 @@ If the host also runs libvirt guests, the Docker daemon breaks their network for
 
 Every environment installs agents, honors per-task network allowlists, and runs air-gapped (`allow_internet = false`) tasks. They differ in *how strongly the workload is isolated from the host*. Select by threat model, not preference.
 
+Network policy is enforced by a **per-trial egress proxy**, not by trust: an allowlist task puts the sandbox on an `internal` network whose only route out is a Squid proxy built fresh for that trial (Alpine-based, per-trial auth token, the task's domain allowlist compiled in). The sandbox reaches it by literal IP and never needs DNS; the proxy is health-gated before the agent starts, runs outside the sandbox runtime, and is verified there by the same host-side checks that verify the sandbox. Air-gapped tasks get `network_mode: none` outright — the proxy exists only when an allowlist grants egress.
+
 | | `docker` | `podman` | `gvisor` | `gvisor-podman` | `krun-podman` |
 |---|---|---|---|---|---|
 | **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel | KVM microVM (libkrun) |
