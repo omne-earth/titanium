@@ -149,8 +149,8 @@ surface instead: the compose override emits `krun.cpus` and
 without `krun.cpus`, thread pools sized by core count oversubscribe
 against the cgroup quota — and the guest RAM no longer rides the OCI
 limit as a side effect. Both annotations are battery-proven (the
-annotation probe measures `nproc` and `MemTotal`), and both verify
-examples assert the sizing from inside. Tasks that declare no resources
+annotation probe measures `nproc` and `MemTotal`) and trial-proven (§4:
+the oracle verify trial asserted the sizing from inside). Tasks that declare no resources
 emit no annotations and fall to the handler defaults. One shared
 envelope remains: the guest RAM, the VMM overhead, and the virtiofs DAX
 window all live inside the same cgroup `memory.max`.
@@ -167,7 +167,10 @@ krun-specific limits:
   no NIC at all, only `lo` plus a `dummy0` placeholder. Every socket a
   guest process opens is impersonated host-side, and it is invisible to
   the guest's own netstat (probe record, §5). Three measured
-  consequences: outbound TCP and external DNS work; container-name DNS
+  consequences: outbound TCP and external DNS work on a normal network,
+  and an internal network denies all of it — the air-gapped verify
+  measured `dns: false`, so TSI's host-side resolution does not leak
+  around the airgap; container-name DNS
   does not work (TSI resolves host-side and bypasses aardvark); inbound
   TCP does not work at all. A guest listener is connection-refused from
   peers and from the guest's own loopback. Tasks whose workload serves a
