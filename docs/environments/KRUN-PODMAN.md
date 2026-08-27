@@ -166,8 +166,8 @@ pin, the clean-slate assertion checks them, and re-init restores them.
 the results are in §5. The battery was then extended twice on the same
 host: the vsock probes (guest stack, handler surface) and the bind-mount
 coherence probe that qualifies the mailbox channel. Not yet proven: no
-live trial has run under krun. §5's closing record names the chosen path
-to the first one — the mailbox exec override, not yet implemented.
+live trial has run under krun. The mailbox exec override is implemented and
+unit-tested; the first live trial is the smoke goal.
 
 ## 5. Probe record: which inherited relaxations this flavor keeps
 
@@ -191,8 +191,8 @@ SSH channel stays documented as its upgrade.
 
 | # | Relaxation | Forced by | Result (measured) | Reconciled |
 |---|------------|-----------|-------------------|------------|
-| 0 | Precondition, not a relaxation: the whole wiring rides compose exec (agent commands, in-sandbox probes, transfer pipeline) | — | **The handler does not implement exec.** But the trial uses exec as a *serial chain*: install, setup, agent config plus one long launch, pre-artifacts, verifier. It is never concurrent and never mid-run interactive (audited: `trial.py`, `installed/base.py`, per-agent run paths). The mailbox channel that can carry that chain is measured: bind-mount writes are visible host→guest and guest→host within ~1s while the guest runs. Chosen path: a mailbox `exec()` override in the subclass (closing record) | No — the mailbox `exec()` override is chosen and probed, not yet implemented |
-| 1 | GVISOR §2.1 — staging binds puncture the rootfs | runsc rootfs is sandbox-private; `cp` unusable | Cause absent: `podman cp` is coherent in both directions against a *running* guest. Uploads land root-owned inside. Root-written and uid-1000-written exports arrive invoker-owned. Directories export intact | With row 0 — decision recorded (wiring stays inherited); effective when the override lands |
+| 0 | Precondition, not a relaxation: the whole wiring rides compose exec (agent commands, in-sandbox probes, transfer pipeline) | — | **The handler does not implement exec.** But the trial uses exec as a *serial chain*: install, setup, agent config plus one long launch, pre-artifacts, verifier. It is never concurrent and never mid-run interactive (audited: `trial.py`, `installed/base.py`, per-agent run paths). The mailbox channel that can carry that chain is measured: bind-mount writes are visible host→guest and guest→host within ~1s while the guest runs. Resolved: the mailbox `exec()` override is implemented in the subclass (closing record) | Unit-proven — the mailbox override is implemented and unit-tested; live proof lands with the first smoke trial |
+| 1 | GVISOR §2.1 — staging binds puncture the rootfs | runsc rootfs is sandbox-private; `cp` unusable | Cause absent: `podman cp` is coherent in both directions against a *running* guest. Uploads land root-owned inside. Root-written and uid-1000-written exports arrive invoker-owned. Directories export intact | With row 0 — wiring stays inherited; the override is in, live proof pending |
 | 2 | GVISOR §2.4 — transfers execute as root inside the sandbox | Same cause as row 1 | Cause absent: host-side `cp` needs no guest cooperation | With row 0 — follows row 1 |
 | 3 | GVISOR §2.2 — resolv.conf repair, host resolvers in `dns:` | netstack cannot reach DNAT-to-loopback engine DNS | Cause replaced, not absent: TSI resolves host-side and bypasses aardvark names (a peer name fails, an external name resolves). Thus the lineage wiring — proxy by literal IP, sandbox never needing DNS — is required under krun for a new reason. Decision (operator, 2026-08-26): keep the lineage wiring | Yes — decision recorded, wiring kept, nothing pending |
 | 4 | GVISOR §2.3 — egress proxy off the sandbox runtime | The proxy needs engine DNS, which runsc breaks | Enabler dead: inbound TCP to a krun guest fails in every shape. Connect is refused (httpd), data is never delivered (nc), and the guest's own loopback is refused. A krun guest cannot host a TCP service. The proxy stays crun, and port-serving workloads are out of scope (§3) | Yes — proxy stays crun; the limit is documented in §3 and no onboarded task hits it |
@@ -221,8 +221,10 @@ cancellation is cooperative, each command pays ~1s of poll latency
 (measured), and interactive `attach` stays unsupported. Trust is
 unchanged: the guest cooperates or lies, exactly as with exec. Nothing
 evidentiary rides the channel, and every verification gate stays
-host-side. Status: probed viable (bind-mount row above), not yet
-implemented.
+host-side. Status: implemented and unit-tested —
+`KrunPodmanEnvironment.exec()` and the runner live in `krun/podman.py`,
+and the parent suites pin the seam defaults. Live proof lands with the
+first smoke trial.
 
 Why this is enough is worth recording. Exec is Harbor's portability
 contract, inherited through two forks (titanium ← pier ← Harbor). It is

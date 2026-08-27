@@ -165,8 +165,11 @@ podman-%:
 unit-podman-env: .podman
 	$(PYTEST) tests/test_podman_environment.py
 
+# The parent suites ride along: the krun seams live in the gvisor files,
+# and those suites pin the runsc-flavor defaults the seams must not move.
 unit-krun-podman-env: .krun-podman
-	$(PYTEST) tests/test_krun_podman_environment.py tests/test_environment_factory.py
+	$(PYTEST) tests/test_krun_podman_environment.py tests/test_environment_factory.py \
+		tests/test_gvisor_podman_environment.py tests/test_gvisor_environment.py
 
 unit-podman: unit-podman-env
 

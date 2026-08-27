@@ -86,6 +86,22 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
         """Assert this flavor's digest pin; the krun flavor points elsewhere."""
         assert_runtime_digest()
 
+    def _main_command(self) -> list[str] | None:
+        """Override for ``main``'s command in the compose override.
+
+        None keeps the compose stack's own command (the ``sleep infinity``
+        keepalive). The krun flavor returns its mailbox runner here.
+        """
+        return None
+
+    def _main_user(self) -> str | None:
+        """Override for ``main``'s user in the compose override.
+
+        None keeps the image's configured user. The krun flavor pins root
+        so its mailbox runner can serve ``user="root"`` commands.
+        """
+        return None
+
     def __init__(self, *args, engine: str = "podman", **kwargs):
         # The engine kwarg stays accepted for symmetry with --env gvisor, but
         # only "podman" resolves here: resolve_engine_cli (called by the
@@ -220,6 +236,8 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
             dns=self._resolvers,
             selinux_relabel=relabel if relabel in ("z", "Z") else None,
             disable_process_label=self._DISABLE_PROCESS_LABEL,
+            main_command=self._main_command(),
+            main_user=self._main_user(),
         )
 
     # -- ownership ----------------------------------------------------------
