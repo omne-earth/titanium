@@ -137,7 +137,7 @@ $(TASKS_PATH_TB2):
 FORCE:
 $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 	@rm -rf $@ && mkdir -p $@
-	cp -r $(SMOKE_TASKS) $(wildcard examples/smoke/$(patsubst smoke-%,verify-%-env,$(notdir $@))) $@/
+	cp -r $(SMOKE_TASKS) $(wildcard examples/smoke/$(patsubst smoke-%,verify-%-env,$(notdir $@))*) $@/
 
 # provisioning the runner user makes RUNNER=titanium the default from here on.
 # stamp-guarded, not user-guarded: a partially provisioned host must re-run

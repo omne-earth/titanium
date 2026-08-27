@@ -248,7 +248,7 @@ evidentiary rides the channel, and every verification gate stays
 host-side. Status: live-proven. `make smoke-krun-podman` on 2026-08-26
 ran three trials with zero errors and a clean teardown: the mailbox
 carried the agent install, the full agent run, the staging transfers,
-and the verifier. `verify-krun-podman-env` scored 1.0 asserting the
+and the verifier. `verify-krun-podman-env` (now `-www`) scored 1.0 asserting the
 microVM signatures from inside; `fix-git-offline` scored 1.0 through the
 egress proxy; `build-pmars` scored 0.0 on a model instruction-following
 miss with a failure signature identical to its gvisor-podman runs — the

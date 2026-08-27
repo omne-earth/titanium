@@ -1,9 +1,9 @@
 schema_version = "1.1"
-artifacts = []
+artifacts = ["/app/report.json"]
 
 [task]
-name = "titanium/verify-krun-podman-env"
-description = "In-guest probe of the krun-podman environment: egress and DNS through TSI, identity, engine-socket absence, write boundaries, and the microVM signatures (no NIC, hypervisor flag, /dev/vsock) under rootless podman + krun."
+name = "titanium/verify-krun-podman-env-airgapped"
+description = "In-guest probe of the krun-podman environment when air-gapped: egress denial on the internal network, identity, engine-socket absence, write boundaries, and the microVM signatures (no NIC, hypervisor flag, /dev/vsock) under rootless podman + krun."
 keywords = ["smoke", "sandbox", "krun", "podman"]
 [[task.authors]]
 name = "Shree Raj Shrestha"
@@ -30,7 +30,7 @@ cpus = 1
 memory_mb = 1024
 storage_mb = 5120
 gpus = 0
-allow_internet = true
+allow_internet = false
 mcp_servers = []
 
 [verifier.env]
