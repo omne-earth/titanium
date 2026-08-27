@@ -337,6 +337,31 @@ class GVisorUnixOps(UnixOps):
     def _discard(host_dir: Path) -> None:
         shutil.rmtree(host_dir, ignore_errors=True)
 
+    def _align_stage_labels(self, staged_root: Path) -> None:
+        """Re-align a staged tree's SELinux context with the staging mount.
+
+        ``shutil.copy2``/``copytree`` copy extended attributes, and
+        ``security.selinux`` rides along: a staged upload keeps its *source*
+        label (for a checkout under $HOME, ``user_home_t``) instead of the
+        ``container_file_t`` the staging mount's relabel established. An
+        unconfined sandbox never notices — which is why the runsc flavors,
+        whose ``main`` runs ``label=disable``, masked this — but a labeled
+        sandbox (krun's ``container_kvm_t``) is denied the read. Stamp the
+        staging root's own context onto everything staged. Best-effort by
+        design: hosts without SELinux raise OSError on the xattr and skip.
+        """
+        try:
+            context = os.getxattr(self._env.stage_in, "security.selinux")
+        except OSError:
+            return
+        for path in [staged_root, *staged_root.rglob("*")]:
+            try:
+                os.setxattr(
+                    path, "security.selinux", context, follow_symlinks=False
+                )
+            except OSError:
+                pass
+
     def _host_owner(self) -> str | None:
         if not hasattr(os, "getuid"):
             return None
@@ -363,6 +388,7 @@ class GVisorUnixOps(UnixOps):
         host_dir, container_dir = self._new_upload_stage()
         try:
             shutil.copy2(source, host_dir / source.name, follow_symlinks=False)
+            self._align_stage_labels(host_dir)
             staged = shlex.quote(str(container_dir / source.name))
             target = shlex.quote(str(target_path))
             base = shlex.quote(source.name)
@@ -390,6 +416,7 @@ class GVisorUnixOps(UnixOps):
         try:
             staging_root = host_dir / "payload"
             shutil.copytree(source, staging_root, symlinks=True)
+            self._align_stage_labels(host_dir)
             staged = shlex.quote(str(container_dir / "payload"))
             target = shlex.quote(str(target_dir))
             # Copy the staged entries one by one rather than `cp -a "$S"/.

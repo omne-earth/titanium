@@ -79,7 +79,12 @@ the transfer channel itself — `.titanium-stage/{in,out}` become
 `container_file_t` at the shared level, accessible to any container on the
 host, layered on top of the channel already being the environment's largest
 relaxation (GVISOR.md §2.1). The directories remain per-trial and are removed
-on stop.
+on stop. One latent seam here surfaced only when krun kept its process
+label (KRUN-PODMAN.md §5 row 6): `copytree` copies `security.selinux`, so
+staged uploads carried their *source's* label into the relabeled mount —
+invisible to this flavor's unconfined `main`, denied to a labeled one.
+The staging ops now re-align staged trees to the staging mount's context
+for every flavor.
 
 Where (process label): the same override carries `security_opt:
 label=disable` on `main`, via

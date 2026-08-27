@@ -33,6 +33,12 @@ INFRA=0
 # Same base image as the egress proxy (agent_setup.py), fully qualified so
 # short-name enforcing never fires.
 IMAGE=docker.io/library/alpine:3.22
+# The tightened VMM seccomp profile trials apply through the compose
+# override; the battery's main and vsock guests run under it so boot,
+# virtiofs, cp, TSI egress, and AF_VSOCK are all validated beneath it.
+SECCOMP_PROFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/src/titanium/environments/krun/seccomp.json"
+SECOPT=()
+[ -f "$SECCOMP_PROFILE" ] && SECOPT=(--security-opt "seccomp=$SECCOMP_PROFILE")
 PFX=titanium-krunprobe
 NET=$PFX-net
 TMP=$(mktemp -d)
@@ -105,7 +111,7 @@ podman pull -q "$IMAGE" >/dev/null || { bad "cannot pull $IMAGE"; exit 1; }
 podman network create "$NET" >/dev/null 2>&1
 podman run -d --name $PFX-peer --network "$NET" "$IMAGE" sleep 300 >/dev/null \
   || { bad "crun peer container did not start"; exit 1; }
-podman run -d --name $PFX-main --network "$NET" --runtime krun "$IMAGE" \
+podman run -d --name $PFX-main --network "$NET" --runtime krun "${SECOPT[@]}" "$IMAGE" \
   sh -c "$BOOTSTRAP" >/dev/null \
   || { bad "krun container did not start"; exit 1; }
 ok "crun peer + krun main running on $NET"
@@ -352,7 +358,7 @@ fi
 mkdir -p "$TMP/socat-img"
 printf 'FROM %s\nRUN apk add --no-cache socat\n' "$IMAGE" > "$TMP/socat-img/Dockerfile"
 if podman build -q -t $PFX-socat-img "$TMP/socat-img" >/dev/null 2>&1; then
-  podman run -d --name $PFX-vsock --network none --runtime krun $PFX-socat-img sh -c '
+  podman run -d --name $PFX-vsock --network none --runtime krun "${SECOPT[@]}" $PFX-socat-img sh -c '
 timeout 2 socat VSOCK-LISTEN:1234 - </dev/null >/dev/null 2>/tmp/e
 echo "PROBE:VSOCKBIND=rc=$? err=$(head -1 /tmp/e)"
 socat -u - VSOCK-CONNECT:2:9999 </dev/null >/dev/null 2>/tmp/e2
@@ -371,6 +377,51 @@ sleep 60' >/dev/null
   echo "        guest connect to host CID 2 (unmapped port, expect refusal): $VSOCKCONN"
 else
   bad "could not build the socat probe image (needs egress)"
+fi
+
+echo "== probe: seccomp on the VMM (host-facing attack surface) =="
+# The VMM process (libkrun) is the host-facing attack surface. Whether the
+# engine's seccomp filter applies to it decides how much a compromised VMM
+# can do next. Facts: the Seccomp and NoNewPrivs state of the running VMM,
+# and — when strace is present — the syscalls libkrun actually uses while
+# the guest boots and works, which grounds a tightened allowlist.
+VMM_PID=$(podman inspect --format '{{.State.Pid}}' $PFX-main 2>/dev/null)
+if [[ -n "$VMM_PID" && -d "/proc/$VMM_PID" ]]; then
+  SECCOMP=$(awk '/^Seccomp:/{print $2}' "/proc/$VMM_PID/status")
+  NNP=$(awk '/^NoNewPrivs:/{print $2}' "/proc/$VMM_PID/status")
+  case "$SECCOMP" in
+    2) ok "VMM runs under a seccomp filter (Seccomp=2, NoNewPrivs=$NNP)" ;;
+    0) find_ "VMM runs with NO seccomp filter (Seccomp=0, NoNewPrivs=$NNP)" ;;
+    *) find_ "VMM Seccomp=$SECCOMP (NoNewPrivs=$NNP)" ;;
+  esac
+  if command -v strace >/dev/null; then
+    # Attach during live guest activity: a cp round-trip and a log read
+    # exercise virtiofs, vsock, and the console path. The attach runs
+    # inside podman's user namespace (`podman unshare`): the VMM's uid is
+    # subuid-mapped, so a host-side same-user ptrace gets EPERM, while
+    # inside the mapping container root is uid 0 and may trace it.
+    ( sleep 1
+      echo "strace-window" > "$TMP/straceprobe"
+      podman cp "$TMP/straceprobe" $PFX-main:/tmp/straceprobe 2>/dev/null
+      podman logs --tail 1 $PFX-main >/dev/null 2>&1 ) &
+    ACTIVITY_PID=$!
+    # timeout delivers INT to strace itself, which detaches and writes the
+    # -c summary; killing the unshare wrapper would orphan it summaryless.
+    podman unshare timeout -s INT 8 \
+      strace -f -qq -c -o "$TMP/vmm-syscalls" -p "$VMM_PID" \
+      2> "$TMP/strace-err"
+    wait "$ACTIVITY_PID" 2>/dev/null
+    if [[ -s "$TMP/vmm-syscalls" ]]; then
+      CALLS=$(awk 'NR>2 && $NF ~ /^[a-z_0-9]+$/ {print $NF}' "$TMP/vmm-syscalls" | sort -u | tr '\n' ' ')
+      ok "VMM syscalls during live activity: $CALLS"
+    else
+      warn "strace captured nothing: $(head -1 "$TMP/strace-err" 2>/dev/null)"
+    fi
+  else
+    warn "strace not installed — no syscall capture"
+  fi
+else
+  bad "could not resolve the VMM pid for $PFX-main"
 fi
 
 echo "== probe: cgroup limit enforcement, no wrapper (table row 8) =="

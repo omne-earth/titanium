@@ -133,7 +133,9 @@ def test_override_keeps_the_selinux_process_label(tmp_path):
     env = _make_env(tmp_path)
     env._prepare_gvisor()
     data = json.loads(Path(env._compose_override_path).read_text())
-    assert data["services"]["main"]["security_opt"] == ["no-new-privileges:true"]
+    security_opt = data["services"]["main"]["security_opt"]
+    assert "no-new-privileges:true" in security_opt
+    assert "label=disable" not in security_opt
 
 
 def test_runsc_flavor_still_disables_the_process_label():
@@ -443,3 +445,50 @@ def test_pin_comment_does_not_mask_tampering(tmp_path):
     binary.write_bytes(b"impostor")
     with pytest.raises(RuntimeError, match="changed outside"):
         assert_runtime_digest(pin)
+
+
+def test_override_declares_sigkill_stop(tmp_path):
+    # Signals stop at the VMM; the SIGTERM grace is a dead wait under krun.
+    env = _make_env(tmp_path)
+    env._prepare_gvisor()
+    data = json.loads(Path(env._compose_override_path).read_text())
+    assert data["services"]["main"]["stop_signal"] == "SIGKILL"
+
+
+def test_runsc_flavor_keeps_the_default_stop_signal():
+    assert GVisorPodmanEnvironment._main_stop_signal(object()) is None
+
+
+# ---------------------------------------------------------------------------
+# Seccomp on the VMM
+# ---------------------------------------------------------------------------
+
+from titanium.environments.krun.podman import KRUN_SECCOMP_PROFILE
+
+
+def test_seccomp_profile_ships_and_removes_the_vmm_unneeded_set():
+    data = json.loads(KRUN_SECCOMP_PROFILE.read_text())
+    assert data["defaultAction"] == "SCMP_ACT_ERRNO"
+    allowed = {
+        n
+        for rule in data["syscalls"]
+        if rule.get("action") == "SCMP_ACT_ALLOW" and not rule.get("includes")
+        for n in rule["names"]
+    }
+    removed = {"ptrace", "process_vm_readv", "process_vm_writev", "keyctl",
+               "memfd_secret", "mount", "umount", "umount2", "pivot_root",
+               "unshare", "setns"}
+    assert not (removed & allowed)
+    # The VMM's measured steady-state set must stay allowed.
+    assert {"read", "write", "ioctl", "epoll_wait"} <= allowed
+
+
+def test_override_applies_the_seccomp_profile(tmp_path):
+    env = _make_env(tmp_path)
+    env._prepare_gvisor()
+    data = json.loads(Path(env._compose_override_path).read_text())
+    assert f"seccomp={KRUN_SECCOMP_PROFILE}" in data["services"]["main"]["security_opt"]
+
+
+def test_runsc_flavor_gains_no_extra_security_opt():
+    assert GVisorPodmanEnvironment._extra_security_opt(object()) == []
