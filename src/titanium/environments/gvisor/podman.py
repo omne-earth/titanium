@@ -112,6 +112,13 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
         """
         return None
 
+    def _main_annotations(self) -> dict[str, str] | None:
+        """OCI annotations for ``main`` in the compose override.
+
+        None for the runsc flavors. The krun flavor sizes its guest here.
+        """
+        return None
+
     def _extra_security_opt(self) -> list[str]:
         """Additional security_opt entries for ``main``.
 
@@ -258,6 +265,7 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
             main_user=self._main_user(),
             main_stop_signal=self._main_stop_signal(),
             extra_security_opt=self._extra_security_opt(),
+            main_annotations=self._main_annotations(),
         )
 
     # -- ownership ----------------------------------------------------------

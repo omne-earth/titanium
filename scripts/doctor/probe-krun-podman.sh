@@ -45,7 +45,7 @@ TMP=$(mktemp -d)
 
 cleanup() {
   podman rm --force --time 2 $PFX-main $PFX-peer $PFX-limits \
-    $PFX-vmjson $PFX-vsock $PFX-bindmnt >/dev/null 2>&1
+    $PFX-vmjson $PFX-vsock $PFX-bindmnt $PFX-annot >/dev/null 2>&1
   podman rmi --force $PFX-socat-img >/dev/null 2>&1
   podman network rm --force "$NET" >/dev/null 2>&1
   rm -rf "$TMP"
@@ -353,6 +353,28 @@ if [[ $? -eq 0 ]]; then
     || find_ "no /dev/vsock in the guest ($VSOCKDEV)"
 else
   bad "could not stage .krun_vm.json into a created krun container"
+fi
+
+# The annotation path is what trials ride (the compose override emits
+# krun.cpus / krun.ram_mib on main); prove the handler honors it the same
+# way it honors the file.
+podman run -d --name $PFX-annot --network none --runtime krun \
+  --annotation krun.cpus=1 --annotation krun.ram_mib=333 "$IMAGE" sh -c \
+  'echo "PROBE:NPROC=$(nproc)"; echo "PROBE:MEMTOTAL=$(grep MemTotal /proc/meminfo)"; sleep 60' >/dev/null
+if [[ $? -eq 0 ]]; then
+  A_NPROC=$(marker NPROC 20 $PFX-annot || echo none)
+  A_MEMT=$(marker MEMTOTAL 10 $PFX-annot || echo none)
+  A_KB=$(echo "$A_MEMT" | grep -oE '[0-9]+' | head -1); A_KB=${A_KB:-0}
+  [[ "$A_NPROC" == "1" ]] \
+    && ok "krun.cpus annotation honored (nproc=1)" \
+    || find_ "krun.cpus annotation not honored (asked 1, guest nproc=$A_NPROC)"
+  if [[ "$A_KB" -gt 250000 && "$A_KB" -lt 450000 ]]; then
+    ok "krun.ram_mib annotation honored (asked 333, guest MemTotal ${A_KB}kB)"
+  else
+    find_ "krun.ram_mib annotation not honored (asked 333, guest MemTotal ${A_KB}kB)"
+  fi
+else
+  bad "krun container with sizing annotations did not start"
 fi
 
 mkdir -p "$TMP/socat-img"

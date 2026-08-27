@@ -137,6 +137,24 @@ can shrink: the guest attacks KVM through the virtualization interface,
 not through the VMM's syscalls — that surface is the price of the
 boundary type.
 
+### 2.8 Guest sizing is explicit
+
+Without direction, the handler sizes the guest from the host: vCPUs from
+the process's affinity mask (capped at 16) and RAM from the OCI memory
+limit, falling back to 1024 MiB. Both are implicit dependencies. This
+flavor sizes the guest straight through the handler's highest-precedence
+surface instead: the compose override emits `krun.cpus` and
+`krun.ram_mib` annotations from the task's resolved `cpus` and
+`memory_mb`. Thus the guest sees exactly the cores the task declares —
+without `krun.cpus`, thread pools sized by core count oversubscribe
+against the cgroup quota — and the guest RAM no longer rides the OCI
+limit as a side effect. Both annotations are battery-proven (the
+annotation probe measures `nproc` and `MemTotal`), and both verify
+examples assert the sizing from inside. Tasks that declare no resources
+emit no annotations and fall to the handler defaults. One shared
+envelope remains: the guest RAM, the VMM overhead, and the virtiofs DAX
+window all live inside the same cgroup `memory.max`.
+
 ## 3. Inherited and functional limitations
 
 Everything in GVISOR-PODMAN.md §3 and PODMAN.md §3 applies, and GVISOR.md

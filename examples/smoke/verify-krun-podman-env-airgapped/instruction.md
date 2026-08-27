@@ -12,6 +12,8 @@ Probe and record exactly these keys:
 - `net_interfaces`: the sorted entries of `/sys/class/net` (informational — a krun guest has no NIC; expect `lo` plus a `dummy0` placeholder and no `eth0`)
 - `cpu_hypervisor`: does `/proc/cpuinfo` list the `hypervisor` flag? (true/false)
 - `vsock_dev`: does `/dev/vsock` exist? (true/false)
+- `nproc`: the CPU count the guest sees (`nproc`, integer — the task declares 1 CPU, and the environment sizes the microVM to match)
+- `mem_total_kb`: `MemTotal` from `/proc/meminfo`, in kB (integer — the task declares 1024 MB)
 - `pid1_comm`: contents of `/proc/1/comm`, stripped (informational)
 - `kernel_release`: output of `uname -r`, stripped (informational)
 
