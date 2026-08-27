@@ -319,7 +319,7 @@ else
   warn "crun-krun not rpm-managed here — no installed docs to consult"
 fi
 
-printf '{"width":1,"ram_mib":333}\n' > "$TMP/krun_vm.json"
+printf '{"cpus":1,"ram_mib":333}\n' > "$TMP/krun_vm.json"
 podman create --name $PFX-vmjson --network none --runtime krun "$IMAGE" sh -c \
   'echo "PROBE:NPROC=$(nproc)"; echo "PROBE:MEMTOTAL=$(grep MemTotal /proc/meminfo)"; echo "PROBE:VSOCKDEV=$(ls /dev/vsock 2>&1)"; sleep 60' >/dev/null \
   && podman cp "$TMP/krun_vm.json" $PFX-vmjson:/.krun_vm.json \
@@ -328,6 +328,8 @@ if [[ $? -eq 0 ]]; then
   NPROC=$(marker NPROC 20 $PFX-vmjson || echo none)
   MEMT=$(marker MEMTOTAL 10 $PFX-vmjson || echo none)
   MEMKB=$(echo "$MEMT" | grep -oE '[0-9]+' | head -1); MEMKB=${MEMKB:-0}
+  # The key is `cpus`, from crun source (krun.c); an earlier revision
+  # asked for a `width` key that never existed.
   echo "        guest sizing: nproc=$NPROC $MEMT (host nproc=$(nproc))"
   # Judged per key: a partially honored file is a different fact from an
   # ignored one.
@@ -337,8 +339,8 @@ if [[ $? -eq 0 ]]; then
     find_ ".krun_vm.json ram_mib not honored (asked 333, guest MemTotal ${MEMKB}kB)"
   fi
   [[ "$NPROC" == "1" ]] \
-    && ok ".krun_vm.json width honored (nproc=1)" \
-    || find_ ".krun_vm.json width not honored (asked 1, guest nproc=$NPROC)"
+    && ok ".krun_vm.json cpus honored (nproc=1)" \
+    || find_ ".krun_vm.json cpus not honored (asked 1, guest nproc=$NPROC)"
   VSOCKDEV=$(marker VSOCKDEV 10 $PFX-vmjson || echo none)
   [[ "$VSOCKDEV" == "/dev/vsock" ]] \
     && ok "guest exposes /dev/vsock" \

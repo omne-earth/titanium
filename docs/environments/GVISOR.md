@@ -6,7 +6,8 @@ Selector `--env gvisor`, class
 checksum-verified `runsc`, registers it with the Docker daemon). This document records what vanilla runsc-under-Docker
 protects, exactly where Titanium relaxed it to make trials run, and concrete ways
 each relaxation could be closed. Siblings: [PODMAN.md](PODMAN.md),
-[GVISOR-PODMAN.md](GVISOR-PODMAN.md).
+[GVISOR-PODMAN.md](GVISOR-PODMAN.md), and — for the KVM-microVM flavor
+that extends the podman composition — [KRUN-PODMAN.md](KRUN-PODMAN.md).
 
 ## 1. Baseline: what the vanilla setup provides
 
