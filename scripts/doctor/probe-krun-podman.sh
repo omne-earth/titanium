@@ -39,7 +39,7 @@ TMP=$(mktemp -d)
 
 cleanup() {
   podman rm --force --time 2 $PFX-main $PFX-peer $PFX-limits \
-    $PFX-vmjson $PFX-vsock >/dev/null 2>&1
+    $PFX-vmjson $PFX-vsock $PFX-bindmnt >/dev/null 2>&1
   podman rmi --force $PFX-socat-img >/dev/null 2>&1
   podman network rm --force "$NET" >/dev/null 2>&1
   rm -rf "$TMP"
@@ -196,6 +196,49 @@ if marker OUT_WRITTEN 30 >/dev/null; then
   fi
 else
   bad "guest never reported OUT_WRITTEN — cannot judge guest->host cp"
+fi
+
+echo "== probe: bind-mount coherence mid-run (the mailbox channel) =="
+# The exec-override candidate for krun is a mailbox: host and guest exchange
+# command and result files over a bind mount (the staging mounts the flavor
+# already inherits). podman cp coherence is proven above, but cp goes
+# through container storage; the mailbox rides a bind mount through
+# virtiofs while the guest runs. Both directions, measured, with a rough
+# latency bound: virtiofs cache modes could delay visibility either way.
+mkdir -p "$TMP/bindmnt"
+podman run -d --name $PFX-bindmnt --network none --runtime krun \
+  -v "$TMP/bindmnt:/mbox:z" "$IMAGE" sh -c '
+echo guest-write > /mbox/from-guest.txt
+echo "PROBE:BINDOUT_WRITTEN"
+i=0
+while [ $i -lt 30 ]; do
+  if [ -f /mbox/from-host.txt ]; then
+    echo "PROBE:BINDIN=$(cat /mbox/from-host.txt) after=${i}s"
+    break
+  fi
+  i=$((i+1)); sleep 1
+done
+sleep 120' >/dev/null
+if [[ $? -eq 0 ]]; then
+  if marker BINDOUT_WRITTEN 20 $PFX-bindmnt >/dev/null; then
+    SEEN=""
+    for i in $(seq 0 10); do
+      [[ "$(cat "$TMP/bindmnt/from-guest.txt" 2>/dev/null)" == "guest-write" ]] && { SEEN=$i; break; }
+      sleep 1
+    done
+    [[ -n "$SEEN" ]] \
+      && ok "guest bind-mount write visible on the host within ${SEEN}s" \
+      || find_ "guest bind-mount write never became visible on the host (10s)"
+  else
+    bad "guest never reported its bind-mount write"
+  fi
+  echo "host-write" > "$TMP/bindmnt/from-host.txt"
+  BINDIN=$(marker BINDIN 20 $PFX-bindmnt || echo none)
+  [[ "$BINDIN" == host-write* ]] \
+    && ok "host bind-mount write visible in the guest ($BINDIN)" \
+    || find_ "host bind-mount write never became visible in the guest ($BINDIN)"
+else
+  bad "krun container with a bind mount did not start"
 fi
 
 echo "== probe: guest network shape under TSI =="
