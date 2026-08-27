@@ -21,6 +21,8 @@ def test_report_claims():
     assert r["writable_tmp"] is True
     assert r["cpu_hypervisor"] is True
     assert r["vsock_dev"] is True
+    assert int(r["nproc"]) == 1
+    assert 900_000 <= int(r["mem_total_kb"]) <= 1_250_000
     assert "eth0" not in r["net_interfaces"]
     # dns is deliberately recorded, not asserted: whether TSI's host-side
     # resolution answers on an internal network is a measured fact, and
@@ -59,6 +61,16 @@ def test_no_nic_in_the_guest():
 def test_cpu_reports_a_hypervisor():
     flags = [line for line in open("/proc/cpuinfo") if line.startswith("flags")]
     assert flags and all(" hypervisor" in line for line in flags)
+
+
+def test_guest_is_sized_to_the_task_declaration():
+    # task.toml declares cpus = 1 and memory_mb = 1024; the environment
+    # sizes the microVM with krun.cpus / krun.ram_mib annotations, so
+    # the guest must see exactly that, not the host's cores.
+    assert os.cpu_count() == 1
+    mem_kb = int(next(
+        l for l in open('/proc/meminfo') if l.startswith('MemTotal')).split()[1])
+    assert 900_000 <= mem_kb <= 1_250_000
 
 
 def test_uname_is_not_gvisor():

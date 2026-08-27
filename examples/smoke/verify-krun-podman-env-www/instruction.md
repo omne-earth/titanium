@@ -12,6 +12,8 @@ Probe and record exactly these keys:
 - `cpu_hypervisor`: does `/proc/cpuinfo` list the `hypervisor` flag? (true/false)
 - `vsock_dev`: does `/dev/vsock` exist? (true/false)
 - `sysrq_writable`: does writing "h" to `/proc/sysrq-trigger` succeed? Actually attempt it — flush/close the file so any error surfaces — and record the outcome (informational: this is a real guest kernel, so the write may succeed, and it is contained by the VM either way)
+- `nproc`: the CPU count the guest sees (`nproc`, integer — the task declares 1 CPU, and the environment sizes the microVM to match)
+- `mem_total_kb`: `MemTotal` from `/proc/meminfo`, in kB (integer — the task declares 1024 MB)
 - `pid1_comm`: contents of `/proc/1/comm`, stripped (informational)
 - `kernel_release`: output of `uname -r`, stripped (informational)
 

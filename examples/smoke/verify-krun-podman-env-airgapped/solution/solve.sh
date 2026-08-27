@@ -42,6 +42,9 @@ r = {
         line.startswith("flags") and " hypervisor" in line
         for line in open("/proc/cpuinfo"))),
     "vsock_dev": os.path.exists("/dev/vsock"),
+    "nproc": probe(lambda: os.cpu_count(), 0),
+    "mem_total_kb": probe(lambda: int(next(
+        l for l in open("/proc/meminfo") if l.startswith("MemTotal")).split()[1]), 0),
     "pid1_comm": probe(lambda: open("/proc/1/comm").read().strip(), ""),
     "kernel_release": probe(lambda: os.uname().release, ""),
 }

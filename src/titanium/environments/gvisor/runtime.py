@@ -143,6 +143,7 @@ def write_compose_override(
     main_user: str | None = None,
     main_stop_signal: str | None = None,
     extra_security_opt: Iterable[str] | None = None,
+    main_annotations: dict[str, str] | None = None,
 ) -> Path:
     """Write the Compose override that puts ``main`` under *runtime*.
 
@@ -210,6 +211,8 @@ def write_compose_override(
         main["user"] = main_user
     if main_stop_signal is not None:
         main["stop_signal"] = main_stop_signal
+    if main_annotations:
+        main["annotations"] = dict(main_annotations)
     nameservers = list(dns or [])
     if nameservers:
         main["dns"] = nameservers

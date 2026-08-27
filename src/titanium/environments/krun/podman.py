@@ -200,6 +200,23 @@ class KrunPodmanEnvironment(GVisorPodmanEnvironment):
         # exec requests loudly.
         return "0"
 
+    def _main_annotations(self) -> dict[str, str] | None:
+        # Size the guest explicitly, straight to the handler, through the
+        # krun.* annotations (highest precedence in crun's krun handler).
+        # Without krun.cpus the guest sees the host's cores (capped at 16)
+        # regardless of the task's declaration, so thread pools sized by
+        # core count oversubscribe against the cgroup quota. Without
+        # krun.ram_mib the guest RAM rides the OCI memory limit — an
+        # implicit dependency this makes explicit. Tasks that declare
+        # nothing fall to the handler defaults, and that is recorded in
+        # KRUN-PODMAN.md §2.8.
+        annotations: dict[str, str] = {}
+        if self.task_env_config.cpus:
+            annotations["krun.cpus"] = str(int(self.task_env_config.cpus))
+        if self.task_env_config.memory_mb:
+            annotations["krun.ram_mib"] = str(int(self.task_env_config.memory_mb))
+        return annotations or None
+
     def _extra_security_opt(self) -> list[str]:
         # The VMM is the host-facing attack surface; see the profile's
         # provenance comment above.

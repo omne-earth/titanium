@@ -492,3 +492,33 @@ def test_override_applies_the_seccomp_profile(tmp_path):
 
 def test_runsc_flavor_gains_no_extra_security_opt():
     assert GVisorPodmanEnvironment._extra_security_opt(object()) == []
+
+
+# ---------------------------------------------------------------------------
+# Guest sizing -- krun.cpus / krun.ram_mib, straight to the handler
+# ---------------------------------------------------------------------------
+
+
+def test_override_sizes_the_guest_explicitly(tmp_path):
+    env = _make_env(tmp_path)
+    env.task_env_config.cpus = 2
+    env.task_env_config.memory_mb = 512
+    env._prepare_gvisor()
+    data = json.loads(Path(env._compose_override_path).read_text())
+    assert data["services"]["main"]["annotations"] == {
+        "krun.cpus": "2",
+        "krun.ram_mib": "512",
+    }
+
+
+def test_undeclared_resources_emit_no_annotations(tmp_path):
+    env = _make_env(tmp_path)
+    env.task_env_config.cpus = None
+    env.task_env_config.memory_mb = None
+    env._prepare_gvisor()
+    data = json.loads(Path(env._compose_override_path).read_text())
+    assert "annotations" not in data["services"]["main"]
+
+
+def test_runsc_flavor_emits_no_annotations():
+    assert GVisorPodmanEnvironment._main_annotations(object()) is None
