@@ -11,6 +11,9 @@ MRO — gVisor's sandboxing over Podman's driving — so **everything in
 channel, the DNS repair, the proxy-outside-the-sandbox decision, the
 short-name and SELinux relaxations, the rootless resource-limit gap. This
 document covers only what is different at the seam.
+[KRUN-PODMAN.md](KRUN-PODMAN.md) extends this environment in turn: the
+same wiring under the krun (KVM microVM) runtime, with its own probe
+record of which relaxations keep a live cause there.
 
 How the composition stays additive in code: engine-specific host-side
 interactions (runtime assert, inspect templates, runtime matching, project

@@ -23,7 +23,7 @@ On a fresh Fedora host:
 make bootstrap    # installs make and podman, then chains into `make init`
 ```
 
-If `make` itself is missing, run `bash scripts/init/bootstrap.sh` instead. Both are idempotent. Re-run them safely after a partial failure. They provision, in order: rootless Podman; a digest-pinned `runsc` registered with both engines; the dedicated `titanium` runner user (a nologin account with its own subuid range and container storage); and Docker, needed only for the `docker`/`gvisor` environments.
+If `make` itself is missing, run `bash scripts/init/bootstrap.sh` instead. Both are idempotent. Re-run them safely after a partial failure. They provision, in order: rootless Podman; a digest-pinned `runsc` registered with both engines; a digest-pinned `krun` (KVM microVM runtime, dnf-installed, rpm-witnessed) for the `krun-podman` environment; the dedicated `titanium` runner user (a nologin account with its own subuid range and container storage); and Docker, needed only for the `docker`/`gvisor` environments.
 
 Runtime versions come from `runtime.env`, checked in at the repo root. It pins the gVisor release and the podman-compose floor, so two hosts provisioned from the same commit get the same runtime.
 
@@ -62,7 +62,7 @@ titanium run -p path/to/dataset --n-tasks 10 --sample-seed 0
    Every `make` target (`make titanium-run`, `make smoke-*`, `make bench-*`) applies the shim automatically on a provisioned host. To opt out for one invocation, pass an empty runner: `make titanium-run RUNNER=`.
 3. Inspect runner-owned state through make. The runner's containers and images live in *its* storage, so your own `podman ps` shows nothing. Use `make podman-ps ARGS=--all`, `make podman-images`, or `make podman-logs ARGS=<container>`.
 
-Separation applies to the podman-family environments (`podman`, `gvisor-podman`) only. The docker-daemon environments are never wrapped: joining the runner to the root-equivalent `docker` group would nullify the separation.
+Separation applies to the podman-family environments (`podman`, `gvisor-podman`, `krun-podman`) only. The docker-daemon environments are never wrapped: joining the runner to the root-equivalent `docker` group would nullify the separation.
 
 Trials land in `jobs/<timestamp-or-name>/<trial-id>/` (`.run/jobs/…` for make targets). See `titanium run --help`, plus `titanium job`, `titanium view`, and `titanium critique`.
 
@@ -84,17 +84,17 @@ If the host also runs libvirt guests, the Docker daemon breaks their network for
 
 Every environment installs agents, honors per-task network allowlists, and runs air-gapped (`allow_internet = false`) tasks. They differ in *how strongly the workload is isolated from the host*. Select by threat model, not preference.
 
-| | `docker` | `podman` | `gvisor` | `gvisor-podman` |
-|---|---|---|---|---|
-| **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel |
-| **Engine** | Docker daemon | rootless Podman, no socket | Docker daemon | rootless Podman, no socket |
-| **Runtime** | runc | crun | runsc | runsc |
-| **A container escape lands as** | root | unprivileged user | host-side runsc processes, behind Sentry | unprivileged user, behind Sentry |
-| **Root daemon in the trust chain** | yes | no | yes | no |
-| **Runner separation** (run as a throwaway user) | — | ✓ | — | ✓ |
-| **Air-gapped image supply** (vendor / restore) | — | ✓ | — | ✓ |
+| | `docker` | `podman` | `gvisor` | `gvisor-podman` | `krun-podman` |
+|---|---|---|---|---|---|
+| **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel | KVM microVM (libkrun) |
+| **Engine** | Docker daemon | rootless Podman, no socket | Docker daemon | rootless Podman, no socket | rootless Podman, no socket |
+| **Runtime** | runc | crun | runsc | runsc | krun |
+| **A container escape lands as** | root | unprivileged user | host-side runsc processes, behind Sentry | unprivileged user, behind Sentry | unprivileged user, outside the VM |
+| **Root daemon in the trust chain** | yes | no | yes | no | no |
+| **Runner separation** (run as a throwaway user) | — | ✓ | — | ✓ | ✓ |
+| **Air-gapped image supply** (vendor / restore) | — | ✓ | — | ✓ | ✓ |
 
-`gvisor-podman` is the default and the strongest: a gVisor kernel over rootless Podman with no engine socket. On a provisioned host the entire run executes as the dedicated `titanium` user, so even a full sandbox escape never reaches your keys or source. `docker`/`gvisor` remain the compatibility path and gVisor's most polished host. A fifth environment, `modal`, runs the same task off-host on [Modal](https://modal.com) — a third-party cloud provider, not affiliated with Titanium — for cloud fan-out or GPUs.
+`gvisor-podman` is the default and the strongest validated option: a gVisor kernel over rootless Podman with no engine socket. On a provisioned host the entire run executes as the dedicated `titanium` user, so even a full sandbox escape never reaches your keys or source. `docker`/`gvisor` remain the compatibility path and gVisor's most polished host. `krun-podman` swaps Sentry for hardware virtualization: each container runs in a KVM microVM with a real guest kernel and a confined SELinux domain. It is batch-only (the runtime has no exec; commands ride a measured file protocol) and not yet live-validated — its probe record is [docs/environments/KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md). A further environment, `modal`, runs the same task off-host on [Modal](https://modal.com) — a third-party cloud provider, not affiliated with Titanium — for cloud fan-out or GPUs.
 
 ## Trust chain
 

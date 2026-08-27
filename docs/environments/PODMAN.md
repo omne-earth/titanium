@@ -5,8 +5,10 @@ provisioned and audited by `scripts/doctor/podman.sh` (report-only by default, `
 formerly `--fix`). This document records what the vanilla setup
 protects, exactly where Titanium relaxed it to make trials run, and concrete ways
 each relaxation could be closed. Its siblings are
-[GVISOR.md](GVISOR.md) and [GVISOR-PODMAN.md](GVISOR-PODMAN.md); the
-gvisor-podman document assumes this one and describes only its deltas.
+[GVISOR.md](GVISOR.md), [GVISOR-PODMAN.md](GVISOR-PODMAN.md), and
+[KRUN-PODMAN.md](KRUN-PODMAN.md); the gvisor-podman document assumes this
+one and describes only its deltas, and the krun-podman document extends
+gvisor-podman with the KVM-microVM runtime.
 
 ## 1. Baseline: what the vanilla setup provides
 

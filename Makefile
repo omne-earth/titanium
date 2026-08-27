@@ -42,7 +42,7 @@ RUNNER ?= $(shell test -f /usr/local/share/titanium/titanium.provisioned && echo
 # Wrapping is scoped to the podman family: the docker-daemon environments
 # need socket access, and the runner must never join the docker group — that
 # group is root-equivalent and would nullify the separation.
-RUNNER_ENVS := podman gvisor-podman
+RUNNER_ENVS := podman gvisor-podman krun-podman
 TITANIUM_WRAP := $(if $(and $(RUNNER),$(filter $(TITANIUM_ENV),$(RUNNER_ENVS))),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )
 TITANIUM_RUN ?= $(TITANIUM_WRAP)$(TITANIUM) run --agent=$(TITANIUM_AGENT) --model $(TITANIUM_MODEL) --env $(TITANIUM_ENV) --path=$(TITANIUM_TASK) --jobs-dir=$(TITANIUM_JOBS_DIR) -n $(TITANIUM_N)
 

@@ -237,7 +237,7 @@ serial command execution, and a file protocol carries that.
 
 **The SSH-over-vsock upgrade (kept, not needed).** The guest's vsock
 stack is measured viable: `/dev/vsock` exists and AF_VSOCK binds. The
-handler parses `/.krun_vm.json` (`ram_mib` measured; the key set and the
+handler parses `/.krun_vm.json` (`ram_mib` and `cpus` measured; the
 higher-precedence `krun.*` annotations were read from crun source,
 krun.c). But crun-krun 1.28 exposes no vsock mapping surface, so this
 path waits on an upstream change; the operator owns crun. The shape,
