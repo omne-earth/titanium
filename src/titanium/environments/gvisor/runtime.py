@@ -139,6 +139,8 @@ def write_compose_override(
     dns: Iterable[str] | None = None,
     selinux_relabel: str | None = None,
     disable_process_label: bool = False,
+    main_command: list[str] | None = None,
+    main_user: str | None = None,
 ) -> Path:
     """Write the Compose override that puts ``main`` under *runtime*.
 
@@ -160,6 +162,11 @@ def write_compose_override(
     option and Docker Compose has no use for it, so the docker flavor passes
     None. The value mirrors ``TITANIUM_PODMAN_SELINUX_RELABEL`` semantics ('z' or
     'Z'); anything else is ignored rather than emitted.
+
+    ``main_command`` and ``main_user`` override ``main``'s command and user
+    when set. The krun flavor uses them for its mailbox exec runner (the
+    handler has no exec; see KRUN-PODMAN.md §5). Both default to None, so
+    the runsc flavors emit neither key and stay byte-identical.
 
     ``disable_process_label`` appends ``label=disable`` to ``security_opt``.
     Podman assigns an SELinux process label to every container on an enforcing
@@ -194,6 +201,10 @@ def write_compose_override(
         "security_opt": security_opt,
         "volumes": stage_binds,
     }
+    if main_command is not None:
+        main["command"] = list(main_command)
+    if main_user is not None:
+        main["user"] = main_user
     nameservers = list(dns or [])
     if nameservers:
         main["dns"] = nameservers

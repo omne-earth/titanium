@@ -249,3 +249,174 @@ def test_digest_helper_names_the_given_init_script(tmp_path):
     binary.write_bytes(b"impostor")
     with pytest.raises(RuntimeError, match=r"scripts/init/krun-podman\.sh"):
         assert_runtime_digest(pin, init_script="scripts/init/krun-podman.sh")
+
+
+# ---------------------------------------------------------------------------
+# Mailbox exec -- the file protocol that replaces the missing handler exec
+# ---------------------------------------------------------------------------
+
+import asyncio
+
+from titanium.environments.gvisor.environment import VerificationState
+from titanium.environments.krun.podman import (
+    MAILBOX_ALIVE_TIMEOUT_ENV,
+    MAILBOX_CMD_DIR,
+    MAILBOX_DIR_NAME,
+    MAILBOX_RUNNER_NAME,
+    MAILBOX_RUNNER_SCRIPT,
+)
+
+
+def _ready_env(tmp_path, **kwargs):
+    """A prepared environment with verification forced READY.
+
+    The mailbox tests exercise the exec protocol, not the verification
+    gate; the gate has its own tests in the gvisor suites.
+    """
+    env = _make_env(tmp_path, **kwargs)
+    env._prepare_gvisor()
+    env._state = VerificationState.READY
+    return env
+
+
+async def _fake_runner(env, replies=None):
+    """Serve the host-side mailbox dirs the way the guest runner does.
+
+    Handles exactly one command file, then returns its rendered script so
+    tests can assert on the file contents.
+    """
+    cmd_dir = env._stage_in / MAILBOX_DIR_NAME
+    res_dir = env._stage_out / MAILBOX_DIR_NAME
+    res_dir.mkdir(parents=True, exist_ok=True)
+    (res_dir / ".runner-alive").touch()
+    for _ in range(200):
+        scripts = sorted(cmd_dir.glob("cmd-*.sh"))
+        if scripts:
+            script = scripts[-1]
+            cmd_id = script.stem
+            reply = replies or {"exit": "0", "out": "mailbox-ok\n"}
+            (res_dir / f"{cmd_id}.out").write_text(reply["out"])
+            (res_dir / f"{cmd_id}.exit").write_text(reply["exit"])
+            return script.read_text()
+        await asyncio.sleep(0.01)
+    raise AssertionError("no command file appeared in the mailbox")
+
+
+def test_override_installs_the_mailbox_runner_as_main_command(tmp_path):
+    env = _make_env(tmp_path)
+    env._prepare_gvisor()
+    data = json.loads(Path(env._compose_override_path).read_text())
+    assert data["services"]["main"]["command"] == [
+        "sh",
+        str(MAILBOX_CMD_DIR / MAILBOX_RUNNER_NAME),
+    ]
+    # Root, so transfers' user="root" commands work and `su` can drop.
+    assert data["services"]["main"]["user"] == "0"
+
+
+def test_runsc_flavor_override_gains_no_command_or_user():
+    # The seam defaults must keep the runsc flavor byte-identical.
+    assert GVisorPodmanEnvironment._main_command(object()) is None
+    assert GVisorPodmanEnvironment._main_user(object()) is None
+
+
+def test_prepare_writes_the_runner_onto_the_staging_mount(tmp_path):
+    env = _make_env(tmp_path)
+    env._prepare_gvisor()
+    runner = env._stage_in / MAILBOX_DIR_NAME / MAILBOX_RUNNER_NAME
+    assert runner.read_text() == MAILBOX_RUNNER_SCRIPT
+    assert (env._stage_out / MAILBOX_DIR_NAME).is_dir()
+
+
+def test_exec_round_trips_through_the_mailbox(tmp_path):
+    async def run():
+        env = _ready_env(tmp_path)
+        runner = asyncio.ensure_future(_fake_runner(env))
+        result = await env.exec("echo hi")
+        script = await runner
+        return result, script
+
+    result, script = asyncio.run(run())
+    assert result.return_code == 0
+    assert result.stdout == "mailbox-ok\n"
+    assert "bash -c 'echo hi'" in script
+
+
+def test_exec_renders_cwd_env_user_and_timeout(tmp_path):
+    async def run():
+        env = _ready_env(tmp_path)
+        runner = asyncio.ensure_future(_fake_runner(env))
+        await env.exec(
+            "id",
+            cwd="/work dir",
+            env={"A_KEY": "a value"},
+            timeout_sec=7,
+            user="agent",
+        )
+        return await runner
+
+    script = asyncio.run(run())
+    assert "export A_KEY='a value'" in script
+    assert "cd '/work dir'" in script
+    assert "timeout 7 " in script
+    assert "su -p -s /bin/sh agent -c" in script
+
+
+def test_exec_as_root_uses_no_su(tmp_path):
+    async def run():
+        env = _ready_env(tmp_path)
+        runner = asyncio.ensure_future(_fake_runner(env))
+        await env.exec("id", user="root")
+        return await runner
+
+    script = asyncio.run(run())
+    assert "su " not in script
+
+
+def test_exec_returns_nonzero_exit_codes(tmp_path):
+    async def run():
+        env = _ready_env(tmp_path)
+        runner = asyncio.ensure_future(
+            _fake_runner(env, replies={"exit": "3", "out": "boom\n"})
+        )
+        result = await env.exec("false")
+        await runner
+        return result
+
+    result = asyncio.run(run())
+    assert result.return_code == 3
+    assert result.stdout == "boom\n"
+
+
+def test_exec_raises_on_guest_side_timeout(tmp_path):
+    # The guest `timeout` wrapper exits 124; mirror the inherited exec,
+    # which raises instead of returning a silent partial result.
+    async def run():
+        env = _ready_env(tmp_path)
+        runner = asyncio.ensure_future(
+            _fake_runner(env, replies={"exit": "124", "out": ""})
+        )
+        try:
+            with pytest.raises(RuntimeError, match="timed out after 9"):
+                await env.exec("sleep 99", timeout_sec=9)
+        finally:
+            await runner
+
+    asyncio.run(run())
+
+
+def test_exec_fails_fast_when_the_runner_never_came_up(tmp_path, monkeypatch):
+    monkeypatch.setenv(MAILBOX_ALIVE_TIMEOUT_ENV, "0.2")
+
+    async def run():
+        env = _ready_env(tmp_path)
+        with pytest.raises(RuntimeError, match="runner did not come up"):
+            await env.exec("echo hi")
+
+    asyncio.run(run())
+
+
+def test_attach_is_refused(tmp_path):
+    env = _make_env(tmp_path)
+    with pytest.raises(NotImplementedError, match="batch-only"):
+        asyncio.run(env.attach())
