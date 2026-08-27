@@ -44,7 +44,7 @@ COMPOSE_OVERRIDE_NAME = "compose-gvisor.json"
 
 # Per-trial staging root on the host, under the trial directory so that
 # concurrent trials can never share a path.
-STAGE_DIR_NAME = ".gvisor-stage"
+STAGE_DIR_NAME = ".titanium-stage"
 
 # Staging mount points inside the container.
 STAGE_ROOT = PurePosixPath("/.titanium-stage")
