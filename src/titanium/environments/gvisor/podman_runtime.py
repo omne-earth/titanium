@@ -326,7 +326,12 @@ def assert_runtime_digest(
         raise RuntimeError(f"Runtime digest pin {path} is unreadable: {exc}")
 
     for line in pin.splitlines():
-        expected, _, binary = line.strip().partition("  ")
+        line = line.strip()
+        # '#' lines are comments; the krun pin records its rpm witness
+        # (package NVR, verification time) in one.
+        if not line or line.startswith("#"):
+            continue
+        expected, _, binary = line.partition("  ")
         if not expected or not binary:
             continue
         digest = hashlib.sha3_512()

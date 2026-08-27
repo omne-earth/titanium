@@ -420,3 +420,26 @@ def test_attach_is_refused(tmp_path):
     env = _make_env(tmp_path)
     with pytest.raises(NotImplementedError, match="batch-only"):
         asyncio.run(env.attach())
+
+
+# ---------------------------------------------------------------------------
+# Pin format -- the rpm-witness comment line
+# ---------------------------------------------------------------------------
+
+
+def test_pin_comment_lines_are_skipped(tmp_path):
+    # The krun pin carries its rpm witness as a '#' comment; the parser
+    # must skip it and still verify the digest line.
+    pin, _ = _pin(tmp_path, b"microvm")
+    content = pin.read_text()
+    pin.write_text("# rpm-witness: crun-krun-1.28-1.fc44.x86_64 verified-at now\n" + content)
+    assert_runtime_digest(pin)  # must not raise
+
+
+def test_pin_comment_does_not_mask_tampering(tmp_path):
+    pin, binary = _pin(tmp_path, b"microvm")
+    content = pin.read_text()
+    pin.write_text("# rpm-witness: crun-krun-1.28-1.fc44.x86_64 verified-at now\n" + content)
+    binary.write_bytes(b"impostor")
+    with pytest.raises(RuntimeError, match="changed outside"):
+        assert_runtime_digest(pin)

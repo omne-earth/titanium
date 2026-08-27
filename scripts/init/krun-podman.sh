@@ -80,11 +80,28 @@ fi
 # here; to rotate, delete the pin and re-run this script.
 PIN=/usr/local/share/titanium/krun.sha3-512
 if [[ ! -f "$PIN" ]]; then
+  # The pin is trust-on-first-use, so demand a second, independent witness
+  # before it blesses anything: rpm -Vf proves the on-disk binary still
+  # matches the signed package database. A binary that was replaced after
+  # install fails here, and a binary rpm does not own fails here — this
+  # flow installs through dnf, so an unowned krun is itself suspect. In
+  # both cases no pin is written and provisioning stops.
+  if ! WITNESS=$(rpm -Vf "$KRUN_PATH" 2>&1); then
+    echo "refusing to pin $KRUN_PATH: the rpm witness failed:" >&2
+    echo "${WITNESS:-'(no output)'}" >&2
+    echo "for a tampered or unowned binary: sudo dnf reinstall crun-krun, then re-run this script" >&2
+    exit 1
+  fi
+  # The witness line is a comment (single spaces only): the pin parser
+  # skips '#' lines, and the digest line keeps its two-space format.
+  NVR=$(rpm -qf "$KRUN_PATH" 2>/dev/null || echo unknown)
   sudo mkdir -p "$(dirname "$PIN")"
-  python3 -c 'import hashlib, sys
+  { echo "# rpm-witness: $NVR verified-at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    python3 -c 'import hashlib, sys
 print(hashlib.sha3_512(open(sys.argv[1], "rb").read()).hexdigest() + "  " + sys.argv[1])' \
-    "$KRUN_PATH" | sudo tee "$PIN" >/dev/null
-  echo "pinned $KRUN_PATH digest at $PIN"
+      "$KRUN_PATH"
+  } | sudo tee "$PIN" >/dev/null
+  echo "pinned $KRUN_PATH digest at $PIN (rpm witness: $NVR)"
 fi
 
 # No wrapper analog to runsc-ignorecg: crun manages rootless cgroups through

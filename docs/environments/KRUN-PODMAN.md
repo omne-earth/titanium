@@ -59,9 +59,13 @@ upstream. krun has no standalone upstream binary. The distro package
   version below the floor.
 * The SHA3-512 digest pin (`/usr/local/share/titanium/krun.sha3-512`, knob
   `TITANIUM_KRUN_DIGEST_PIN`) is **always** trust-on-first-use: the init
-  script did not download the binary it blesses. The pin is separate from
-  the runsc pin. Each runtime is blessed, rotated, and verified on its
-  own, and each failure text names its own init script.
+  script did not download the binary it blesses. Init therefore demands a
+  second, independent witness before it writes the pin: `rpm -Vf` must
+  prove the on-disk binary still matches the signed package database, and
+  a binary rpm does not own is refused outright. The pin records the
+  package NVR and the verification time in a comment line. The pin is
+  separate from the runsc pin. Each runtime is blessed, rotated, and
+  verified on its own, and each failure text names its own init script.
 
 A `dnf upgrade crun-krun` changes the binary and trips the pin at the
 next preflight. That is by design. An upgrade must be blessed
@@ -202,7 +206,7 @@ SSH channel stays documented as its upgrade.
 | 8 | GVISOR-PODMAN §2.6 — `-ignore-cgroups` wrapper | Rootless runsc cannot drive systemd cgroups | Confirmed absent: declared `cpu.max`/`memory.max` read back enforced, with no wrapper | Yes — shipped and confirmed |
 | 9 | PODMAN §2.2 — task-mount `z` relabel | Podman engine property | Present — engine, not runtime. Keep | Yes — engine-forced keep |
 | 10 | PODMAN §2.3 — rootless limits gap | Host/engine property | Present. Keep (row 8's read-back is the backstop) | Yes — engine-forced keep |
-| 11 | GVISOR-PODMAN §2.3 — path-based runtime trust | Podman has no daemon registry | Present. Keep; the rpm witness hardens the TOFU pin at init | No — keep is recorded, but the rpm witness is not yet in init |
+| 11 | GVISOR-PODMAN §2.3 — path-based runtime trust | Podman has no daemon registry | Present. Keep. The rpm witness hardens the TOFU pin: init refuses to bless a binary that fails `rpm -Vf` or that rpm does not own, and the pin records the package NVR in a comment line | Yes — the rpm witness gates the pin at init and the pin records the package NVR |
 
 **Row 0's chosen path: the mailbox exec override.** Every channel the
 mailbox needs is measured, and every seam it needs already exists.
