@@ -108,6 +108,8 @@ Network policy is enforced by a **per-trial egress proxy**, not by trust: an all
 
 > **Note:** the proxy exists for one situation: an air-gapped task (`allow_internet = false`) run by an agent that needs the network to install itself and call its model. The agent's allowlist becomes the proxy's domain list — the task sees no internet, the agent reaches only its own endpoints. Tasks with `allow_internet = true` get direct egress and no proxy. The trial directory records which happened: proxied trials contain a `compose-egress-proxy.json`, unrestricted trials do not.
 
+### Birds-Eye View
+
 | | `docker` | `podman` | `gvisor` | `gvisor-podman` | `krun-podman` |
 |---|---|---|---|---|---|
 | **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel | KVM microVM (libkrun) |
@@ -124,13 +126,13 @@ Network policy is enforced by a **per-trial egress proxy**, not by trust: an all
 
 The most battle-tested option: a gVisor kernel over rootless Podman with no engine socket. On a provisioned host the entire run executes as the dedicated `titanium` user, so even a full sandbox escape never reaches your keys or source.
 
-### docker and gvisor
-
-The compatibility path, and gVisor's most polished host. Both need the root Docker daemon, so they never run under the throwaway runner.
-
 ### krun-podman
 
 The validated alternative with a different boundary: each container runs in a KVM microVM with a real guest kernel, a confined SELinux domain, a tightened seccomp profile on the VMM, and no host command channel into the running guest (the runtime has no exec; commands ride a measured file protocol, so the flavor is batch-only). The trade is explicit — stronger against kernel-syscall escapes, in exchange for the host's KVM subsystem in the trust chain. Choose by threat model; the probe record is [docs/environments/KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md).
+
+### docker and gvisor
+
+The compatibility path, and gVisor's most polished host. Both need the root Docker daemon, so they never run under the throwaway runner.
 
 ### modal
 
