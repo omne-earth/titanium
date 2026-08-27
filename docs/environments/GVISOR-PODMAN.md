@@ -75,7 +75,7 @@ SELinux label. Under Podman the container *is* labeled, so on an enforcing
 host the sandbox would be denied its own staging directories.
 
 Blast radius: the same shared-`z` consequence as PODMAN.md §2.2, now covering
-the transfer channel itself — `.gvisor-stage/{in,out}` become
+the transfer channel itself — `.titanium-stage/{in,out}` become
 `container_file_t` at the shared level, accessible to any container on the
 host, layered on top of the channel already being the environment's largest
 relaxation (GVISOR.md §2.1). The directories remain per-trial and are removed
