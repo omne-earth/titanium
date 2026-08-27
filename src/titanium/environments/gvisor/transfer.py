@@ -68,6 +68,13 @@ _MAX_RESOLVE_ATTEMPTS = 8
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+# Traversal-only open for intermediate components. O_PATH needs search (x)
+# permission, not read: the runner user deliberately carries x-only ACLs on
+# every component above the repo, so an O_RDONLY walk dies with EACCES at
+# /home — found by the first artifact collected from outside the bind
+# mounts. The symlink hard failure survives: with O_PATH, O_NOFOLLOW opens
+# a symlink as itself and O_DIRECTORY then rejects it with ENOTDIR.
+_WALK_FLAGS = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 def _open_dir_tree(path: Path, *, create: bool) -> int:
@@ -78,13 +85,22 @@ def _open_dir_tree(path: Path, *, create: bool) -> int:
     redirect the descriptor. Missing components may be created for trusted
     destination parents, but an existing symlink or non-directory is always a
     hard failure rather than something we traverse or replace.
+
+    Intermediate components open with ``_WALK_FLAGS`` (traversal only); the
+    final component opens with ``_DIR_FLAGS``, because callers list or copy
+    inside it and the leaf directories all live under the trial directory,
+    where read permission is guaranteed.
     """
     absolute = Path(os.path.abspath(path))
-    current_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    parts = absolute.parts[1:]
+    if not parts:
+        return os.open("/", _DIR_FLAGS)
+    current_fd = os.open("/", _WALK_FLAGS)
     try:
-        for component in absolute.parts[1:]:
+        for index, component in enumerate(parts):
+            flags = _DIR_FLAGS if index == len(parts) - 1 else _WALK_FLAGS
             try:
-                child_fd = os.open(component, _DIR_FLAGS, dir_fd=current_fd)
+                child_fd = os.open(component, flags, dir_fd=current_fd)
             except FileNotFoundError:
                 if not create:
                     raise
@@ -94,7 +110,7 @@ def _open_dir_tree(path: Path, *, create: bool) -> int:
                     # A concurrent creator won the race. The O_NOFOLLOW open
                     # below decides whether the resulting entry is acceptable.
                     pass
-                child_fd = os.open(component, _DIR_FLAGS, dir_fd=current_fd)
+                child_fd = os.open(component, flags, dir_fd=current_fd)
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                     raise RuntimeError(

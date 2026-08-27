@@ -680,3 +680,36 @@ def test_stage_label_alignment_skips_hosts_without_selinux(tmp_path, monkeypatch
 
     monkeypatch.setattr("os.getxattr", no_xattr)
     env._platform._align_stage_labels(env._stage_in)  # must not raise
+
+
+def test_placement_traverses_execute_only_intermediates(tmp_path):
+    # The runner user carries x-only ACLs on every path component above the
+    # repo, so the destination walk must need only search permission on
+    # intermediates. Found by the first artifact collected from outside the
+    # bind mounts: an O_RDONLY walk died with EACCES at /home.
+    from titanium.environments.gvisor.transfer import safe_place_file
+
+    staged = tmp_path / "staged.json"
+    staged.write_text("{}")
+    locked = tmp_path / "locked"
+    dest_dir = locked / "inner"
+    dest_dir.mkdir(parents=True)
+    locked.chmod(0o311)  # execute-only: traversable, not listable
+    try:
+        safe_place_file(staged, dest_dir / "report.json")
+        assert (dest_dir / "report.json").read_text() == "{}"
+    finally:
+        locked.chmod(0o755)
+
+
+def test_placement_still_refuses_symlink_components(tmp_path):
+    from titanium.environments.gvisor.transfer import safe_place_file
+
+    staged = tmp_path / "staged.json"
+    staged.write_text("{}")
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    with pytest.raises(RuntimeError, match="unsafe directory component"):
+        safe_place_file(staged, link / "report.json")
