@@ -220,8 +220,9 @@ python3 -c "from titanium.environments.podman import PodmanEnvironment as E; E.p
 
 echo
 if [[ $FAILED -eq 0 ]]; then
-  echo "All clear. Run:"
-  echo "  titanium job start -c examples/jobs/mini-swe-agent-podman.yaml"
+  echo "All clear. Try:"
+  echo "  make smoke-podman        # one environment"
+  echo "  make smoke-env           # all four"
 else
   echo "Fix the failures above first."
   exit 1
