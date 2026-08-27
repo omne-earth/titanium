@@ -60,7 +60,16 @@ titanium run -p path/to/dataset --n-tasks 10 --sample-seed 0
    ```
 
    Every `make` target (`make titanium-run`, `make smoke-*`, `make bench-*`) applies the shim automatically on a provisioned host. To opt out for one invocation, pass an empty runner: `make titanium-run RUNNER=`.
-3. Inspect runner-owned state through make. The runner's containers and images live in *its* storage, so your own `podman ps` shows nothing. Use `make podman-ps ARGS=--all`, `make podman-images`, or `make podman-logs ARGS=<container>`.
+3. Inspect runner-owned state through make. The runner's containers and images live in *its* storage, so your own `podman ps` shows nothing. `make podman-<verb> [ARGS=…]` proxies any podman subcommand into the runner's context:
+
+   ```bash
+   make podman-ps ARGS=--all          # runner's containers
+   make podman-images                 # runner's images
+   make podman-logs ARGS=<container>  # a runner container's logs
+   make podman-inspect ARGS=<id>      # any other verb forwards the same way
+   ```
+
+   The proxy forwards the verb; whether it succeeds is the runtime's call — `podman exec` reaches crun and runsc containers, never krun ones (the handler has no exec; see docs/environments/KRUN-PODMAN.md §5).
 
 Separation applies to the podman-family environments (`podman`, `gvisor-podman`, `krun-podman`) only. The docker-daemon environments are never wrapped: joining the runner to the root-equivalent `docker` group would nullify the separation.
 
