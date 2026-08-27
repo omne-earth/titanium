@@ -118,6 +118,30 @@ Network policy is enforced by a **per-trial egress proxy**, not by trust: an all
 
 `gvisor-podman` is the default and the most battle-tested: a gVisor kernel over rootless Podman with no engine socket. On a provisioned host the entire run executes as the dedicated `titanium` user, so even a full sandbox escape never reaches your keys or source. `docker`/`gvisor` remain the compatibility path and gVisor's most polished host. `krun-podman` is the validated alternative with a different boundary: each container runs in a KVM microVM with a real guest kernel, a confined SELinux domain, a tightened seccomp profile on the VMM, and no host command channel into the running guest (the runtime has no exec; commands ride a measured file protocol, so the flavor is batch-only). The trade is explicit — stronger against kernel-syscall escapes, in exchange for the host's KVM subsystem in the trust chain. Choose by threat model; the probe record is [docs/environments/KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md). A further environment, `modal`, runs the same task off-host on [Modal](https://modal.com) — a third-party cloud provider, not affiliated with Titanium — for cloud fan-out or GPUs.
 
+## Task sizing
+
+A task declares its resources in `task.toml` (`[environment] cpus`, `memory_mb`); trial-level overrides fold into the same values. Titanium writes them as compose `deploy.resources.limits` on `main`, and the engine turns them into cgroup limits. What happens after that differs per environment. Declared limits are never taken on faith: the podman-family environments read `cpu.max` and `memory.max` back from the kernel after start, fail `LIMIT`/`GUARANTEE` tasks whose limits did not materialize, and log the gap for `AUTO` tasks.
+
+### docker
+
+The root daemon owns the cgroup tree, so `--cpus`/`--memory` always enforce. The workload sees the host's cores; the cgroup throttles usage.
+
+### podman
+
+Rootless enforcement needs cgroups v2 with the cpu and memory controllers delegated (`make init` provisions the delegation drop-in). On v1 or without delegation, podman silently drops the limit — which is why the post-start read-back exists. Details: [docs/environments/PODMAN.md](docs/environments/PODMAN.md) §2.3.
+
+### gvisor
+
+Engine-side cgroup limits apply to the sandbox as under docker. Sentry itself takes no part in sizing.
+
+### gvisor-podman
+
+Rootless runsc cannot drive the systemd cgroup path at all, so init registers it through an `-ignore-cgroups` wrapper: the runtime creates no cgroups, and enforcement rests entirely on what the engine applies to the container's scope — with the read-back as the honest backstop. Details: [docs/environments/GVISOR-PODMAN.md](docs/environments/GVISOR-PODMAN.md) §2.6.
+
+### krun-podman
+
+A microVM is sized, not just throttled: vCPU count and RAM are properties of the guest, visible to everything inside it. A cgroup quota alone gets this wrong — left to itself, the handler gives the guest the host's cores (capped at 16) and sizes RAM from the OCI memory limit as a side effect, so a task declaring one CPU gets a guest that *reports* sixteen while the cgroup lets it *use* one, and every thread pool sized by core count oversubscribes. Titanium therefore sizes the guest explicitly: the compose override emits `krun.cpus` and `krun.ram_mib` annotations — the handler's highest-precedence sizing surface — from the task's declared values, instead of leaving RAM coupled to the OCI limit and cores coupled to the host. The cgroup limits still apply on top, and the guest now agrees with them. One shared envelope to know about: guest RAM, VMM overhead, and the virtiofs DAX window all count against the same cgroup `memory.max`. Details: [docs/environments/KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md) §2.8.
+
 ## Trust chain
 
 Isolation is only as good as its trust chain, so Titanium verifies rather than assumes:
