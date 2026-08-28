@@ -10,7 +10,7 @@ overlays here instead of host-global configuration edits.
 
 Generated per-trial overlays follow the same naming (``compose-mounts.json``,
 ``compose-resources.json``, ``compose-egress-proxy.json``,
-``compose-gvisor.json``), written into the trial directory by the
+``compose-runtime.json``), written into the trial directory by the
 environments that need them.
 """
 

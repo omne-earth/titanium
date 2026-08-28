@@ -47,6 +47,25 @@ else
   bad "podman-compose not on PATH — pip install podman-compose"
 fi
 
+# krun is optional: only the krun-podman environment needs it, so absence is
+# never a failure here. When present, hold it to the same floor init demands
+# (CRUN_KRUN_MIN_VERSION). Below-floor is a warn, not a fail: it blocks
+# nothing but krun-podman, and init and the environment preflight guard
+# that path themselves (version warning, digest pin).
+if command -v krun >/dev/null; then
+  KV=$(krun --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+  KV=${KV:-0}
+  if [[ "$(printf '%s\n%s\n' "$KV" "$CRUN_KRUN_MIN_VERSION" | sort -V | head -1)" == "$CRUN_KRUN_MIN_VERSION" ]]; then
+    ok "krun $KV"
+  else
+    warn "krun $KV is < floor $CRUN_KRUN_MIN_VERSION (runtime.env) — sudo dnf upgrade crun-krun, delete the digest pin, re-run scripts/init/krun-podman.sh"
+  fi
+  [[ -c /dev/kvm ]] \
+    || warn "krun installed but no /dev/kvm — krun-podman trials cannot start on this host"
+else
+  ok "krun not installed — only the krun-podman environment needs it (make .krun-podman)"
+fi
+
 echo
 echo "== no socket in the path =="
 
@@ -201,8 +220,9 @@ python3 -c "from titanium.environments.podman import PodmanEnvironment as E; E.p
 
 echo
 if [[ $FAILED -eq 0 ]]; then
-  echo "All clear. Run:"
-  echo "  titanium job start -c examples/jobs/mini-swe-agent-podman.yaml"
+  echo "All clear. Try:"
+  echo "  make smoke-podman        # one environment"
+  echo "  make smoke-env           # all four"
 else
   echo "Fix the failures above first."
   exit 1

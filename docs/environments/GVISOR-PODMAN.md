@@ -11,6 +11,9 @@ MRO — gVisor's sandboxing over Podman's driving — so **everything in
 channel, the DNS repair, the proxy-outside-the-sandbox decision, the
 short-name and SELinux relaxations, the rootless resource-limit gap. This
 document covers only what is different at the seam.
+[KRUN-PODMAN.md](KRUN-PODMAN.md) extends this environment in turn: the
+same wiring under the krun (KVM microVM) runtime, with its own probe
+record of which relaxations keep a live cause there.
 
 How the composition stays additive in code: engine-specific host-side
 interactions (runtime assert, inspect templates, runtime matching, project
@@ -72,11 +75,16 @@ SELinux label. Under Podman the container *is* labeled, so on an enforcing
 host the sandbox would be denied its own staging directories.
 
 Blast radius: the same shared-`z` consequence as PODMAN.md §2.2, now covering
-the transfer channel itself — `.gvisor-stage/{in,out}` become
+the transfer channel itself — `.titanium-stage/{in,out}` become
 `container_file_t` at the shared level, accessible to any container on the
 host, layered on top of the channel already being the environment's largest
 relaxation (GVISOR.md §2.1). The directories remain per-trial and are removed
-on stop.
+on stop. One latent seam here surfaced only when krun kept its process
+label (KRUN-PODMAN.md §5 row 6): `copytree` copies `security.selinux`, so
+staged uploads carried their *source's* label into the relabeled mount —
+invisible to this flavor's unconfined `main`, denied to a labeled one.
+The staging ops now re-align staged trees to the staging mount's context
+for every flavor.
 
 Where (process label): the same override carries `security_opt:
 label=disable` on `main`, via

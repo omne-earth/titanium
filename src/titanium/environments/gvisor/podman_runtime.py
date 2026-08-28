@@ -294,7 +294,11 @@ def assert_runtime_resolvable(
 RUNSC_DIGEST_PIN = "/usr/local/share/titanium/runsc.sha3-512"
 
 
-def assert_runtime_digest(pin_file: str | Path | None = None) -> None:
+def assert_runtime_digest(
+    pin_file: str | Path | None = None,
+    *,
+    init_script: str = "scripts/init/runsc-podman.sh",
+) -> None:
     """Fail closed when the pinned runtime binary changed since install.
 
     The resolvability probe proves *a* binary answers to the runtime name;
@@ -304,6 +308,10 @@ def assert_runtime_digest(pin_file: str | Path | None = None) -> None:
     with a distro-managed runsc, simply have no pin to enforce -- but a pin
     that names a now-missing or now-different binary is: silent downgrade to
     unpinned is exactly the tampering this check exists to catch.
+
+    ``init_script`` names the provisioning script in the failure text, so
+    each runtime's message points at its own install and rotation procedure
+    (the krun flavor passes scripts/init/krun-podman.sh).
     """
     path = Path(
         pin_file
@@ -318,7 +326,12 @@ def assert_runtime_digest(pin_file: str | Path | None = None) -> None:
         raise RuntimeError(f"Runtime digest pin {path} is unreadable: {exc}")
 
     for line in pin.splitlines():
-        expected, _, binary = line.strip().partition("  ")
+        line = line.strip()
+        # '#' lines are comments; the krun pin records its rpm witness
+        # (package NVR, verification time) in one.
+        if not line or line.startswith("#"):
+            continue
+        expected, _, binary = line.partition("  ")
         if not expected or not binary:
             continue
         digest = hashlib.sha3_512()
@@ -331,12 +344,12 @@ def assert_runtime_digest(pin_file: str | Path | None = None) -> None:
                 f"Runtime digest pin {path} names {binary}, which cannot be "
                 f"read ({exc}). Refusing to run the sandbox under an "
                 "unverifiable runtime binary; reinstall with "
-                "scripts/init/runsc-podman.sh or remove the pin deliberately."
+                f"{init_script} or remove the pin deliberately."
             )
         if digest.hexdigest() != expected:
             raise RuntimeError(
                 f"{binary} does not match the digest recorded at install "
                 f"time in {path}. The runtime binary changed outside "
-                "scripts/init/runsc-podman.sh; refusing to run untrusted "
+                f"{init_script}; refusing to run untrusted "
                 "code under it."
             )

@@ -63,7 +63,21 @@ sudo setfacl -R -m "u:$RUNNER:rX" "$REPO_ROOT"
 mkdir -p "$REPO_ROOT/.run"
 sudo setfacl -R -m "u:$RUNNER:rwX" -m "d:u:$RUNNER:rwX" -m "d:u:$OPERATOR:rwX" "$REPO_ROOT/.run"
 
-# 7. Prove rootless podman works for the runner, in its own session scope —
+# 7. /dev/kvm access for the krun-podman environment. Mirror of the grant in
+#    scripts/init/krun-podman.sh, which cannot cover fresh hosts: make init
+#    runs it before this script, so the runner does not exist yet when it
+#    checks. Guarded on the device: hosts without KVM provision the runner
+#    fine and only krun trials need the device. Group membership reaches
+#    trials without a login — systemd-run reads it fresh per invocation.
+if [[ -c /dev/kvm ]]; then
+  if ! sudo -u "$RUNNER" test -r /dev/kvm || ! sudo -u "$RUNNER" test -w /dev/kvm; then
+    KVM_GROUP=$(stat -c %G /dev/kvm)
+    sudo usermod -aG "$KVM_GROUP" "$RUNNER"
+    echo "added $RUNNER to '$KVM_GROUP' for /dev/kvm access (krun-podman)"
+  fi
+fi
+
+# 8. Prove rootless podman works for the runner, in its own session scope —
 #    the same invocation shape titanium-run.sh uses for trials. stdio is
 #    detached from the caller's fds: over ssh those are sshd-created pipes
 #    (sshd_session_t), which SELinux forbids dbus-broker to read when
@@ -75,7 +89,7 @@ sudo systemd-run --uid="$RUNNER" --pipe --wait --quiet --collect \
   podman info --format 'runner podman ok: rootless={{.Host.Security.Rootless}} cgroups={{.Host.CgroupsVersion}}' \
   </dev/null 2>&1 | cat
 
-# 8. Stamp only after the probe proved the whole shape works: the Makefile
+# 9. Stamp only after the probe proved the whole shape works: the Makefile
 #    guard tests this file, so a partially provisioned host re-runs the
 #    script (idempotent) instead of being silently skipped.
 sudo mkdir -p /usr/local/share/titanium

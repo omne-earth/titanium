@@ -6,7 +6,8 @@ Selector `--env gvisor`, class
 checksum-verified `runsc`, registers it with the Docker daemon). This document records what vanilla runsc-under-Docker
 protects, exactly where Titanium relaxed it to make trials run, and concrete ways
 each relaxation could be closed. Siblings: [PODMAN.md](PODMAN.md),
-[GVISOR-PODMAN.md](GVISOR-PODMAN.md).
+[GVISOR-PODMAN.md](GVISOR-PODMAN.md), and — for the KVM-microVM flavor
+that extends the podman composition — [KRUN-PODMAN.md](KRUN-PODMAN.md).
 
 ## 1. Baseline: what the vanilla setup provides
 
@@ -56,8 +57,8 @@ into the trial's `runtime-verification.json` for post-hoc audit.
 ### 2.1 Two staging bind mounts puncture the sandbox-private filesystem
 
 Where: `write_compose_override` (`runtime.py`) mounts
-`<trial>/.gvisor-stage/in` read-only at `/.titanium-stage/in` and
-`<trial>/.gvisor-stage/out` writable at `/.titanium-stage/out`;
+`<trial>/.titanium-stage/in` read-only at `/.titanium-stage/in` and
+`<trial>/.titanium-stage/out` writable at `/.titanium-stage/out`;
 `GVisorUnixOps` (`transfer.py`) moves every upload and download through them.
 
 What vanilla does: nothing crosses the rootfs boundary. Bind mounts default to
@@ -188,7 +189,7 @@ save/restore, GPU, and Windows paths are out of scope.
 ## 4. Hardening avenues
 
 **[ ] Staging channel (2.1).** (a) Quota the writable side: back
-`.gvisor-stage/out` with a size-capped loopback filesystem or project quota at
+`.titanium-stage/out` with a size-capped loopback filesystem or project quota at
 trial setup, converting the disk-exhaustion vector into a bounded failure.
 (b) Narrow its lifetime: mount `out` at start but keep the host directory
 `0700` under a dedicated low-privilege user, opening it only for the duration

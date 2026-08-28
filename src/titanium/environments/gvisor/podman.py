@@ -70,6 +70,63 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
 
     _SUPPORTED_ENGINES: tuple[str, ...] = ("podman",)
 
+    # Seams for the krun flavor (KrunPodmanEnvironment), which shares the
+    # whole Podman driving and changes only what the runtime changes. The
+    # defaults are the runsc values.
+    #
+    # _PREFLIGHT_RUNTIME: the runtime name the classmethod preflight probes.
+    # _DISABLE_PROCESS_LABEL: whether the compose override carries
+    #   ``label=disable``. runsc rejects a labeled spec, so it must; crun
+    #   supports SELinux, so the krun flavor keeps the label on.
+    _PREFLIGHT_RUNTIME: str = DEFAULT_RUNTIME
+    _DISABLE_PROCESS_LABEL: bool = True
+
+    @classmethod
+    def _assert_runtime_digest(cls) -> None:
+        """Assert this flavor's digest pin; the krun flavor points elsewhere."""
+        assert_runtime_digest()
+
+    def _main_command(self) -> list[str] | None:
+        """Override for ``main``'s command in the compose override.
+
+        None keeps the compose stack's own command (the ``sleep infinity``
+        keepalive). The krun flavor returns its mailbox runner here.
+        """
+        return None
+
+    def _main_user(self) -> str | None:
+        """Override for ``main``'s user in the compose override.
+
+        None keeps the image's configured user. The krun flavor pins root
+        so its mailbox runner can serve ``user="root"`` commands.
+        """
+        return None
+
+    def _main_stop_signal(self) -> str | None:
+        """Override for ``main``'s stop signal in the compose override.
+
+        None keeps the engine default (SIGTERM, then SIGKILL after the
+        grace period). The krun flavor declares SIGKILL: signals stop at
+        the VMM and the guest never sees a SIGTERM, so the grace period
+        is a dead wait.
+        """
+        return None
+
+    def _main_annotations(self) -> dict[str, str] | None:
+        """OCI annotations for ``main`` in the compose override.
+
+        None for the runsc flavors. The krun flavor sizes its guest here.
+        """
+        return None
+
+    def _extra_security_opt(self) -> list[str]:
+        """Additional security_opt entries for ``main``.
+
+        Empty for the runsc flavors. The krun flavor appends its tightened
+        seccomp profile for the VMM process here.
+        """
+        return []
+
     def __init__(self, *args, engine: str = "podman", **kwargs):
         # The engine kwarg stays accepted for symmetry with --env gvisor, but
         # only "podman" resolves here: resolve_engine_cli (called by the
@@ -107,9 +164,9 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
         """
         PodmanEnvironment.preflight()
         assert_runtime_resolvable(
-            DEFAULT_RUNTIME, os.environ.get("TITANIUM_PODMAN_BIN", "podman")
+            cls._PREFLIGHT_RUNTIME, os.environ.get("TITANIUM_PODMAN_BIN", "podman")
         )
-        assert_runtime_digest()
+        cls._assert_runtime_digest()
 
     # -- engine seam overrides ---------------------------------------------
 
@@ -119,7 +176,7 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
         # The digest check then proves the binary answering to that name is
         # still the one the install script recorded.
         assert_runtime_resolvable(self._runtime, self._engine_cli)
-        assert_runtime_digest()
+        self._assert_runtime_digest()
 
     async def _container_runtime(self, container_id: str) -> str | None:
         # Podman's {{.HostConfig.Runtime}} is a compat placeholder ("oci");
@@ -203,7 +260,12 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
             stage_out=self._stage_out,
             dns=self._resolvers,
             selinux_relabel=relabel if relabel in ("z", "Z") else None,
-            disable_process_label=True,
+            disable_process_label=self._DISABLE_PROCESS_LABEL,
+            main_command=self._main_command(),
+            main_user=self._main_user(),
+            main_stop_signal=self._main_stop_signal(),
+            extra_security_opt=self._extra_security_opt(),
+            main_annotations=self._main_annotations(),
         )
 
     # -- ownership ----------------------------------------------------------

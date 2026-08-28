@@ -40,11 +40,11 @@ from pathlib import Path, PurePosixPath
 # writes this into /etc/docker/daemon.json).
 DEFAULT_RUNTIME = "runsc"
 
-COMPOSE_OVERRIDE_NAME = "compose-gvisor.json"
+COMPOSE_OVERRIDE_NAME = "compose-runtime.json"
 
 # Per-trial staging root on the host, under the trial directory so that
 # concurrent trials can never share a path.
-STAGE_DIR_NAME = ".gvisor-stage"
+STAGE_DIR_NAME = ".titanium-stage"
 
 # Staging mount points inside the container.
 STAGE_ROOT = PurePosixPath("/.titanium-stage")
@@ -139,6 +139,11 @@ def write_compose_override(
     dns: Iterable[str] | None = None,
     selinux_relabel: str | None = None,
     disable_process_label: bool = False,
+    main_command: list[str] | None = None,
+    main_user: str | None = None,
+    main_stop_signal: str | None = None,
+    extra_security_opt: Iterable[str] | None = None,
+    main_annotations: dict[str, str] | None = None,
 ) -> Path:
     """Write the Compose override that puts ``main`` under *runtime*.
 
@@ -160,6 +165,11 @@ def write_compose_override(
     option and Docker Compose has no use for it, so the docker flavor passes
     None. The value mirrors ``TITANIUM_PODMAN_SELINUX_RELABEL`` semantics ('z' or
     'Z'); anything else is ignored rather than emitted.
+
+    ``main_command``, ``main_user``, and ``main_stop_signal`` override
+    ``main``'s command, user, and stop signal when set. The krun flavor uses them for its mailbox exec runner (the
+    handler has no exec; see KRUN-PODMAN.md §5). Both default to None, so
+    the runsc flavors emit neither key and stay byte-identical.
 
     ``disable_process_label`` appends ``label=disable`` to ``security_opt``.
     Podman assigns an SELinux process label to every container on an enforcing
@@ -188,12 +198,21 @@ def write_compose_override(
     security_opt = list(SECURITY_OPT)
     if disable_process_label:
         security_opt.append("label=disable")
+    security_opt.extend(extra_security_opt or ())
 
     main: dict[str, object] = {
         "runtime": runtime,
         "security_opt": security_opt,
         "volumes": stage_binds,
     }
+    if main_command is not None:
+        main["command"] = list(main_command)
+    if main_user is not None:
+        main["user"] = main_user
+    if main_stop_signal is not None:
+        main["stop_signal"] = main_stop_signal
+    if main_annotations:
+        main["annotations"] = dict(main_annotations)
     nameservers = list(dns or [])
     if nameservers:
         main["dns"] = nameservers

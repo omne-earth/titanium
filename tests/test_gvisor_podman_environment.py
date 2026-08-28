@@ -630,3 +630,86 @@ def test_pin_location_honors_the_env_knob(tmp_path, monkeypatch):
     monkeypatch.setenv("TITANIUM_RUNSC_DIGEST_PIN", str(pin))
     with pytest.raises(RuntimeError, match="changed outside"):
         podman_runtime.assert_runtime_digest()
+
+
+# ---------------------------------------------------------------------------
+# Staged uploads and SELinux labels
+# ---------------------------------------------------------------------------
+
+
+def test_staged_uploads_realign_selinux_labels(tmp_path, monkeypatch):
+    # copy2/copytree carry security.selinux from the source, so a staged
+    # upload keeps its home-dir label and a labeled sandbox (krun's
+    # container_kvm_t) is denied the read. The staging ops must stamp the
+    # staging mount's own context onto everything staged. The runsc flavors
+    # masked this with label=disable; the contract is shared regardless.
+    env = _make_env(tmp_path)
+    env._stage_in.mkdir(parents=True, exist_ok=True)
+
+    calls = []
+    monkeypatch.setattr(
+        "os.getxattr", lambda path, name: b"system_u:object_r:container_file_t:s0"
+    )
+    monkeypatch.setattr(
+        "os.setxattr",
+        lambda path, name, value, follow_symlinks=True: calls.append(
+            (str(path), name, value, follow_symlinks)
+        ),
+    )
+
+    staged = env._stage_in / "op" / "payload"
+    (staged / "sub").mkdir(parents=True)
+    (staged / "sub" / "f").write_text("x")
+
+    env._platform._align_stage_labels(env._stage_in / "op")
+
+    touched = {c[0] for c in calls}
+    assert str(staged) in touched
+    assert str(staged / "sub" / "f") in touched
+    assert all(name == "security.selinux" for _, name, _, _ in calls)
+    assert all(value == b"system_u:object_r:container_file_t:s0" for *_, value, _ in calls)
+    assert all(follow is False for *_, follow in calls)
+
+
+def test_stage_label_alignment_skips_hosts_without_selinux(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+    env._stage_in.mkdir(parents=True, exist_ok=True)
+
+    def no_xattr(path, name):
+        raise OSError("no selinux")
+
+    monkeypatch.setattr("os.getxattr", no_xattr)
+    env._platform._align_stage_labels(env._stage_in)  # must not raise
+
+
+def test_placement_traverses_execute_only_intermediates(tmp_path):
+    # The runner user carries x-only ACLs on every path component above the
+    # repo, so the destination walk must need only search permission on
+    # intermediates. Found by the first artifact collected from outside the
+    # bind mounts: an O_RDONLY walk died with EACCES at /home.
+    from titanium.environments.gvisor.transfer import safe_place_file
+
+    staged = tmp_path / "staged.json"
+    staged.write_text("{}")
+    locked = tmp_path / "locked"
+    dest_dir = locked / "inner"
+    dest_dir.mkdir(parents=True)
+    locked.chmod(0o311)  # execute-only: traversable, not listable
+    try:
+        safe_place_file(staged, dest_dir / "report.json")
+        assert (dest_dir / "report.json").read_text() == "{}"
+    finally:
+        locked.chmod(0o755)
+
+
+def test_placement_still_refuses_symlink_components(tmp_path):
+    from titanium.environments.gvisor.transfer import safe_place_file
+
+    staged = tmp_path / "staged.json"
+    staged.write_text("{}")
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    with pytest.raises(RuntimeError, match="unsafe directory component"):
+        safe_place_file(staged, link / "report.json")

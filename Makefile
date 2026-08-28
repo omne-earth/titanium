@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .titanium init unit-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -42,7 +42,7 @@ RUNNER ?= $(shell test -f /usr/local/share/titanium/titanium.provisioned && echo
 # Wrapping is scoped to the podman family: the docker-daemon environments
 # need socket access, and the runner must never join the docker group — that
 # group is root-equivalent and would nullify the separation.
-RUNNER_ENVS := podman gvisor-podman
+RUNNER_ENVS := podman gvisor-podman krun-podman
 TITANIUM_WRAP := $(if $(and $(RUNNER),$(filter $(TITANIUM_ENV),$(RUNNER_ENVS))),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )
 TITANIUM_RUN ?= $(TITANIUM_WRAP)$(TITANIUM) run --agent=$(TITANIUM_AGENT) --model $(TITANIUM_MODEL) --env $(TITANIUM_ENV) --path=$(TITANIUM_TASK) --jobs-dir=$(TITANIUM_JOBS_DIR) -n $(TITANIUM_N)
 
@@ -57,7 +57,7 @@ BENCH_N ?= 8
 # run-session plumbing: one tmux session per RUN_DIR, one window per target
 RUN_SESSION := titanium-$(subst .,,$(notdir $(RUN_DIR)))
 RUN_TMUX := tmux -L titanium
-SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman
+SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman
 
 .uv:
 	@command -v uv >/dev/null || { \
@@ -103,6 +103,20 @@ doctor-libvirt:
 		&& test -f /etc/containers/containers.conf.d/titanium-runsc.conf; } >/dev/null 2>&1 \
 		|| bash scripts/init/runsc-podman.sh
 
+# internal: evidence probes for the relaxation table in
+# docs/environments/KRUN-PODMAN.md §5. Each run prints per-probe facts that
+# convert that table's pending rows into decision records. Drives podman and
+# the krun runtime directly — no trials, no runner shim.
+_probe-krun-podman: .krun-podman
+	@bash scripts/doctor/probe-krun-podman.sh
+
+# krun (crun + libkrun): dnf-installed, digest-pinned, registered in the same
+# root-gated drop-in directory as runsc. The script also checks /dev/kvm.
+.krun-podman: .podman
+	@{ command -v krun && test -f /usr/local/share/titanium/krun.sha3-512 \
+		&& test -f /etc/containers/containers.conf.d/titanium-krun.conf; } >/dev/null 2>&1 \
+		|| bash scripts/init/krun-podman.sh
+
 # toolchain for building wheels that ship no binary for this platform/python.
 .deps:
 	@{ command -v gcc && command -v make && command -v python3 && \
@@ -123,7 +137,7 @@ $(TASKS_PATH_TB2):
 FORCE:
 $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 	@rm -rf $@ && mkdir -p $@
-	cp -r $(SMOKE_TASKS) $(wildcard examples/smoke/$(patsubst smoke-%,verify-%-env,$(notdir $@))) $@/
+	cp -r $(SMOKE_TASKS) $(wildcard examples/smoke/$(patsubst smoke-%,verify-%-env,$(notdir $@))*) $@/
 
 # provisioning the runner user makes RUNNER=titanium the default from here on.
 # stamp-guarded, not user-guarded: a partially provisioned host must re-run
@@ -136,7 +150,7 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 bootstrap:
 	bash scripts/init/bootstrap.sh
 
-init: sync .tmux .podman .runsc .runsc-podman .titanium | .sentinel/tasks
+init: sync .tmux .podman .runsc .runsc-podman .krun-podman .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
 
 # utility: run any podman command in the runner's context — trial containers
@@ -151,9 +165,15 @@ podman-%:
 unit-podman-env: .podman
 	$(PYTEST) tests/test_podman_environment.py
 
+# The parent suites ride along: the krun seams live in the gvisor files,
+# and those suites pin the runsc-flavor defaults the seams must not move.
+unit-krun-podman-env: .krun-podman
+	$(PYTEST) tests/test_krun_podman_environment.py tests/test_environment_factory.py \
+		tests/test_gvisor_podman_environment.py tests/test_gvisor_environment.py
+
 unit-podman: unit-podman-env
 
-unit-all: unit-podman
+unit-all: unit-podman unit-krun-podman-env
 
 titanium-run: | .sentinel/tasks
 	mkdir -p "$(TITANIUM_JOBS_DIR)"
@@ -185,6 +205,15 @@ smoke-gvisor-podman: sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-pod
 		--self-contained-html --cov=titanium.environments.gvisor \
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) titanium-run TITANIUM_ENV=gvisor-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+
+smoke-krun-podman: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		tests/test_krun_podman_environment.py tests/test_environment_factory.py \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=titanium.environments.krun \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	$(MAKE) titanium-run TITANIUM_ENV=krun-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 # full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
 # BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.
@@ -222,7 +251,7 @@ run-session: sync .tmux | .sentinel/tasks
 	echo "  windows: Ctrl-b n / Ctrl-b p to cycle, Ctrl-b w to list"
 	echo "  detach:  Ctrl-b d (runs keep going)"
 
-smoke-env: SESSION_TARGETS = smoke-podman smoke-gvisor smoke-gvisor-podman
+smoke-env: SESSION_TARGETS = smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman
 smoke-env: run-session
 
 bench-all: SESSION_TARGETS = bench-ds bench-tb2

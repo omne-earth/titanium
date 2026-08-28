@@ -133,6 +133,45 @@ def test_engine_docker_on_env_gvisor_podman_redirects_to_gvisor(tmp_path):
         )
 
 
+def test_krun_podman_is_a_first_class_environment_type():
+    assert EnvironmentType.KRUN_PODMAN.value == "krun-podman"
+    assert EnvironmentType("krun-podman") is EnvironmentType.KRUN_PODMAN
+
+
+def test_krun_podman_is_registered_in_the_factory():
+    from titanium.environments.krun.podman import KrunPodmanEnvironment
+
+    assert EnvironmentType.KRUN_PODMAN in _ENVIRONMENT_REGISTRY
+    assert (
+        _load_environment_class(EnvironmentType.KRUN_PODMAN) is KrunPodmanEnvironment
+    )
+    assert _ENVIRONMENT_REGISTRY[EnvironmentType.KRUN_PODMAN].pip_extra is None
+
+
+def test_env_krun_podman_resolves_through_the_factory(tmp_path):
+    from titanium.environments.krun.podman import KrunPodmanEnvironment
+
+    env = _from_config(
+        tmp_path, TrialEnvironmentConfig(type=EnvironmentType.KRUN_PODMAN)
+    )
+
+    assert isinstance(env, KrunPodmanEnvironment)
+    assert env.type() is EnvironmentType.KRUN_PODMAN
+    assert env.engine == "podman"
+    assert env.runtime == "krun"
+
+
+def test_engine_docker_on_env_krun_podman_fails_without_a_redirect(tmp_path):
+    # There is no docker flavor of the krun sandbox to redirect to.
+    with pytest.raises(ValueError, match=r"krun-podman.*only drives"):
+        _from_config(
+            tmp_path,
+            TrialEnvironmentConfig(
+                type=EnvironmentType.KRUN_PODMAN, kwargs={"engine": "docker"}
+            ),
+        )
+
+
 def test_env_gvisor_resolves_through_the_factory(tmp_path):
     env = _from_config(tmp_path, TrialEnvironmentConfig(type=EnvironmentType.GVISOR))
 
