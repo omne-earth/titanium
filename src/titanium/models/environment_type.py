@@ -2,6 +2,7 @@ from enum import Enum
 
 
 class EnvironmentType(str, Enum):
+    CELLA = "cella"
     DOCKER = "docker"
     GVISOR = "gvisor"
     GVISOR_PODMAN = "gvisor-podman"
