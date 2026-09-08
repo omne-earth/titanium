@@ -1,0 +1,23 @@
+[package]
+name = "titanium-controller"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The Titanium guest controller: the peer of the host control client, inside the guest."
+
+# Standalone: this crate is not a member of any workspace above it.
+[workspace]
+
+# No dependencies, deliberately. The controller is the one Titanium binary that
+# runs inside an arbitrary task image, so every byte of it is attack surface a
+# task can study. A hand-written JSON reader and base64 codec are a few hundred
+# auditable lines; a dependency tree is not, and building one would also mean
+# a network fetch during an offline test run.
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
