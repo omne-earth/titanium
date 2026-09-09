@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -214,6 +214,18 @@ smoke-krun-podman: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
 		--self-contained-html --cov=titanium.environments.krun \
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) titanium-run TITANIUM_ENV=krun-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+
+# The Cella rootfs acceptance proof. No runner, no agent, no `titanium run`:
+# Titanium converts a container build file into a systemd-bootable ext4, and
+# Cella's own verbs drive it through boot -> freeze -> thaw -> stop -> archive
+# -> destroy with the guest's network disabled.
+#
+# Cella is found, never built: set CELLA_BIN, or put `cella` on PATH. It must
+# be the lab flavor -- the field flavor writes no console.log, so the guest
+# cannot be observed. Exit 2 means a precondition was missing and nothing was
+# proven; exit 1 is a real failure.
+smoke-cella-rootfs: sync .podman
+	bash scripts/smoke/cella-rootfs.sh
 
 # full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
 # BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.

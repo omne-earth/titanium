@@ -1,0 +1,9 @@
+# The subject of `make smoke-cella-rootfs`.
+#
+# Deliberately a stock Debian that ships neither systemd nor /sbin/init: that
+# is what makes it a real subject for the provisioning policy in
+# titanium.environments.cella.systemd_boot. A base that already booted systemd
+# would exercise the bypass and prove nothing about the conversion.
+#
+# One line, and no task payload. The smoke proves the rootfs path, not a task.
+FROM docker.io/library/debian:12-slim
