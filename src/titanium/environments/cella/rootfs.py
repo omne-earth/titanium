@@ -342,14 +342,16 @@ def build_ext4(
                 "--network=none",
                 "-v",
                 f"{staging_dir}:/in:ro,z",
-                # Deliberately no `z` on the output: it lives inside Cella's
-                # artifact home, which Cella's own security phase labels
-                # (tasks/PHASE2-security.md, 1.6.14h). Relabeling it to
-                # container_file_t here would quietly fight that policy. On an
-                # enforcing host this fails loudly instead, which is the
-                # outcome worth having.
+                # `z` on the output as well: out_dir is the converter's own
+                # staging directory (`.tmp-<random>`), unlabeled at birth, so
+                # on an enforcing host the builder cannot write into it at
+                # all. The published flavor's label remains Cella's security
+                # phase's to set -- tasks/PHASE2-security.md (1.6.14h) is what
+                # implements the labels on the artifact home -- and what gets
+                # relabeled here is a private directory that exists only until
+                # publication renames it into place.
                 "-v",
-                f"{out_dir}:/out",
+                f"{out_dir}:/out:z",
                 builder,
                 "sh",
                 "-c",
