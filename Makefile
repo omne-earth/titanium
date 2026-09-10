@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -117,6 +117,24 @@ _probe-krun-podman: .krun-podman
 		&& test -f /etc/containers/containers.conf.d/titanium-krun.conf; } >/dev/null 2>&1 \
 		|| bash scripts/init/krun-podman.sh
 
+# cella (the sealed-VM rung): built from a git rev pinned in runtime.env,
+# installed by cella's own field installer into ~/.cella/bin, kernel golden
+# built once, digest-pinned like krun/runsc. Field flavor only — smokes that
+# need the guest console point CELLA_BIN at a lab build instead.
+.cella:
+	@{ test -x "$$HOME/.cella/bin/cella" \
+		&& test -f /usr/local/share/titanium/cella.sha3-512 \
+		&& test -f "$$HOME/.cella/kernel/canonical/bzImage"; } >/dev/null 2>&1 \
+		|| bash scripts/init/cella.sh
+
+# the lab flavor (console on), built in the same pinned clone for smokes
+# that observe a guest console. Always runs: the script is a no-op when the
+# checkout is at the pin and cargo has nothing to rebuild.
+CELLA_SRC := $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/titanium/cella-src
+CELLA_LAB_BIN := $(CELLA_SRC)/target/lab/cella
+.cella-debug:
+	@bash scripts/init/cella-debug.sh
+
 # toolchain for building wheels that ship no binary for this platform/python.
 .deps:
 	@{ command -v gcc && command -v make && command -v python3 && \
@@ -220,12 +238,13 @@ smoke-krun-podman: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
 # Cella's own verbs drive it through boot -> freeze -> thaw -> stop -> archive
 # -> destroy with the guest's network disabled.
 #
-# Cella is found, never built: set CELLA_BIN, or put `cella` on PATH. It must
-# be the lab flavor -- the field flavor writes no console.log, so the guest
-# cannot be observed. Exit 2 means a precondition was missing and nothing was
-# proven; exit 1 is a real failure.
-smoke-cella-rootfs: sync .podman
-	bash scripts/smoke/cella-rootfs.sh
+# The smoke needs the lab flavor -- the field flavor writes no console.log,
+# so the guest cannot be observed. .cella-debug builds it from the rev pinned
+# in runtime.env and CELLA_BIN defaults to that build; export CELLA_BIN to
+# observe through a different lab binary instead. Exit 2 means a precondition
+# was missing and nothing was proven; exit 1 is a real failure.
+smoke-cella-rootfs: sync .podman .cella .cella-debug
+	CELLA_BIN="$${CELLA_BIN:-$(CELLA_LAB_BIN)}" bash scripts/smoke/cella-rootfs.sh
 
 # full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
 # BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.
