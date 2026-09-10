@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-cella unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-cella unit-core unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -180,23 +180,45 @@ init: sync .tmux .podman .runsc .runsc-podman .krun-podman .titanium | .sentinel
 podman-%:
 	@$(if $(RUNNER),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )podman $* $(ARGS)
 
+# Each unit-* target reports coverage for the package it exercises, and
+# the union of the unit-* suites is the whole of tests/ by construction:
+# unit-core runs tests/ ignoring exactly the files the scoped targets
+# claim, so a new test file lands in unit-core until a target claims it.
+UNIT_PODMAN_TESTS := tests/test_podman_environment.py
+UNIT_KRUN_TESTS := tests/test_krun_podman_environment.py tests/test_environment_factory.py \
+	tests/test_gvisor_podman_environment.py tests/test_gvisor_environment.py
+UNIT_CELLA_TESTS := tests/test_cella_rootfs_conversion.py tests/test_cella_policy_engine.py \
+	tests/test_cella_environment.py
+UNIT_CLAIMED_TESTS := $(UNIT_PODMAN_TESTS) $(UNIT_KRUN_TESTS) $(UNIT_CELLA_TESTS)
+# Terminal summary plus a browsable HTML report under reports/unit/<target>
+# (gitignored). $@ expands per recipe, so each target keeps its own report
+# and its own .coverage data file.
+UNIT_REPORTS := reports/unit
+UNIT_COV = mkdir -p $(UNIT_REPORTS)/$@ && COVERAGE_FILE=$(UNIT_REPORTS)/$@/.coverage $(PYTEST)
+COV_REPORT = --cov-report=term-missing:skip-covered \
+	--cov-report=html:$(UNIT_REPORTS)/$@/coverage
+
 unit-podman-env: .podman
-	$(PYTEST) tests/test_podman_environment.py
+	$(UNIT_COV) $(UNIT_PODMAN_TESTS) --cov=titanium.environments.podman $(COV_REPORT)
 
 # The parent suites ride along: the krun seams live in the gvisor files,
 # and those suites pin the runsc-flavor defaults the seams must not move.
 unit-krun-podman-env: .krun-podman
-	$(PYTEST) tests/test_krun_podman_environment.py tests/test_environment_factory.py \
-		tests/test_gvisor_podman_environment.py tests/test_gvisor_environment.py
+	$(UNIT_COV) $(UNIT_KRUN_TESTS) --cov=titanium.environments.krun \
+		--cov=titanium.environments.gvisor $(COV_REPORT)
 
 unit-podman: unit-podman-env
 
 # Fully offline: no podman, no cella, no network — safe on any host.
 unit-cella:
-	$(PYTEST) tests/test_cella_rootfs_conversion.py tests/test_cella_policy_engine.py \
-		tests/test_cella_environment.py
+	$(UNIT_COV) $(UNIT_CELLA_TESTS) --cov=titanium.environments.cella $(COV_REPORT)
 
-unit-all: unit-podman unit-krun-podman-env unit-cella
+# The remainder: everything no scoped target claims.
+unit-core:
+	$(UNIT_COV) tests $(addprefix --ignore=,$(UNIT_CLAIMED_TESTS)) \
+		--cov=titanium $(COV_REPORT)
+
+unit-all: unit-podman unit-krun-podman-env unit-cella unit-core
 
 titanium-run: | .sentinel/tasks
 	mkdir -p "$(TITANIUM_JOBS_DIR)"
