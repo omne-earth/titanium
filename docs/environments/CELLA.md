@@ -115,6 +115,43 @@ needed a crossing shows exactly what it asked for. That record —
 every crossing the workload attempted, including the refused ones —
 is a property no other rung has.
 
+### 3.1 How to collect a policy with --dry-run
+
+Do not write a `cella.policy` from guesswork. Observe once, review,
+then enforce forever:
+
+1. **Run the task in collection mode.** For the smoke task:
+   `make smoke-cella-policy-engine-www DRY_RUN=true`. For any task:
+   `titanium run --env cella --ek dry_run=true --path <task> ...`.
+   `--ek key=value` is `titanium run`'s generic environment-kwarg
+   flag — the pairs are passed into the environment class's
+   constructor, and `dry_run` is `CellaEnvironment`'s. The `--ek`
+   form is the real invocation; `DRY_RUN=true` is the make-level
+   convenience that threads it through.
+   The engine releases every crossing and writes each distinct one to
+   the task's `environment/cella.policy` as a grant, rewritten on
+   every new grant — a run that dies mid-way still leaves what it
+   observed. The make target copies the collected file back to the
+   example directory; a plain `titanium run` leaves it in the staged
+   task copy under `.run/tasks/`.
+2. **Review every line.** The collected file is an observation, not a
+   judgment. Expect and keep the round-trip pairs — a granted flow
+   needs both its `outgoing` grant and its `incoming` reply twin, and
+   ARP needs both directions (the guest asks, the translator
+   answers). Delete what the task does not need: background noise
+   such as a resolver or time-sync attempt is a crossing the guest
+   *made*, not one the task *requires*. Widen to `*` by hand only
+   where a destination genuinely varies; collection always records
+   exact addresses.
+3. **Check it in beside the Dockerfile**, like a lockfile. The policy
+   is a reviewable artifact; its diff is the task's network story.
+4. **Re-run without the flag** and confirm the reward: enforce mode
+   must release everything the task needs and refuse the rest, with
+   the refusals on the record.
+
+A dry run only observes; it proves nothing about enforcement. Step 4
+is the proof.
+
 ## 4. The exec cycle: one exec, one machine
 
 Cella has no exec-into, so `CellaEnvironment` honors the

@@ -91,6 +91,21 @@ fi
   exit 1
 }
 
+# --- the bridge ------------------------------------------------------------
+
+# cella's field installer stops at the machine personas: cella-engine
+# (the bridge, W.B.1) is the world's side of the seam and does not
+# install itself. Titanium is that world, so it adds the one binary --
+# from the same pinned build, into the same bin directory. The judged
+# network topology (--net world) does not work without it.
+BRIDGE="$CELLA_BIN_DIR/cella-engine"
+if [[ ! -x "$BRIDGE" ]]; then
+  [[ -x "$SRC/target/release/cella-engine" ]] \
+    || (cd "$SRC" && cargo build --release -p cella-engine)
+  install -m 0755 "$SRC/target/release/cella-engine" "$BRIDGE"
+  echo "installed the bridge: $BRIDGE"
+fi
+
 # --- the kernel golden -----------------------------------------------------
 
 # Built once; `cella build` recognizes an intact golden and the manifest
