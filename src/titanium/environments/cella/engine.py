@@ -1,4 +1,4 @@
-"""The ``allow_internet`` judge: titanium's minimal cella policy engine.
+"""The ``cella.policy`` judge: titanium's cella policy engine.
 
 A cella machine with a world nic decides nothing for itself: every
 border crossing parks, cella's bridge (``cella-engine <machine> --dial
@@ -7,31 +7,36 @@ returned ``Decision`` -- a release or a refusal, by operation id -- is
 what actually moves or stops the frame (cella docs/WORLD-ENGINE.md).
 This module is the engine on the other end of that dial.
 
-``allow_internet`` from task.toml is a gate, not a grant. It says
-whether internet is a *possibility* for the task; it releases nothing
-by itself. What actually gets released is the per-task policy's to
-decide -- the ``cella.policy`` file this engine will grow to read --
-and that policy does not exist yet, so today this engine refuses every
-crossing, with the why naming which wall it hit:
+The engine knows nothing of ``allow_internet``, on purpose. The two
+knobs are orthogonal: harbor's flag defines the network *topology*
+(:mod:`titanium.environments.cella.environment` -- ``false`` is
+``--net none``, where no border, no ledger, and no engine exist at
+all), and ``cella.policy`` defines the crossing rules at a border
+(:mod:`titanium.environments.cella.policy` -- ``outgoing`` grants are
+the egress rules, ``incoming`` grants the ingress rules). An engine
+only ever runs where a border exists, so the flag's whole meaning was
+spent at ``cella create`` before this process started.
 
-- ``allow_internet = false``: refused because internet is not a
-  possibility at all. Per cella's titanium integration notes such a
-  task should boot ``--net none`` and need no engine; this engine
-  still answers so that a machine given a world nic by mistake fails
-  closed and visibly instead of hanging on holds.
-- ``allow_internet = true``: refused because no policy grants the
-  crossing. The gate is open, the policy behind it is empty, and an
-  empty policy grants nothing.
+The one policy file travels in one of two directions:
 
-There are no unconditional releases. cella's motor fixture lets ARP
-ride free; this engine deliberately does not -- ARP, NDP,
-per-destination allows, all of it belongs to ``cella.policy``, not to
-hardcoded carve-outs here. Every refusal lands in the chronicle, so a
-task that needed a crossing shows exactly what it asked for.
+- **Enforce** (the default): the policy file is read, a crossing a
+  grant names is released, and everything else is refused as
+  :data:`REFUSAL_WHY_NO_GRANT`. No file, or an empty one, grants
+  nothing: fail closed.
+- **Dry run** (``--dry-run``): every crossing is released and every
+  distinct crossing is *written* to the policy file as a grant. The
+  collected file is reviewed and checked in beside the task's build
+  file, and the next run enforces it.
+
+There are no unconditional releases in enforce mode. cella's motor
+fixture lets ARP ride free; this engine deliberately does not -- ARP,
+NDP, per-destination allows, all of it is ``cella.policy``'s to say,
+not a hardcoded carve-out's. Every refusal lands in the chronicle, so
+a task that needed a crossing shows exactly what it asked for.
 
 Run standalone with ``python -m titanium.environments.cella.engine
---listen 127.0.0.1:50051 [--allow-internet]``, or embed via
-:func:`serve`. The transport is grpclib -- pure-Python asyncio, no
+--listen 127.0.0.1:50051 --policy cella.policy [--dry-run]``, or embed
+via :func:`serve`. The transport is grpclib -- pure-Python asyncio, no
 protoc codegen -- speaking the hand-carried vocabulary in
 :mod:`titanium.environments.cella.wire`.
 """
@@ -43,15 +48,18 @@ import asyncio
 import logging
 import signal
 from dataclasses import dataclass
+from pathlib import Path
 
 from grpclib.const import Cardinality, Handler
 from grpclib.server import Server, Stream
 
+from titanium.environments.cella.policy import Policy, PolicyRecorder
 from titanium.environments.cella.wire import (
     Decision,
     Event,
     Operation,
     Refusal,
+    Release,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,35 +68,39 @@ logger = logging.getLogger(__name__)
 # proto/cella.proto; the bridge dials exactly this.
 DECIDE_METHOD = "/cella.Engine/Decide"
 
-REFUSAL_WHY_DISABLED = "allow_internet is false for this task"
-REFUSAL_WHY_NO_POLICY = (
-    "allow_internet is true, but no cella.policy grants this crossing"
-)
+REFUSAL_WHY_NO_GRANT = "no cella.policy grants this crossing"
 
 
 @dataclass(frozen=True)
-class AllowInternetPolicy:
-    """The ``allow_internet`` gate as a per-crossing judge.
+class PolicyJudge:
+    """The task's ``cella.policy`` grants as a per-crossing judge.
 
-    The flag decides only which refusal a crossing gets. Releases are
-    the per-task ``cella.policy``'s to grant, and until that file is
-    read here the policy behind an open gate is empty -- so ``decide``
-    never releases; the granting policy is this type's designed
-    successor, not a different seam.
+    A crossing a grant names is released; everything else is refused
+    as :data:`REFUSAL_WHY_NO_GRANT`. ``policy=None`` is a border with
+    no file behind it, which grants nothing: fail closed.
+
+    A *recorder* replaces judgment with collection (``--dry-run``):
+    every crossing is released and written to the policy file as the
+    grant that would have released it. The grants are not consulted --
+    a dry run exists to observe what the task asks for.
     """
 
-    allow_internet: bool
+    policy: Policy | None = None
+    recorder: PolicyRecorder | None = None
 
     def decide(self, operation: Operation) -> Decision:
-        if not self.allow_internet:
-            return Decision(id=operation.id, refusal=Refusal(why=REFUSAL_WHY_DISABLED))
-        return Decision(id=operation.id, refusal=Refusal(why=REFUSAL_WHY_NO_POLICY))
+        if self.recorder is not None:
+            self.recorder.record(operation)
+            return Decision(id=operation.id, release=Release())
+        if self.policy is not None and self.policy.grants_crossing(operation):
+            return Decision(id=operation.id, release=Release())
+        return Decision(id=operation.id, refusal=Refusal(why=REFUSAL_WHY_NO_GRANT))
 
 
 class EngineService:
     """The cella.Engine service: Events in, Decisions out, one stream."""
 
-    def __init__(self, policy: AllowInternetPolicy) -> None:
+    def __init__(self, policy: PolicyJudge) -> None:
         self._policy = policy
 
     def __mapping__(self) -> dict[str, Handler]:
@@ -122,9 +134,7 @@ class EngineService:
             await stream.send_message(decision)
 
 
-async def serve(
-    policy: AllowInternetPolicy, host: str = "127.0.0.1", port: int = 0
-) -> Server:
+async def serve(policy: PolicyJudge, host: str = "127.0.0.1", port: int = 0) -> Server:
     """Start the engine listening on *host*:*port*; return the server.
 
     Port 0 binds an ephemeral port; read it back with
@@ -159,16 +169,16 @@ def _parse_listen(listen: str) -> tuple[str, int]:
         raise argparse.ArgumentTypeError(f"--listen {listen!r}: {exc}") from exc
 
 
-async def _run(host: str, port: int, policy: AllowInternetPolicy) -> None:
+async def _run(host: str, port: int, policy: PolicyJudge) -> None:
     server = await serve(policy, host, port)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, server.close)
     logger.info(
-        "cella engine: listening on %s:%d (allow_internet=%s)",
+        "cella engine: listening on %s:%d (mode=%s)",
         host,
         bound_port(server),
-        policy.allow_internet,
+        "dry-run" if policy.recorder is not None else "enforce",
     )
     await server.wait_closed()
 
@@ -176,8 +186,8 @@ async def _run(host: str, port: int, policy: AllowInternetPolicy) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m titanium.environments.cella.engine",
-        description="Serve cella.Engine, deciding every crossing "
-        "by the task's allow_internet flag.",
+        description="Serve cella.Engine, deciding every crossing by the "
+        "task's cella.policy grants.",
     )
     parser.add_argument(
         "--listen",
@@ -187,16 +197,46 @@ def main(argv: list[str] | None = None) -> None:
         help="address to serve on (the bridge's --dial target)",
     )
     parser.add_argument(
-        "--allow-internet",
+        "--policy",
+        type=Path,
+        metavar="CELLA_POLICY",
+        help="the per-task cella.policy file: read and enforced by "
+        "default, written when --dry-run is given",
+    )
+    parser.add_argument(
+        "--dry-run",
         action="store_true",
-        help="internet is a possibility for this task; releases still "
-        "need a granting cella.policy, so every crossing is refused "
-        "either way -- the flag only picks the recorded why",
+        help="release every crossing and write each one observed to "
+        "--policy as a grant, instead of enforcing the file",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     host, port = args.listen
-    asyncio.run(_run(host, port, AllowInternetPolicy(args.allow_internet)))
+
+    if args.dry_run:
+        if args.policy is None:
+            parser.error("--dry-run needs --policy: the collected grants go there")
+        judge = PolicyJudge(recorder=PolicyRecorder(args.policy))
+    else:
+        policy = None
+        if args.policy is not None and args.policy.exists():
+            policy = Policy.load(args.policy)
+            logger.info(
+                "cella engine: enforcing %s (%d grants)",
+                args.policy,
+                len(policy.grants),
+            )
+        elif args.policy is not None:
+            # Fail closed, out loud: an absent file grants nothing, and
+            # the operator should hear that before the first refusal.
+            logger.warning(
+                "cella engine: %s does not exist; every crossing will be "
+                "refused (collect one with --dry-run)",
+                args.policy,
+            )
+        judge = PolicyJudge(policy=policy)
+
+    asyncio.run(_run(host, port, judge))
 
 
 if __name__ == "__main__":
