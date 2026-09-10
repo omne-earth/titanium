@@ -13,17 +13,22 @@ Three layers, matching the module split:
    on a loopback ephemeral port and reading Decisions back.
 """
 
+import argparse
 import asyncio
 
 import pytest
 from grpclib.client import Channel
 from grpclib.const import Cardinality
+from grpclib.server import Server
 
 from titanium.environments.cella.engine import (
     DECIDE_METHOD,
     REFUSAL_WHY_NO_GRANT,
     PolicyJudge,
+    _parse_listen,
+    _run,
     bound_port,
+    main,
     serve,
 )
 from titanium.environments.cella.policy import (
@@ -39,9 +44,12 @@ from titanium.environments.cella.wire import (
     Decision,
     Destination,
     Event,
+    Inspected,
+    Lapsed,
     Operation,
     Refusal,
     Release,
+    Released,
     WireError,
 )
 
@@ -346,3 +354,215 @@ def test_dry_run_releases_everything_and_collects_the_policy(tmp_path):
     for crossing in crossings:
         assert enforcing.decide(crossing).release is not None
     assert enforcing.decide(_op(port=80)).refusal is not None
+
+
+# ---------------------------------------------------------------------------
+# The wire's remaining arms and refusals
+# ---------------------------------------------------------------------------
+
+
+def test_lapsed_and_inspected_round_trip():
+    lapsed = Event(lapsed=Lapsed(id=b"\x31", why="gave up"))
+    assert Event.FromString(lapsed.SerializeToString()) == lapsed
+    inspected = Event(inspected=Inspected(id=b"\x32"))
+    assert Event.FromString(inspected.SerializeToString()) == inspected
+    released = Event(
+        released=Released(id=b"\x33", first_response_ns=1, bytes_in=2, bytes_out=3)
+    )
+    assert Event.FromString(released.SerializeToString()) == released
+
+
+def test_release_body_skips_unknown_fields():
+    # Release is empty on purpose; a grown one still parses.
+    assert Release.FromString(bytes.fromhex("0801")) == Release()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        bytes.fromhex("0b"),  # field 1, wire type 3: a group
+        bytes.fromhex("00"),  # field number 0
+        bytes.fromhex("0a05abcd"),  # length-delimited, truncated
+        bytes.fromhex("08"),  # varint field with no payload
+        bytes.fromhex("08ffffffffffffffffffff01"),  # varint wider than 64 bits
+        bytes.fromhex("0d0102"),  # fixed32, truncated
+    ],
+)
+def test_unparseable_wire_bytes_are_refused(data):
+    with pytest.raises(WireError):
+        Destination.FromString(data)
+
+
+def test_a_field_of_the_wrong_wire_type_is_refused():
+    # Destination.host (field 1) as a varint instead of a string.
+    with pytest.raises(WireError, match="length-delimited"):
+        Destination.FromString(bytes.fromhex("0807"))
+    # Destination.port (field 3) as bytes instead of a varint.
+    with pytest.raises(WireError, match="varint"):
+        Destination.FromString(bytes.fromhex("1a01ff"))
+
+
+def test_negative_varints_cannot_be_encoded():
+    with pytest.raises(WireError, match="negative"):
+        Operation(id=b"\x01", guest_ns=-1).SerializeToString()
+
+
+# ---------------------------------------------------------------------------
+# The policy grammar's remaining refusals and matches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "allow outgoing 0x10000",  # ethertype out of range
+        "allow outgoing 1.2.3.4:443/300",  # proto out of range
+        "allow outgoing 1.2.3.4:abc/tcp",  # port not a number
+        "allow outgoing :443/tcp",  # no ip at all
+        "allow outgoing 1.2.3.4:443",  # no proto separator
+    ],
+)
+def test_more_unreadable_policy_lines(line):
+    with pytest.raises(PolicyError):
+        Policy.parse(line)
+
+
+def test_numeric_ethertype_and_proto_parse():
+    policy = Policy.parse("allow outgoing 0x88cc\nallow incoming 1.2.3.4:443/47\n")
+    lldp, gre = policy.grants
+    assert lldp.ethertype == 0x88CC
+    assert gre.proto == 47
+    # And the canonical rendering survives a round trip.
+    assert set(Policy.parse(policy.render()).grants) == set(policy.grants)
+
+
+def test_grant_shapes_do_not_cross():
+    ipv4_grant = Grant(direction="outgoing", ip="1.2.3.4", port=443, proto=6)
+    l2_op = Operation(
+        id=b"\x41", destination=Destination(ethertype=ETHERTYPE_ARP, mac=b"\xff" * 6)
+    )
+    assert not ipv4_grant.matches(l2_op)
+    l2_grant = Grant(direction="outgoing", ethertype=ETHERTYPE_ARP)
+    ipv4_op = Operation(
+        id=b"\x42", destination=Destination(ip=bytes([1, 2, 3, 4]), port=443, proto=6)
+    )
+    assert not l2_grant.matches(ipv4_op)
+    assert not l2_grant.matches(Operation(id=b"\x43"))
+
+
+def test_grant_for_refuses_an_unnamed_l2_frame():
+    unnamed = Operation(id=b"\x44", destination=Destination(mac=b"\xff" * 6))
+    assert grant_for(unnamed) is None
+
+
+def test_loading_a_missing_policy_file_is_an_error(tmp_path):
+    with pytest.raises(PolicyError, match="cannot read"):
+        Policy.load(tmp_path / "absent.policy")
+
+
+# ---------------------------------------------------------------------------
+# The CLI and the serve loop
+# ---------------------------------------------------------------------------
+
+
+def test_listen_addresses_must_be_host_port():
+    with pytest.raises(argparse.ArgumentTypeError, match="want host:port"):
+        _parse_listen("no-port")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_listen("host:not-a-number")
+    assert _parse_listen("127.0.0.1:0") == ("127.0.0.1", 0)
+
+
+@pytest.mark.asyncio
+async def test_bound_port_refuses_an_unstarted_server():
+    # Constructed inside a running loop (grpclib requires one), but
+    # never started: there is no bound socket to report.
+    with pytest.raises(RuntimeError, match="not listening"):
+        bound_port(Server([]))
+
+
+@pytest.fixture
+def captured_judge(monkeypatch):
+    """Run main() with asyncio.run captured; return the judge it built."""
+    import titanium.environments.cella.engine as engine_module
+
+    seen = {}
+
+    def fake_run(coro):
+        coro.close()
+
+    monkeypatch.setattr(engine_module.asyncio, "run", fake_run)
+    original = engine_module._run
+
+    def spy_run(host, port, policy):
+        seen["judge"] = policy
+        return original(host, port, policy)
+
+    monkeypatch.setattr(engine_module, "_run", spy_run)
+
+    def invoke(argv):
+        main(argv)
+        return seen["judge"]
+
+    return invoke
+
+
+def test_cli_dry_run_needs_a_policy_path(captured_judge):
+    with pytest.raises(SystemExit):
+        captured_judge(["--listen", "127.0.0.1:0", "--dry-run"])
+
+
+def test_cli_dry_run_builds_a_recorder(captured_judge, tmp_path):
+    judge = captured_judge(
+        ["--listen", "127.0.0.1:0", "--policy", str(tmp_path / "p"), "--dry-run"]
+    )
+    assert judge.recorder is not None
+    assert judge.policy is None
+
+
+def test_cli_enforces_an_existing_policy_file(captured_judge, tmp_path):
+    path = tmp_path / "cella.policy"
+    path.write_text("allow outgoing 1.2.3.4:443/tcp\n")
+    judge = captured_judge(["--listen", "127.0.0.1:0", "--policy", str(path)])
+    assert judge.recorder is None
+    assert len(judge.policy.grants) == 1
+
+
+def test_cli_warns_and_fails_closed_on_a_missing_policy_file(
+    captured_judge, tmp_path, caplog
+):
+    judge = captured_judge(
+        ["--listen", "127.0.0.1:0", "--policy", str(tmp_path / "absent")]
+    )
+    assert judge.policy is None
+    assert any("does not exist" in message for message in caplog.messages)
+
+
+def test_cli_with_no_policy_at_all_fails_closed(captured_judge):
+    judge = captured_judge(["--listen", "127.0.0.1:0"])
+    assert judge.policy is None
+    assert judge.recorder is None
+
+
+@pytest.mark.asyncio
+async def test_run_serves_until_closed(monkeypatch):
+    import titanium.environments.cella.engine as engine_module
+
+    class FakeServer:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            return None
+
+    fake = FakeServer()
+
+    async def fake_serve(policy, host, port):
+        return fake
+
+    monkeypatch.setattr(engine_module, "serve", fake_serve)
+    monkeypatch.setattr(engine_module, "bound_port", lambda server: 12345)
+    await asyncio.wait_for(_run("127.0.0.1", 0, PolicyJudge()), timeout=5)

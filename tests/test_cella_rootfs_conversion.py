@@ -34,6 +34,7 @@ from titanium.environments.cella.converter import (
     ConversionError,
     FlavorIdentity,
     convert_task_to_rootfs_flavor,
+    empty_manifest_fields,
 )
 from titanium.environments.cella.flavor import (
     FlavorIntegrityError,
@@ -42,6 +43,7 @@ from titanium.environments.cella.flavor import (
     manifest_field,
     publish_flavor,
     render_golden_json,
+    rootfs_artifact_path,
     staging_flavor_dir,
     validate_flavor_name,
     verify_flavor_dir,
@@ -57,8 +59,11 @@ from titanium.environments.cella.podman import (
     run_podman,
 )
 from titanium.environments.cella.rootfs import (
+    ROOTFS_BUILDER_IMAGE,
     RootfsBuildError,
     build_ext4,
+    ensure_rootfs_builder_image,
+    rootfs_builder_image_id,
     sha3_256_file,
 )
 from titanium.environments.cella.systemd_boot import (
@@ -70,6 +75,7 @@ from titanium.environments.cella.systemd_boot import (
     SystemdBootError,
     SystemdProvisionPlan,
     plan_systemd_provisioning,
+    prepare_systemd_rootfs,
     probe_rootfs_tar,
     render_derived_build_file,
     validate_provision_plan,
@@ -340,6 +346,7 @@ def test_staging_is_cleaned_on_failure_and_publish_is_a_rename(tmp_path):
 
 def _tar(tmp_path, entries) -> Path:
     """Build a rootfs tar from (name, kind, payload) triples."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "rootfs.tar"
     with tarfile.open(path, "w") as archive:
         for name, kind, payload in entries:
@@ -823,3 +830,416 @@ def test_bad_conversion_inputs_are_refused(conversion, tmp_path):
         conversion(ext4_size_bytes=0)
     with pytest.raises(ConversionError, match="No environment directory"):
         conversion(environment_dir=tmp_path / "absent")
+
+
+# ---------------------------------------------------------------------------
+# systemd_boot: the derived-build path, seams faked
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def provisioning_seams(tmp_path, monkeypatch):
+    """Fake the podman seams prepare_systemd_rootfs drives; the tars
+    are real, so the probes are real."""
+    import titanium.environments.cella.systemd_boot as systemd_module
+
+    non_bootable = _tar(tmp_path / "src", [("etc/os-release", "file", _OS_RELEASE)])
+    untagged = []
+    monkeypatch.setattr(systemd_module, "build_image", lambda **kwargs: None)
+    monkeypatch.setattr(
+        systemd_module,
+        "inspect_image",
+        lambda tag, timeout_sec=None: [_inspect_record(Id="sha256:derived")],
+    )
+    monkeypatch.setattr(systemd_module, "untag_image", untagged.append)
+    seams = {"source_tar": non_bootable, "untagged": untagged}
+
+    def set_export_result(entries):
+        def fake_export(*, image, dest_tar, timeout_sec=None):
+            built = _tar(dest_tar.parent / "built", entries)
+            dest_tar.write_bytes(built.read_bytes())
+
+        monkeypatch.setattr(systemd_module, "export_rootfs_tar", fake_export)
+
+    seams["set_export_result"] = set_export_result
+    return seams
+
+
+def _prepare(seams, work_dir):
+    return prepare_systemd_rootfs(
+        source_tag="localhost/t:1",
+        source_image_id="sha256:source",
+        source_rootfs_tar=seams["source_tar"],
+        work_dir=work_dir,
+        plan_provisioning=plan_systemd_provisioning,
+    )
+
+
+def test_provisioning_derives_and_reprobes(tmp_path, provisioning_seams):
+    provisioning_seams["set_export_result"](_bootable_entries())
+    prepared = _prepare(provisioning_seams, tmp_path / "work")
+    assert prepared.derived
+    assert prepared.strategy == "debian-systemd"
+    assert prepared.boot_image_id == "sha256:derived"
+    assert b"apt-get" in prepared.recipe_bytes
+    assert not prepared.source_info.systemd_bootable
+    assert prepared.final_info.systemd_bootable
+    # The derived tag is dropped even on success.
+    assert len(provisioning_seams["untagged"]) == 1
+
+
+def test_a_build_that_exits_zero_is_not_evidence(tmp_path, provisioning_seams):
+    # The derived image still ships no bootable init: the re-probe is
+    # the postcondition, and it refuses.
+    provisioning_seams["set_export_result"]([("etc/os-release", "file", _OS_RELEASE)])
+    with pytest.raises(SystemdBootError, match="still does not boot"):
+        _prepare(provisioning_seams, tmp_path / "work")
+    assert len(provisioning_seams["untagged"]) == 1
+
+
+def test_a_bootable_source_needs_no_provisioning(tmp_path):
+    source = _tar(tmp_path, _bootable_entries())
+
+    def refuse_planner(info):
+        raise AssertionError("the planner must not be called")
+
+    prepared = prepare_systemd_rootfs(
+        source_tag="localhost/t:1",
+        source_image_id="sha256:source",
+        source_rootfs_tar=source,
+        work_dir=tmp_path / "work",
+        plan_provisioning=refuse_planner,
+    )
+    assert not prepared.derived
+    assert prepared.strategy == STRATEGY_ALREADY_SYSTEMD
+    assert prepared.boot_image_id == "sha256:source"
+    assert prepared.rootfs_tar == source
+
+
+# ---------------------------------------------------------------------------
+# rootfs: the builder image, and the mkfs program build_ext4 renders
+# ---------------------------------------------------------------------------
+
+
+def test_an_existing_builder_image_is_not_rebuilt(monkeypatch):
+    import titanium.environments.cella.rootfs as rootfs_module
+
+    monkeypatch.setattr(rootfs_module, "image_exists", lambda reference: True)
+    monkeypatch.setattr(
+        rootfs_module,
+        "run_podman",
+        lambda *a, **k: pytest.fail("present is done: no build may run"),
+    )
+    assert ensure_rootfs_builder_image() == ROOTFS_BUILDER_IMAGE
+
+
+def test_an_absent_builder_image_is_built(monkeypatch):
+    import titanium.environments.cella.rootfs as rootfs_module
+
+    calls = []
+    monkeypatch.setattr(rootfs_module, "image_exists", lambda reference: False)
+    monkeypatch.setattr(
+        rootfs_module, "run_podman", lambda args, **k: calls.append(list(args))
+    )
+    assert ensure_rootfs_builder_image() == ROOTFS_BUILDER_IMAGE
+    assert calls and calls[0][0] == "build"
+
+
+def test_builder_image_id_reads_the_record(monkeypatch):
+    import titanium.environments.cella.rootfs as rootfs_module
+
+    monkeypatch.setattr(rootfs_module, "image_exists", lambda reference: True)
+    records = {"value": [{"Id": "sha256:builder"}]}
+    monkeypatch.setattr(
+        rootfs_module,
+        "inspect_image",
+        lambda reference, timeout_sec=None: records["value"],
+    )
+    assert rootfs_builder_image_id() == "sha256:builder"
+
+    records["value"] = [{"Id": "a"}, {"Id": "b"}]
+    with pytest.raises(RootfsBuildError, match="one inspect record"):
+        rootfs_builder_image_id()
+
+    records["value"] = [{"NoId": True}]
+    with pytest.raises(RootfsBuildError, match="no 'Id'"):
+        rootfs_builder_image_id()
+
+
+@pytest.fixture
+def mkfs_run(tmp_path, monkeypatch):
+    """Drive build_ext4 with run_podman captured; return the argv and
+    the dest, with the fake creating the image the script would."""
+    import titanium.environments.cella.rootfs as rootfs_module
+
+    captured = {}
+
+    def fake_run(args, timeout_sec=None, **kwargs):
+        captured["argv"] = list(args)
+        for argument in args:
+            if isinstance(argument, str) and argument.endswith(":/out:z"):
+                host_dir = Path(argument[: -len(":/out:z")])
+                (host_dir / "rootfs.ext4").write_bytes(b"img")
+        return ""
+
+    monkeypatch.setattr(rootfs_module, "run_podman", fake_run)
+
+    def run(boot_layer=None, create_image=True):
+        if not create_image:
+
+            def silent_run(args, timeout_sec=None, **kwargs):
+                captured["argv"] = list(args)
+                return ""
+
+            monkeypatch.setattr(rootfs_module, "run_podman", silent_run)
+        tar = tmp_path / "rootfs.tar"
+        tar.write_bytes(b"tar")
+        dest = tmp_path / "out" / "rootfs.ext4"
+        dest.parent.mkdir(exist_ok=True)
+        build_ext4(
+            rootfs_tar=tar,
+            boot_layer=boot_layer,
+            size_bytes=4096,
+            dest=dest,
+            builder_image="sha256:builder",
+        )
+        return captured["argv"]
+
+    return run
+
+
+def test_the_mkfs_program_extracts_places_and_makes(mkfs_run):
+    layer = BootLayer(
+        entries=(
+            GuestFile("/etc/unit.service", b"[Unit]", 0o644, 0, 0),
+            GuestSymlink("/etc/wants/unit.service", "../unit.service", 0, 0),
+        )
+    )
+    argv = mkfs_run(boot_layer=layer)
+    assert "--network=none" in argv
+    assert "sha256:builder" in argv
+    script = argv[-1]
+    assert "tar -xpf /in/rootfs.tar" in script
+    assert "--numeric-owner" in script
+    assert "truncate -s 4096" in script
+    assert "mkfs.ext4 -F -q -d /work/root /out/rootfs.ext4" in script
+    # Placement: parents walked without mkdir -p, contents staged by
+    # position, the symlink deliberate about dashes and link ownership.
+    assert "place_parents /etc/unit.service" in script
+    assert "install -m 0644 -o 0 -g 0 /in/entry-0000" in script
+    assert "ln -s -- ../unit.service" in script
+    assert "chown -h 0:0" in script
+    assert "refusing to place through it" in script
+
+
+def test_an_empty_layer_renders_no_placement(mkfs_run):
+    script = mkfs_run(boot_layer=None)[-1]
+    assert "place_parents" not in script
+    assert "mkfs.ext4" in script
+
+
+def test_a_builder_reporting_success_without_an_image_is_refused(mkfs_run):
+    with pytest.raises(RootfsBuildError, match="produced no image"):
+        mkfs_run(create_image=False)
+
+
+# ---------------------------------------------------------------------------
+# podman and buildfile: remaining seams
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_image_parses_the_record(fake_podman, monkeypatch, tmp_path):
+    binary = tmp_path / "podman-inspect"
+    binary.write_text('#!/bin/bash\necho \'[{"Id": "sha256:x"}]\'\n')
+    binary.chmod(0o755)
+    monkeypatch.setenv("TITANIUM_PODMAN_BIN", str(binary))
+    from titanium.environments.cella.podman import inspect_image
+
+    assert inspect_image("anything") == [{"Id": "sha256:x"}]
+
+
+def test_untag_image_invokes_podman(fake_podman):
+    from titanium.environments.cella.podman import untag_image
+
+    untag_image("localhost/t:1")
+    assert "image untag localhost/t:1" in fake_podman.read_text()
+
+
+def test_agent_install_steps_are_baked_into_the_staged_context(tmp_path, monkeypatch):
+    import titanium.environments.cella.buildfile as buildfile_module
+
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    (environment / "Dockerfile").write_text("FROM alpine:3.20\n")
+    baked = {}
+
+    def fake_write(**kwargs):
+        baked.update(kwargs)
+
+    monkeypatch.setattr(buildfile_module, "write_agent_dockerfile", fake_write)
+    spec = object()
+    context = prepare_build_context(
+        environment_dir=environment,
+        context_dir=tmp_path / "context",
+        agent_install_spec=spec,
+        agent_user="agent",
+    )
+    assert context.agent_install_applied
+    assert baked["install"] is spec
+    assert baked["user"] == "agent"
+
+
+# ---------------------------------------------------------------------------
+# flavor and boot_layer: remaining refusals
+# ---------------------------------------------------------------------------
+
+
+def test_rootfs_artifact_path_names_cella_layout(tmp_path):
+    assert rootfs_artifact_path("task-1", home=tmp_path) == (
+        tmp_path / "rootfs" / "task-1" / "rootfs.ext4"
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"sha3_256": "not-hex"},
+        {"sha3_256": "0" * 63},
+        {"size_bytes": -1},
+        {"built_epoch": -1},
+    ],
+)
+def test_golden_json_refuses_malformed_core_fields(kwargs):
+    arguments = {
+        "flavor": "task-1",
+        "sha3_256": _DIGEST,
+        "size_bytes": 1,
+        "built_epoch": 1,
+        "extra_fields": {},
+    }
+    arguments.update(kwargs)
+    with pytest.raises(ManifestFieldError):
+        render_golden_json(**arguments)
+
+
+def test_verification_refuses_manifests_missing_their_claims(tmp_path):
+    flavor_dir, _ = _publish_fixture(tmp_path)
+    manifest = flavor_dir / "golden.json"
+    intact = manifest.read_text()
+
+    for broken, why in (
+        (intact.replace('"sha3_256"', '"sha3_removed"'), "records no sha3_256"),
+        (intact.replace('"bytes"', '"bytes_removed"'), "records no byte count"),
+        (intact.replace('"axis": "rootfs"', '"axis": "kernel"'), "axis="),
+    ):
+        manifest.chmod(0o644)
+        manifest.write_text(broken)
+        with pytest.raises(FlavorIntegrityError, match=why):
+            verify_flavor_dir(flavor_dir, expected_flavor="task-1")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _file(path=123),
+        _file(mode="644"),
+        _symlink(target=123),
+    ],
+)
+def test_wrongly_typed_entry_fields_raise_type_error(entry):
+    with pytest.raises(TypeError):
+        validate_boot_layer(BootLayer(entries=(entry,)))
+
+
+def test_empty_manifest_fields_is_immutable():
+    fields = empty_manifest_fields()
+    assert dict(fields) == {}
+    with pytest.raises(TypeError):
+        fields["k"] = "v"
+
+
+def test_more_archive_and_os_release_edges(tmp_path):
+    # An unreadable tar is the same class of problem as an unbootable one.
+    garbage = tmp_path / "garbage.tar"
+    garbage.write_bytes(b"\x00\x01not a tar at all")
+    with pytest.raises(SystemdBootError, match="not a readable"):
+        probe_rootfs_tar(garbage)
+
+    # Dot and dot-dot resolution, a dangling symlink, an empty-target
+    # symlink, and a fifo ("other") all resolve without a boom.
+    tar = _tar(
+        tmp_path / "edges",
+        [
+            ("a/b/target", "file", b"x"),
+            ("a/link", "symlink", "./b/../b/target"),
+            ("dangling", "symlink", "/no/such/place"),
+            ("empty", "symlink", ""),
+        ],
+    )
+    with tarfile.open(tar, "a") as archive:
+        fifo = tarfile.TarInfo("fifo")
+        fifo.type = tarfile.FIFOTYPE
+        archive.addfile(fifo)
+    with tarfile.open(tar) as archive:
+        view = RootfsArchive(archive)
+        assert view.resolve("/a/link") == "/a/b/target"
+        assert view.resolve("/dangling") is None
+        assert view.resolve("/empty") is None
+        assert view.read_file("/fifo") is None
+        assert view.read_file("/no/such") is None
+
+    # os-release: non-UTF-8 refused; single-quoted values honored, with
+    # an inner quote refused; unquoted empty value is a fact.
+    with pytest.raises(SystemdBootError, match="not valid UTF-8"):
+        probe_rootfs_tar(
+            _tar(tmp_path / "bin", [("etc/os-release", "file", b"\xff\xfe")])
+        )
+    info = probe_rootfs_tar(
+        _tar(
+            tmp_path / "quotes",
+            [("etc/os-release", "file", "ID='alpine'\nVERSION_ID=\nJUNK\n")],
+        )
+    )
+    assert info.os_id == "alpine"
+    assert info.version_id is None
+    with pytest.raises(SystemdBootError, match="single-quoted"):
+        probe_rootfs_tar(
+            _tar(tmp_path / "sq", [("etc/os-release", "file", "ID='al'pine'\n")])
+        )
+    # A double-quoted escape is unescaped; a trailing backslash refused.
+    info = probe_rootfs_tar(
+        _tar(
+            tmp_path / "esc",
+            [("etc/os-release", "file", 'PRETTY_NAME="a \\"quoted\\" name"\n')],
+        )
+    )
+    assert info.pretty_name == 'a "quoted" name'
+    with pytest.raises(SystemdBootError, match="trailing backslash"):
+        probe_rootfs_tar(
+            _tar(tmp_path / "tb", [("etc/os-release", "file", 'ID="deb\\"\n')])
+        )
+
+
+def test_more_plan_shape_refusals():
+    with pytest.raises(SystemdBootError, match="NUL"):
+        validate_provision_plan(
+            SystemdProvisionPlan(strategy="s\x00", steps=(BuildRun(argv=("x",)),))
+        )
+    with pytest.raises(TypeError, match="strategy must be a str"):
+        validate_provision_plan(
+            SystemdProvisionPlan(strategy=7, steps=(BuildRun(argv=("x",)),))
+        )
+    with pytest.raises(TypeError, match="steps must be a tuple"):
+        validate_provision_plan(SystemdProvisionPlan(strategy="s", steps=["x"]))
+
+
+def test_build_ext4_needs_the_output_directory(tmp_path):
+    tar = tmp_path / "rootfs.tar"
+    tar.write_bytes(b"tar")
+    with pytest.raises(RootfsBuildError, match="does not exist"):
+        build_ext4(
+            rootfs_tar=tar,
+            boot_layer=None,
+            size_bytes=1,
+            dest=tmp_path / "absent" / "rootfs.ext4",
+        )
