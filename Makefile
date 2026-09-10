@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella-policy-engine smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www
 
 -include .secrets
 
@@ -274,6 +274,33 @@ smoke-on-agent-timeout: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-on-agent
 # Cella's own verbs drive it through boot -> freeze -> thaw -> stop -> archive
 # -> destroy with the guest's network disabled.
 #
+# The policy-engine proof, one leg at a time. Both legs run through
+# `titanium run --env cella` with the oracle agent and gate on the task's
+# own offline verifier, exactly like fix-git-offline -- no runner user
+# (cella's jail owns separation), no scripts/smoke driver. The task is
+# staged alone: the shared SMOKE_TASKS need agents and egress this rung
+# does not carry yet.
+#
+# -airgapped: allow_internet=false is the topology --net none. No nic, no
+# judge; the proof is the sealed bake-run-collect loop end to end.
+# -www: allow_internet=true, the judged world nic and cella.policy. Not
+# implemented yet; the sub-target says so and exits 2.
+smoke-cella-policy-engine: smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www
+
+smoke-cella-policy-engine-airgapped: sync .podman .cella
+	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
+	cp -r examples/smoke/cella-policy-engine-airgapped $(RUN_TASKS)/$(BACKEND)/$@/
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		$(UNIT_CELLA_TESTS) \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=titanium.environments.cella \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+
+smoke-cella-policy-engine-www:
+	@echo "SKIP: the -www leg (judged world nic + cella.policy) is not implemented yet"; exit 2
+
 # The smoke needs the lab flavor -- the field flavor writes no console.log,
 # so the guest cannot be observed. .cella-debug builds it from the rev pinned
 # in runtime.env and CELLA_BIN defaults to that build; export CELLA_BIN to
