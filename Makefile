@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-cella unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -191,7 +191,12 @@ unit-krun-podman-env: .krun-podman
 
 unit-podman: unit-podman-env
 
-unit-all: unit-podman unit-krun-podman-env
+# Fully offline: no podman, no cella, no network — safe on any host.
+unit-cella:
+	$(PYTEST) tests/test_cella_rootfs_conversion.py tests/test_cella_policy_engine.py \
+		tests/test_cella_environment.py
+
+unit-all: unit-podman unit-krun-podman-env unit-cella
 
 titanium-run: | .sentinel/tasks
 	mkdir -p "$(TITANIUM_JOBS_DIR)"
