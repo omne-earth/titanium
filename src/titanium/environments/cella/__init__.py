@@ -10,6 +10,14 @@ task's ``environment/Dockerfile`` (or ``Containerfile``) into
 Podman appears here and nowhere near the runtime. Nothing in this package
 creates, starts, inspects, or destroys a Cella machine.
 
+Beside the build-time half sit two runtime-seam modules that also drive no
+machine: the cella wire vocabulary
+(:mod:`titanium.environments.cella.wire`) and the minimal policy engine
+that turns a task's ``allow_internet`` flag into per-crossing decisions
+(:mod:`titanium.environments.cella.engine`). They serve the gRPC seam
+cella's bridge dials (cella docs/WORLD-ENGINE.md) and are imported
+directly rather than re-exported here.
+
 Three load-bearing decisions are deliberately absent and arrive as callables:
 
 * how a guest that does not boot systemd is made to
