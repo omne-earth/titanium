@@ -1,4 +1,4 @@
-"""Unit tests for the cella policy engine (the ``allow_internet`` judge).
+"""Unit tests for the cella policy engine (the ``cella.policy`` judge).
 
 Three layers, matching the module split:
 
@@ -6,7 +6,9 @@ Three layers, matching the module split:
    ``protoc`` from cella's own ``proto/cella.proto`` and cross-checked
    byte-for-byte against this codec, so they pin the wire contract
    without pulling protoc into the test run.
-2. The policy: ``allow_internet`` as a pure function over operations.
+2. The policy: the ``cella.policy`` grants as a pure function over
+   operations. ``allow_internet`` appears nowhere: it is harbor's
+   topology knob, spent before an engine exists.
 3. The seam: a real grpclib client streaming Events to a served engine
    on a loopback ephemeral port and reading Decisions back.
 """
@@ -19,11 +21,17 @@ from grpclib.const import Cardinality
 
 from titanium.environments.cella.engine import (
     DECIDE_METHOD,
-    REFUSAL_WHY_DISABLED,
-    REFUSAL_WHY_NO_POLICY,
-    AllowInternetPolicy,
+    REFUSAL_WHY_NO_GRANT,
+    PolicyJudge,
     bound_port,
     serve,
+)
+from titanium.environments.cella.policy import (
+    Grant,
+    Policy,
+    PolicyError,
+    PolicyRecorder,
+    grant_for,
 )
 from titanium.environments.cella.wire import (
     DIRECTION_INCOMING,
@@ -82,7 +90,11 @@ def test_release_decision_encodes_like_protoc():
 
 
 def test_refusal_decision_encodes_like_protoc():
-    decision = Decision(id=b"\xab\xcd", refusal=Refusal(why=REFUSAL_WHY_DISABLED))
+    # The why is any string on the wire; this one is 37 bytes long and
+    # pins the golden encoding below.
+    decision = Decision(
+        id=b"\xab\xcd", refusal=Refusal(why="allow_internet is false for this task")
+    )
     assert decision.SerializeToString() == bytes.fromhex(
         "0a02abcd1a270a25616c6c6f775f696e7465726e65742069732066616c736520"
         "666f722074686973207461736b"
@@ -130,45 +142,28 @@ def _operation(ethertype: int = 0x0800, direction: int = 0) -> Operation:
     )
 
 
-def test_allow_internet_true_still_refuses_without_a_policy():
-    # The flag is a gate, not a grant: internet is a possibility, but a
-    # release needs a granting cella.policy, and none is loaded yet.
-    decision = AllowInternetPolicy(allow_internet=True).decide(_operation())
-    assert decision.id == b"\x07" * 16
-    assert decision.release is None
-    assert decision.refusal is not None
-    assert decision.refusal.why == REFUSAL_WHY_NO_POLICY
-
-
-def test_allow_internet_false_refuses_with_a_why():
-    decision = AllowInternetPolicy(allow_internet=False).decide(_operation())
-    assert decision.release is None
-    assert decision.refusal is not None
-    assert decision.refusal.why == REFUSAL_WHY_DISABLED
-
-
-def test_allow_internet_false_refuses_incoming_too():
-    decision = AllowInternetPolicy(allow_internet=False).decide(
-        _operation(direction=DIRECTION_INCOMING)
-    )
-    assert decision.refusal is not None
+def test_a_policyless_border_refuses_everything():
+    # The judge knows nothing of allow_internet: topology is harbor's
+    # knob, spent at `cella create`. A border with no cella.policy
+    # behind it grants nothing, both directions.
+    for direction in (0, DIRECTION_INCOMING):
+        decision = PolicyJudge().decide(_operation(direction=direction))
+        assert decision.id == b"\x07" * 16
+        assert decision.release is None
+        assert decision.refusal.why == REFUSAL_WHY_NO_GRANT
 
 
 def test_arp_is_refused_like_everything_else():
-    # Unlike cella's motor fixture, there is no ARP carve-out: under
-    # allow_internet=false the machine stays fully dark, and any finer
-    # exception belongs to the per-task cella.policy file.
-    decision = AllowInternetPolicy(allow_internet=False).decide(
-        _operation(ethertype=ETHERTYPE_ARP)
-    )
+    # Unlike cella's motor fixture, there is no ARP carve-out: any
+    # finer exception belongs to the per-task cella.policy file.
+    decision = PolicyJudge().decide(_operation(ethertype=ETHERTYPE_ARP))
     assert decision.release is None
     assert decision.refusal is not None
 
 
-def test_destinationless_operation_follows_the_flag():
-    bare = Operation(id=b"\x09")
-    assert AllowInternetPolicy(True).decide(bare).refusal.why == REFUSAL_WHY_NO_POLICY
-    assert AllowInternetPolicy(False).decide(bare).refusal.why == REFUSAL_WHY_DISABLED
+def test_a_destinationless_operation_is_refused():
+    decision = PolicyJudge().decide(Operation(id=b"\x09"))
+    assert decision.refusal.why == REFUSAL_WHY_NO_GRANT
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +171,7 @@ def test_destinationless_operation_follows_the_flag():
 # ---------------------------------------------------------------------------
 
 
-async def _decide(policy: AllowInternetPolicy, events: list[Event]) -> list[Decision]:
+async def _decide(policy: PolicyJudge, events: list[Event]) -> list[Decision]:
     """Serve *policy* on loopback, stream *events*, return every Decision."""
     server = await serve(policy)
     channel = Channel("127.0.0.1", bound_port(server))
@@ -199,15 +194,15 @@ async def _decide(policy: AllowInternetPolicy, events: list[Event]) -> list[Deci
 
 
 @pytest.mark.asyncio
-async def test_engine_open_gate_refuses_without_a_policy_over_the_wire():
+async def test_a_policyless_engine_refuses_over_the_wire():
     decisions = await asyncio.wait_for(
-        _decide(AllowInternetPolicy(allow_internet=True), [_PARKED_EVENT]),
+        _decide(PolicyJudge(), [_PARKED_EVENT]),
         timeout=10,
     )
     assert len(decisions) == 1
     assert decisions[0].id == b"\x01" * 16
     assert decisions[0].release is None
-    assert decisions[0].refusal.why == REFUSAL_WHY_NO_POLICY
+    assert decisions[0].refusal.why == REFUSAL_WHY_NO_GRANT
 
 
 @pytest.mark.asyncio
@@ -216,7 +211,7 @@ async def test_engine_refuses_over_the_wire_and_skips_evidence():
     arp = Event(parked=_operation(ethertype=ETHERTYPE_ARP))
     evidence = Event.FromString(bytes.fromhex("1200"))  # a Released event
     decisions = await asyncio.wait_for(
-        _decide(AllowInternetPolicy(allow_internet=False), [parked, evidence, arp]),
+        _decide(PolicyJudge(), [parked, evidence, arp]),
         timeout=10,
     )
     # Completions are evidence, not questions: two parks, two decisions,
@@ -225,4 +220,129 @@ async def test_engine_refuses_over_the_wire_and_skips_evidence():
     for decision in decisions:
         assert decision.release is None
         assert decision.refusal is not None
-        assert decision.refusal.why == REFUSAL_WHY_DISABLED
+        assert decision.refusal.why == REFUSAL_WHY_NO_GRANT
+
+
+# ---------------------------------------------------------------------------
+# The cella.policy file
+# ---------------------------------------------------------------------------
+
+
+_POLICY_TEXT = """\
+# a comment, and a blank line below
+
+allow outgoing 140.82.112.3:443/tcp
+allow incoming *:2222/tcp
+allow outgoing 10.0.0.1:*/udp
+allow outgoing arp
+"""
+
+
+def test_policy_parses_and_renders_canonically():
+    policy = Policy.parse(_POLICY_TEXT)
+    assert len(policy.grants) == 4
+    rendered = Policy.parse(policy.render())
+    assert set(rendered.grants) == set(policy.grants)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "deny outgoing 1.2.3.4:443/tcp",
+        "allow sideways 1.2.3.4:443/tcp",
+        "allow outgoing 1.2.3:443/tcp",
+        "allow outgoing 1.2.3.4:70000/tcp",
+        "allow outgoing 1.2.3.4:443/xtp",
+        "allow outgoing bogus",
+        "allow outgoing",
+    ],
+)
+def test_policy_refuses_unreadable_lines(line):
+    with pytest.raises(PolicyError):
+        Policy.parse(line)
+
+
+def _op(
+    ip=(140, 82, 112, 3),
+    port=443,
+    proto=6,
+    ethertype=0x0800,
+    direction=0,
+) -> Operation:
+    return Operation(
+        id=b"\x21" * 16,
+        destination=Destination(
+            ip=bytes(ip), port=port, proto=proto, ethertype=ethertype
+        ),
+        direction=direction,
+    )
+
+
+def test_grants_match_exactly_and_by_wildcard():
+    policy = Policy.parse(_POLICY_TEXT)
+    assert policy.grants_crossing(_op())
+    assert not policy.grants_crossing(_op(port=80))
+    assert not policy.grants_crossing(_op(proto=17))
+    # The incoming grant: any source, port 2222, tcp.
+    assert policy.grants_crossing(
+        _op(ip=(8, 8, 8, 8), port=2222, direction=DIRECTION_INCOMING)
+    )
+    assert not policy.grants_crossing(_op(port=2222))  # wrong direction
+    # The port wildcard.
+    assert policy.grants_crossing(_op(ip=(10, 0, 0, 1), port=9999, proto=17))
+    # The L2 grant speaks only for its ethertype.
+    arp = Operation(
+        id=b"\x22",
+        destination=Destination(ethertype=ETHERTYPE_ARP, mac=b"\xff" * 6),
+    )
+    assert policy.grants_crossing(arp)
+    ipv6 = Operation(
+        id=b"\x23", destination=Destination(ethertype=0x86DD, mac=b"\xff" * 6)
+    )
+    assert not policy.grants_crossing(ipv6)
+
+
+def test_grant_for_names_the_crossing_exactly():
+    assert grant_for(_op()) == Grant(
+        direction="outgoing", ip="140.82.112.3", port=443, proto=6
+    )
+    arp = Operation(
+        id=b"\x22",
+        destination=Destination(ethertype=ETHERTYPE_ARP, mac=b"\xff" * 6),
+    )
+    assert grant_for(arp) == Grant(direction="outgoing", ethertype=ETHERTYPE_ARP)
+    assert grant_for(Operation(id=b"\x24")) is None
+
+
+def test_enforce_releases_granted_and_refuses_the_rest():
+    policy = Policy.parse(_POLICY_TEXT)
+    judge = PolicyJudge(policy=policy)
+    assert judge.decide(_op()).release is not None
+    refused = judge.decide(_op(port=80))
+    assert refused.refusal is not None
+    assert refused.refusal.why == REFUSAL_WHY_NO_GRANT
+
+
+def test_dry_run_releases_everything_and_collects_the_policy(tmp_path):
+    path = tmp_path / "cella.policy"
+    judge = PolicyJudge(recorder=PolicyRecorder(path))
+    crossings = [
+        _op(),
+        _op(),  # a repeat collapses into one grant
+        _op(ip=(8, 8, 8, 8), port=53, proto=17),
+        Operation(
+            id=b"\x22",
+            destination=Destination(ethertype=ETHERTYPE_ARP, mac=b"\xff" * 6),
+        ),
+    ]
+    for crossing in crossings:
+        assert judge.decide(crossing).release is not None
+
+    collected = Policy.load(path)
+    assert len(collected.grants) == 3
+    # The round trip that makes dry-run useful: enforcing the collected
+    # file releases exactly what was observed and refuses the rest.
+    enforcing = PolicyJudge(policy=collected)
+    for crossing in crossings:
+        assert enforcing.decide(crossing).release is not None
+    assert enforcing.decide(_op(port=80)).refusal is not None

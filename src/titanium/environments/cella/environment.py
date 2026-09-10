@@ -15,7 +15,13 @@ values are two different machines:
 - ``true`` -- ``--net world``, then ``cella gateway <vm> open`` after
   start. Open is the membrane, not a free path: every crossing parks
   for a decision, and the engine enforcing the task's ``cella.policy``
-  (titanium+cella's knob, subordinate to harbor's) is what answers.
+  is what answers.
+
+The two knobs are orthogonal, and stay so: harbor's flag picks which
+of these machines exists, and ``cella.policy`` states the egress and
+ingress rules at a border. Neither reads the other -- an engine only
+runs where a border exists, so it never consults the flag, and the
+flag never reaches into a grant.
 
 The mapping is total and closed: there is no third topology, and no
 kwarg reopens the question somewhere else.
