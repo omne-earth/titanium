@@ -1,0 +1,16 @@
+# cella.policy — the crossings this task is granted.
+# One grant per line: allow <direction> <ip>:<port>/<proto>
+#                  or allow <direction> <ethertype>
+# '*' matches any ip or any port. Everything not granted is refused.
+#
+# Every grant is exact on purpose, and every flow is a round trip at
+# this border: the request parks outgoing and the reply parks in the
+# ingress lane (docs/EXAMPLES.md E1), so a granted destination needs
+# its reply twin -- measured: with only the outgoing grant, the SYN
+# released and the SYN-ACK lapsed refused. Same for ARP: the guest's
+# request goes out, the translator's answer comes in. Everything else
+# the guest attempts is refused, with the why on the machine's record.
+allow outgoing arp
+allow incoming arp
+allow outgoing 1.1.1.1:443/tcp
+allow incoming 1.1.1.1:443/tcp

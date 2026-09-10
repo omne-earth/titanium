@@ -114,6 +114,13 @@ class EngineService:
         }
 
     async def Decide(self, stream: Stream[Event, Decision]) -> None:
+        # Answer with response headers before waiting for anything:
+        # tonic clients (cella's bridge) block inside their call until
+        # the server's initial metadata arrives, and only then start
+        # streaming Events. grpclib defers metadata until the first
+        # message by default, which deadlocks the two -- each side
+        # waiting for the other, measured against the real bridge.
+        await stream.send_initial_metadata()
         while (event := await stream.recv_message()) is not None:
             operation = event.parked
             if operation is None:

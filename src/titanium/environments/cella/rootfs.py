@@ -390,6 +390,7 @@ def place_into_ext4(
     *,
     image: Path,
     boot_layer: BootLayer,
+    purge: tuple[str, ...] = (),
     builder_image: str | None = None,
     timeout_sec: float | None = None,
     runtime: str | None = "krun",
@@ -411,6 +412,11 @@ def place_into_ext4(
         image: The ext4 image to edit. The caller owns it; this is
             never a machine's live ``disk.img``, only titanium's copy.
         boot_layer: The entries to place. Revalidated here.
+        purge: Absolute guest paths removed before placement. The
+            cella environment purges the previous cycle's result
+            directory here: the image carries the whole prior state,
+            and a stale result file would answer the host's completion
+            poll before the new guest ever ran.
         builder_image: As in :func:`build_ext4`.
         timeout_sec: Applied to the podman invocation.
         runtime: Podman ``--runtime``; ``None`` for podman's default.
@@ -431,11 +437,19 @@ def place_into_ext4(
     lines = [
         "set -euf",
         f"mkdir -p {_PLACE_ROOT}",
+        # Replay any dirty journal before editing: entries placed on a
+        # dirty image are silently undone when the next guest kernel
+        # replays the stale journal over them (measured).
+        "e2fsck -fy /img >/dev/null 2>&1 || true",
         # fakeroot for full access; rw is the point. fuse2fs cannot
         # write the journal and says so on stderr; harmless here.
         f"fuse2fs -o fakeroot /img {_PLACE_ROOT}",
         _PLACEMENT_HELPERS.format(root=_PLACE_ROOT),
     ]
+    for path in purge:
+        if not path.startswith("/") or ".." in path:
+            raise RootfsBuildError(f"purge path {path!r} is not guest-absolute.")
+        lines.append(f"rm -rf {shlex.quote(_PLACE_ROOT + path)}")
     for index, entry in enumerate(boot_layer.entries):
         lines += _place_entry(index, entry, _PLACE_ROOT)
     lines += [f"umount {_PLACE_ROOT}"]

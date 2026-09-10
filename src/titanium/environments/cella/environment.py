@@ -80,6 +80,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -137,6 +138,17 @@ _RUNNER_DIR = "/titanium"
 # How long past the exec timeout the guest gets to boot and halt.
 _BOOT_MARGIN_SEC = 180.0
 
+# The world plane's addresses, cella's own (docs/EXAMPLES.md, E1): the
+# guest is .2 and the translator answers as .1 at the edge. Nothing
+# configures the guest's nic for it, so the boot layer does.
+_WORLD_GUEST_ADDRESS = "192.168.210.2/24"
+_WORLD_GATEWAY = "192.168.210.1"
+
+_WORLD_NETWORK_CONF = (
+    "[Match]\nType=ether\n\n"
+    f"[Network]\nAddress={_WORLD_GUEST_ADDRESS}\nGateway={_WORLD_GATEWAY}\n"
+)
+
 _DEFAULT_EXEC_TIMEOUT_SEC = 600.0
 
 
@@ -159,20 +171,23 @@ def cella_bin() -> str:
 class CellaEnvironment(BaseEnvironment):
     """``--env cella``: the sealed-VM rung.
 
-    Airgapped tasks only, for now: ``allow_internet = true`` (the
-    judged world nic, the policy engine, the bridge) is the -www leg
-    and raises until it lands.
+    ``allow_internet = false`` boots ``--net none`` machines: no nic,
+    no judge. ``allow_internet = true`` boots judged machines: a world
+    nic, the gateway opened, titanium's policy engine serving the
+    task's ``cella.policy`` on loopback, and cella's bridge streaming
+    every park to it. ``--ek dry_run=true`` flips the engine to
+    collection: every crossing releases and lands in the task's
+    ``cella.policy`` as a grant.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, dry_run: bool | str = False, **kwargs):
         super().__init__(*args, **kwargs)
         self._topology = network_topology(self.task_env_config.allow_internet)
-        if self._topology.judged:
-            raise NotImplementedError(
-                "The cella environment runs airgapped tasks only so far: "
-                "allow_internet=true needs the judged world nic, which is "
-                "the -www leg of smoke-cella-policy-engine."
-            )
+        # --ek values arrive as strings; anything but an explicit yes
+        # is enforce mode.
+        self._dry_run = str(dry_run).lower() in ("true", "1", "yes")
+        self._engine: subprocess.Popen | None = None
+        self._engine_port: int | None = None
         self._work: Path | None = None
         # Cycle 0 boots from the prepared tar; every later cycle boots
         # from the previous cycle's evidence disk, edited in place.
@@ -245,6 +260,11 @@ class CellaEnvironment(BaseEnvironment):
 
     async def start(self, force_build: bool) -> None:
         self.preflight()
+        if self._topology.judged and not self._bridge_bin().is_file():
+            raise CellaError(
+                f"no bridge at {self._bridge_bin()}: the judged topology "
+                "needs cella-engine (re-run `make .cella`)"
+            )
         self._work = Path(
             tempfile.mkdtemp(prefix="cella-env-", dir=self.trial_paths.trial_dir)
         )
@@ -410,6 +430,104 @@ class CellaEnvironment(BaseEnvironment):
             ),
         ]
 
+    def _bridge_bin(self) -> Path:
+        return Path(cella_bin()).parent / "cella-engine"
+
+    def _policy_path(self) -> Path:
+        """The task's cella.policy, beside its build file. In dry-run
+        the engine writes it there, into the staged task copy, and the
+        make target carries it back to the example for review."""
+        return self.environment_dir / "cella.policy"
+
+    def _ensure_engine(self) -> int:
+        """Start the policy engine once per trial; return its port.
+
+        One loopback listener for the trial's duration, nothing more:
+        the engine is a judge on cella's shipped gRPC seam. Its log
+        lands in the trial directory as evidence.
+        """
+        if self._engine is not None and self._engine.poll() is None:
+            assert self._engine_port is not None
+            return self._engine_port
+        import socket as socket_module
+
+        with socket_module.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        arguments = [
+            sys.executable,
+            "-m",
+            "titanium.environments.cella.engine",
+            "--listen",
+            f"127.0.0.1:{port}",
+            "--policy",
+            str(self._policy_path()),
+        ]
+        if self._dry_run:
+            arguments.append("--dry-run")
+        log = (self.trial_paths.trial_dir / "cella-engine.log").open("ab")
+        self._engine = subprocess.Popen(
+            arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=log
+        )
+        log.close()
+        # The bridge dials once and dies on a refused connection, so
+        # the engine must be listening before the bridge exists.
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                with socket_module.create_connection(("127.0.0.1", port), timeout=1):
+                    break
+            except OSError:
+                time.sleep(0.2)
+        else:
+            raise CellaError("the policy engine did not start listening in time")
+        self._engine_port = port
+        return port
+
+    def _stop_engine(self) -> None:
+        if self._engine is not None:
+            self._engine.terminate()
+            try:
+                self._engine.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._engine.kill()
+            self._engine = None
+            self._engine_port = None
+
+    def _spawn_bridge(self, name: str, port: int) -> subprocess.Popen:
+        log = (self.trial_paths.trial_dir / "cella-bridge.log").open("ab")
+        try:
+            return subprocess.Popen(
+                [str(self._bridge_bin()), name, "--dial", f"127.0.0.1:{port}"],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+            )
+        finally:
+            log.close()
+
+    def _world_entries(self) -> list[BootEntry]:
+        """The guest-side network configuration a judged machine needs:
+        the static world-plane address and systemd-networkd enabled.
+        cella's translator answers ARP and the gateway's echo at the
+        edge; nothing hands out addresses, so the boot layer states
+        them."""
+        return [
+            GuestFile(
+                path="/etc/systemd/network/10-titanium-world.network",
+                contents=_WORLD_NETWORK_CONF.encode(),
+                mode=0o644,
+                uid=0,
+                gid=0,
+            ),
+            GuestSymlink(
+                path="/etc/systemd/system/multi-user.target.wants/systemd-networkd.service",
+                target="/lib/systemd/system/systemd-networkd.service",
+                uid=0,
+                gid=0,
+            ),
+        ]
+
     def _publish_cycle_flavor(self, boot_layer: BootLayer) -> str:
         assert self._work is not None
         flavor = _flavor_name(self.session_id, self._cycle)
@@ -436,6 +554,11 @@ class CellaEnvironment(BaseEnvironment):
                 place_into_ext4(
                     image=artifact,
                     boot_layer=boot_layer,
+                    # The carried disk holds the previous cycle's result;
+                    # left in place it would answer the completion poll
+                    # before this cycle's guest ever ran (measured: every
+                    # cycle after the first returned its predecessor's rc).
+                    purge=(f"{_RUNNER_DIR}/result",),
                     timeout_sec=self.task_env_config.build_timeout_sec,
                 )
             write_manifest(
@@ -491,34 +614,93 @@ class CellaEnvironment(BaseEnvironment):
         finally:
             shutil.rmtree(out_dir, ignore_errors=True)
 
-    def _wait_for_result(self, name: str, deadline: float) -> None:
-        pid_path = self._machine_dir(name) / "pid"
+    def _vmm_alive(self, name: str) -> bool:
+        try:
+            pid_text = (self._machine_dir(name) / "pid").read_text().strip()
+        except OSError:
+            return False
+        if not pid_text:
+            return False
+        try:
+            os.kill(int(pid_text), 0)
+        except (ProcessLookupError, ValueError):
+            return False
+        except PermissionError:
+            pass
+        return True
+
+    def _let_the_guest_halt(self, name: str) -> None:
+        """After the result lands, walk the guest to its halt.
+
+        The shutdown itself can park (a last frame on the way down),
+        and the park is the freeze -- so keep thawing through it for a
+        bounded moment. A guest that halts cleanly unmounts its
+        filesystem; one stopped frozen leaves a dirty journal that the
+        copy-side recovery must replay.
+        """
+        machine_dir = self._machine_dir(name)
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            pid_text = None
-            try:
-                pid_text = pid_path.read_text().strip()
-            except OSError:
-                return
-            if pid_text:
+            if (machine_dir / "state").is_file():
+                time.sleep(1.0)
                 try:
-                    os.kill(int(pid_text), 0)
-                except (ProcessLookupError, ValueError):
-                    return
-                except PermissionError:
+                    self._cella("thaw", name)
+                except CellaError:
                     pass
-            if self._result_landed(name):
-                # Give the guest its poweroff: the filesystem quiesces
-                # (sync, unmount, remount-ro) before the host stops the
-                # halted machine.
-                time.sleep(self._POWEROFF_GRACE_SEC)
+                continue
+            if not self._vmm_alive(name):
                 return
-            time.sleep(self._RESULT_POLL_SEC)
+            time.sleep(self._POWEROFF_GRACE_SEC)
+
+    def _wait_for_result(self, name: str, deadline: float) -> None:
+        """Wait for the guest's result, thawing through the judgments.
+
+        On a judged machine **the park is the freeze**: cella's
+        egress rule (one-shot) cryo-freezes the machine at every park,
+        the bridge lands the engine's decision into the verdict file
+        while the machine lies frozen, and the decision applies at the
+        thaw edge, in park order. The harness's side of that contract
+        is exactly cella's own engine gate's: whenever the state file
+        exists, thaw. A thaw that raced ahead of a staged decision is
+        harmless -- the next park freezes again and the probes retry.
+        """
+        machine_dir = self._machine_dir(name)
+        thaw_pause = 1.0
+        last_poll = 0.0
+        while time.monotonic() < deadline:
+            if (machine_dir / "state").is_file():
+                # A short breath first: the bridge tails at 200ms, so
+                # the decision is usually staged before this thaw.
+                time.sleep(thaw_pause)
+                try:
+                    self._cella("thaw", name)
+                except CellaError:
+                    pass  # raced a concurrent transition; loop decides
+                continue
+            alive = self._vmm_alive(name)
+            if time.monotonic() - last_poll >= self._RESULT_POLL_SEC:
+                last_poll = time.monotonic()
+                if self._result_landed(name):
+                    self._let_the_guest_halt(name)
+                    return
+            if not alive and not (machine_dir / "state").is_file():
+                # Halted (or gone) with no frozen state and no result
+                # yet: one final result check below decides.
+                if self._result_landed(name):
+                    return
+                raise CellaError(
+                    f"machine {name} ended without a result; vmm.log tail:\n"
+                    + _tail(machine_dir / "vmm.log")
+                )
+            time.sleep(1.0)
         raise CellaError(
             f"machine {name} produced no result in time; vmm.log tail:\n"
-            + _tail(self._machine_dir(name) / "vmm.log")
+            + _tail(machine_dir / "vmm.log")
         )
 
-    def _read_from_image(self, image: Path, script: str, out_dir: Path) -> None:
+    def _read_from_image(
+        self, image: Path, script: str, out_dir: Path, recover: bool = False
+    ) -> None:
         """Run one read-only extraction script against *image* in a krun
         guest, with the image at ``/img`` and *out_dir* at ``/out``.
 
@@ -526,10 +708,21 @@ class CellaEnvironment(BaseEnvironment):
         metadata is an attack surface like any parser input. A hostile
         filesystem compromises a disposable KVM guest with no network,
         never the host.
+
+        ``recover=True`` replays the journal first (``e2fsck -p``) --
+        for titanium's own copies only, never a machine's live disk: a
+        guest frozen mid-shutdown leaves a dirty journal that a plain
+        read-only mount refuses, and the copy is titanium's to repair.
         """
         builder = ensure_rootfs_builder_image(
             timeout_sec=self.task_env_config.build_timeout_sec
         )
+        if recover:
+            # -fy, not preen: a disk frozen mid-shutdown needs the full
+            # replay, and a dirty journal left in the image would be
+            # replayed by the NEXT guest kernel over whatever placement
+            # wrote meanwhile -- measured as vanished uploads.
+            script = "e2fsck -fy /img >/dev/null 2>&1 || true\n" + script
         run_podman(
             [
                 "run",
@@ -540,7 +733,7 @@ class CellaEnvironment(BaseEnvironment):
                 "--device",
                 "/dev/fuse",
                 "-v",
-                f"{image}:/img:ro,z",
+                f"{image}:/img:{'z' if recover else 'ro,z'}",
                 "-v",
                 f"{out_dir}:/out:z",
                 builder,
@@ -572,7 +765,7 @@ class CellaEnvironment(BaseEnvironment):
             for f in ("rc", "stdout", "stderr")
         )
         try:
-            self._read_from_image(evidence, script, out_dir)
+            self._read_from_image(evidence, script, out_dir, recover=True)
         except PodmanError as exc:
             raise CellaError(
                 f"cycle {self._cycle}: evidence extraction failed: {exc}; "
@@ -606,14 +799,15 @@ class CellaEnvironment(BaseEnvironment):
     ) -> ExecResult:
         if self._base_tar is None:
             raise CellaError("exec before start: the environment is not running")
-        boot_layer = BootLayer(
-            entries=tuple(self._pending)
-            + tuple(self._job_files(command, cwd, env, user))
-        )
+        job_entries = self._job_files(command, cwd, env, user)
+        if self._topology.judged:
+            job_entries = self._world_entries() + job_entries
+        boot_layer = BootLayer(entries=tuple(self._pending) + tuple(job_entries))
         flavor = self._publish_cycle_flavor(boot_layer)
         name = flavor
         self._machine = name
         memory_mb = self._effective_memory_mb or 1024
+        bridge: subprocess.Popen | None = None
         try:
             self._cella(
                 "create",
@@ -630,11 +824,31 @@ class CellaEnvironment(BaseEnvironment):
                 "rw",
             )
             self._cella("start", name)
+            if self._topology.judged:
+                # E1's order: start, then open -- open is the membrane,
+                # and from here every crossing parks for the engine.
+                self._cella("gateway", name, "open")
+                bridge = self._spawn_bridge(name, self._ensure_engine())
             budget = (timeout_sec or _DEFAULT_EXEC_TIMEOUT_SEC) + _BOOT_MARGIN_SEC
             self._wait_for_result(name, time.monotonic() + budget)
-            self._cella("stop", name)
+            try:
+                self._cella("stop", name)
+            except CellaError:
+                # A machine that ended frozen refuses stop; frozen is
+                # still, which is all the harvest needs, and destroy
+                # (in the finally) takes a frozen machine.
+                if not (self._machine_dir(name) / "state").is_file():
+                    raise
             result = self._harvest(name)
         finally:
+            if bridge is not None:
+                # The tether ends the bridge when the machine directory
+                # goes; the kill is just promptness.
+                bridge.terminate()
+                try:
+                    bridge.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    bridge.kill()
             self._destroy_quietly(name)
             self._machine = None
             flavor_dir = rootfs_flavor_dir(flavor)
@@ -698,7 +912,7 @@ class CellaEnvironment(BaseEnvironment):
             script = (
                 f'debugfs -R "dump {_shell_quote(guest)} /out/file" /img 2>/dev/null'
             )
-            self._read_from_image(self._state_img, script, out_dir)
+            self._read_from_image(self._state_img, script, out_dir, recover=True)
             extracted = out_dir / "file"
             if not extracted.is_file():
                 raise FileNotFoundError(f"{source_path} is not in the evidence tree")
@@ -724,7 +938,7 @@ class CellaEnvironment(BaseEnvironment):
                 "fi\n"
                 "umount /work/mnt\n"
             )
-            self._read_from_image(self._state_img, script, out_dir)
+            self._read_from_image(self._state_img, script, out_dir, recover=True)
             bundle = out_dir / "dir.tar"
             target.mkdir(parents=True, exist_ok=True)
             if not bundle.is_file():
@@ -774,6 +988,7 @@ class CellaEnvironment(BaseEnvironment):
     # -------------------------------------------------------------- stop
 
     async def stop(self, delete: bool) -> None:
+        self._stop_engine()
         if self._machine is not None:
             self._destroy_quietly(self._machine)
             self._machine = None

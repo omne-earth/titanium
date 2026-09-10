@@ -74,9 +74,36 @@ def test_the_environment_registers_and_declares_itself(tmp_path):
     assert not env.resource_capabilities().cpu_limit
 
 
-def test_the_www_leg_refuses_loudly_for_now(tmp_path):
-    with pytest.raises(NotImplementedError, match="-www leg"):
-        _make_env(tmp_path, allow_internet=True)
+def test_a_judged_environment_constructs_and_configures_the_world(tmp_path):
+    env = _make_env(tmp_path, allow_internet=True)
+    assert env._topology.judged
+    entries = env._world_entries()
+    conf = next(
+        e for e in entries if e.path == "/etc/systemd/network/10-titanium-world.network"
+    )
+    text = conf.contents.decode()
+    # cella's world plane (E1): the guest is .2, the translator is .1.
+    assert "Address=192.168.210.2/24" in text
+    assert "Gateway=192.168.210.1" in text
+    networkd = next(e for e in entries if "networkd" in e.path)
+    assert networkd.target == "/lib/systemd/system/systemd-networkd.service"
+
+
+def test_dry_run_accepts_the_string_forms(tmp_path):
+    assert not _make_env(tmp_path)._dry_run
+    environment_dir = tmp_path / "environment"
+    trial_paths = TrialPaths(trial_dir=tmp_path / "trial2")
+    trial_paths.mkdir()
+    env = CellaEnvironment(
+        environment_dir=environment_dir,
+        environment_name="cella-task",
+        session_id="s",
+        trial_paths=trial_paths,
+        task_env_config=TaskEnvironmentConfig(allow_internet=True),
+        dry_run="true",
+    )
+    assert env._dry_run
+    assert env._policy_path() == environment_dir / "cella.policy"
 
 
 def test_flavor_names_are_safe_and_distinct():

@@ -44,7 +44,7 @@ RUNNER ?= $(shell test -f /usr/local/share/titanium/titanium.provisioned && echo
 # group is root-equivalent and would nullify the separation.
 RUNNER_ENVS := podman gvisor-podman krun-podman
 TITANIUM_WRAP := $(if $(and $(RUNNER),$(filter $(TITANIUM_ENV),$(RUNNER_ENVS))),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )
-TITANIUM_RUN ?= $(TITANIUM_WRAP)$(TITANIUM) run --agent=$(TITANIUM_AGENT) --model $(TITANIUM_MODEL) --env $(TITANIUM_ENV) --path=$(TITANIUM_TASK) --jobs-dir=$(TITANIUM_JOBS_DIR) -n $(TITANIUM_N)
+TITANIUM_RUN ?= $(TITANIUM_WRAP)$(TITANIUM) run --agent=$(TITANIUM_AGENT) --model $(TITANIUM_MODEL) --env $(TITANIUM_ENV) --path=$(TITANIUM_TASK) --jobs-dir=$(TITANIUM_JOBS_DIR) -n $(TITANIUM_N) $(TITANIUM_EXTRA_ARGS)
 
 RUN_DIR ?= ./.run
 RUN_TASKS := $(RUN_DIR)/tasks
@@ -289,8 +289,19 @@ smoke-cella-policy-engine-airgapped: sync .podman .cella
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
-smoke-cella-policy-engine-www:
-	@echo "SKIP: the -www leg (judged world nic + cella.policy) is not implemented yet"; exit 2
+# DRY_RUN=true flips the engine to collection: every crossing releases
+# and lands in the staged task's cella.policy, which is then copied
+# back to the example for review and check-in -- observe once, enforce
+# forever.
+DRY_RUN ?= false
+smoke-cella-policy-engine-www: sync .podman .cella
+	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
+	cp -r examples/smoke/cella-policy-engine-www $(RUN_TASKS)/$(BACKEND)/$@/
+	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ \
+		$(if $(filter true,$(DRY_RUN)),TITANIUM_EXTRA_ARGS="--ek dry_run=true",)
+	$(if $(filter true,$(DRY_RUN)),cp $(RUN_TASKS)/$(BACKEND)/$@/cella-policy-engine-www/environment/cella.policy \
+		examples/smoke/cella-policy-engine-www/environment/cella.policy \
+		&& echo "collected cella.policy copied back -- review and commit it",)
 
 # The smoke needs the lab flavor -- the field flavor writes no console.log,
 # so the guest cannot be observed. .cella-debug builds it from the rev pinned
