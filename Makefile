@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-cella unit-core unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella-rootfs smoke-cella-policy-engine smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-cella unit-core unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella smoke-cella-all smoke-cella-rootfs smoke-cella-policy-engine smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -265,6 +265,20 @@ smoke-krun-podman: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
 # Cella's own verbs drive it through boot -> freeze -> thaw -> stop -> archive
 # -> destroy with the guest's network disabled.
 #
+# oracle-only, verify tasks alone: the shared tasks need agents and
+# egress the sealed rung does not carry (docs/environments/CELLA.md §9)
+smoke-cella: SMOKE_TASKS =
+smoke-cella: sync .podman .cella $(RUN_TASKS)/$(BACKEND)/smoke-cella
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		$(UNIT_CELLA_TESTS) \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=titanium.environments.cella \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+
+smoke-cella-all: smoke-cella-rootfs smoke-cella-policy-engine smoke-cella
+
 # The policy-engine proof, one leg at a time. Both legs run through
 # `titanium run --env cella` with the oracle agent and gate on the task's
 # own offline verifier, exactly like fix-git-offline -- no runner user
