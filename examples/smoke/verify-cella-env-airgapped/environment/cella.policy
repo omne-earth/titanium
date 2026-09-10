@@ -1,0 +1,8 @@
+# cella.policy — the crossings this task is granted.
+# One grant per line: allow <direction> <ip>:<port>/<proto>
+#                  or allow <direction> <ethertype>
+# '*' matches any ip or any port. Everything not granted is refused.
+#
+# This task declares allow_internet = false, so the machine is created
+# --net none: no nic, no border, and this file is never read. It is
+# checked in empty on purpose — the task grants nothing, and says so.
