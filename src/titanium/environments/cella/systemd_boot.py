@@ -581,6 +581,10 @@ def plan_systemd_provisioning(
                         "--no-install-recommends",
                         "systemd",
                         "systemd-sysv",
+                        # The rung's runner configures wire nics
+                        # in-guest (the agent line); ip(8) is the one
+                        # tool that needs.
+                        "iproute2",
                     )
                 ),
                 BuildRun(
