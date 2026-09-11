@@ -162,7 +162,9 @@ def test_job_files_render_the_cycle(tmp_path):
     assert "echo $rc > /titanium/result/rc" in job
     assert job.index("sync") < job.index("echo $rc")
     assert "systemctl poweroff" in job
-    assert "runuser" not in job  # root by default
+    # Always runuser, root included: the systemd job has no HOME, and
+    # runuser pins the target user's.
+    assert "runuser -u root -- bash /titanium/command.sh" in job
     unit = by_path["/etc/systemd/system/titanium-exec.service"].contents.decode()
     assert "ExecStart=/bin/bash /titanium/job.sh" in unit
     wants = by_path["/etc/systemd/system/multi-user.target.wants/titanium-exec.service"]
@@ -213,3 +215,113 @@ async def test_downloads_read_the_evidence_tree(tmp_path):
     empty = tmp_path / "empty-out"
     await env.download_dir("/nothing", empty)
     assert empty.is_dir() and not any(empty.iterdir())
+
+
+# ---------------------------------------------------------------------------
+# The agent line (line.py): pure parts
+# ---------------------------------------------------------------------------
+
+from titanium.environments.cella.line import (
+    PROXY_PORT,
+    ROUTER_WIRE_ADDRESS,
+    TASK_WIRE_ADDRESS,
+    line_grants_text,
+    proxy_env,
+    router_entries,
+    router_policy_text,
+    wire_up_commands,
+)
+from titanium.environments.cella.policy import Policy
+
+
+def test_line_policies_parse_and_grant_what_they_claim():
+    router = Policy.parse(router_policy_text())
+    lines = {g.line() for g in router.grants}
+    assert "allow outgoing 1.1.1.1:53/udp" in lines
+    assert "allow outgoing *:443/tcp" in lines
+    # The wire side: the task peer reaching the proxy, both ways,
+    # wildcard port (an incoming crossing is named by source).
+    assert f"allow incoming {TASK_WIRE_ADDRESS}:*/tcp" in lines
+    assert f"allow outgoing {TASK_WIRE_ADDRESS}:*/tcp" in lines
+    task_side = Policy.parse(line_grants_text())
+    assert f"allow outgoing {ROUTER_WIRE_ADDRESS}:{PROXY_PORT}/tcp" in {
+        g.line() for g in task_side.grants
+    }
+
+
+def test_router_entries_hold_the_allowlist_and_the_wire():
+    entries = router_entries(["openrouter.ai", ".anthropic.com"])
+    by_path = {e.path: e for e in entries}
+    conf = by_path["/etc/tinyproxy/tinyproxy.conf"].contents.decode()
+    assert f"Listen {ROUTER_WIRE_ADDRESS}" in conf
+    assert f"Allow {TASK_WIRE_ADDRESS}" in conf
+    assert "FilterDefaultDeny Yes" in conf
+    flt = by_path["/etc/tinyproxy/filter"].contents.decode().splitlines()
+    # An exact domain matches itself; a leading-dot suffix matches the
+    # bare domain and every subdomain.
+    assert flt == ["openrouter.ai", "*.anthropic.com", "anthropic.com"]
+    unit = by_path["/etc/systemd/system/titanium-line-proxy.service"]
+    text = unit.contents.decode()
+    assert f"ip addr replace {ROUTER_WIRE_ADDRESS}/24 dev eth1" in text
+
+
+def test_wire_up_commands_are_idempotent_ip8():
+    lines = wire_up_commands("eth0", TASK_WIRE_ADDRESS)
+    assert f"ip addr replace {TASK_WIRE_ADDRESS}/24 dev eth0" in lines
+    assert "|| true" in lines
+
+
+def test_proxy_env_points_at_the_wire_peer():
+    env = proxy_env()
+    assert env["HTTPS_PROXY"] == f"http://{ROUTER_WIRE_ADDRESS}:{PROXY_PORT}"
+    assert "NO_PROXY" in env
+
+
+def _make_line_env(tmp_path, allow_internet):
+    environment_dir = tmp_path / "environment"
+    environment_dir.mkdir(exist_ok=True)
+    (environment_dir / "Dockerfile").write_text("FROM debian:12-slim\n")
+    trial_paths = TrialPaths(trial_dir=tmp_path / "trial")
+    trial_paths.mkdir()
+    from titanium.models.agent.install import AgentInstallSpec, InstallStep
+
+    return CellaEnvironment(
+        environment_dir=environment_dir,
+        environment_name="cella-task",
+        session_id="line-task__abc",
+        trial_paths=trial_paths,
+        task_env_config=TaskEnvironmentConfig(allow_internet=allow_internet),
+        agent_install_spec=AgentInstallSpec(
+            agent_name="mini-swe-agent",
+            steps=[InstallStep(run="true", user="root")],
+        ),
+    )
+
+
+def test_the_line_activates_with_a_baked_agent(tmp_path):
+    env = _make_line_env(tmp_path, allow_internet=False)
+    assert env._line_active
+    # Airgapped with a line: wire-only -- task egress impossible by
+    # topology, the line as the only nic.
+    assert env._task_net() == f"wire:{env._wire_name()}"
+    www = _make_line_env(tmp_path, allow_internet=True)
+    assert www._task_net().startswith("world,wire:")
+
+
+def test_the_composed_task_policy_appends_the_line(tmp_path):
+    env = _make_line_env(tmp_path, allow_internet=False)
+    (tmp_path / "environment" / "cella.policy").write_text(
+        "allow outgoing 9.9.9.9:53/udp\n"
+    )
+    env._work = tmp_path / "work"
+    env._work.mkdir()
+    composed = Policy.load(env._task_policy_path())
+    lines = {g.line() for g in composed.grants}
+    assert "allow outgoing 9.9.9.9:53/udp" in lines
+    assert f"allow outgoing {ROUTER_WIRE_ADDRESS}:{PROXY_PORT}/tcp" in lines
+
+
+def test_without_a_line_nothing_changes(tmp_path):
+    env = _make_env(tmp_path)
+    assert not env._line_active
+    assert env._task_net() == "none"

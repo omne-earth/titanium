@@ -23,8 +23,16 @@ ingress rules at a border. Neither reads the other -- an engine only
 runs where a border exists, so it never consults the flag, and the
 flag never reaches into a grant.
 
-The mapping is total and closed: there is no third topology, and no
-kwarg reopens the question somewhere else.
+The mapping above is the *task's* topology, total and closed. One
+orthogonal addition composes with it: **the agent line**
+(:mod:`titanium.environments.cella.line`). A real agent lives inside
+the sealed guest and always needs its inference API -- titanium's
+``filtered_egress`` assumption -- so when an agent is baked, the task
+guest additionally gets a ``wire:`` nic to a router guest that
+proxies exactly the agent's allowlisted domains, every hop judged.
+``allow_internet=false`` with a line is then wire-only: task egress
+stays impossible by topology while the line rides the wire. Oracle
+and nop trials carry no line and the plain mapping holds untouched.
 """
 
 from __future__ import annotations
@@ -83,6 +91,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from pathlib import Path, PurePosixPath
 
@@ -110,6 +119,15 @@ from titanium.environments.cella.flavor import (
     write_manifest,
 )
 from titanium.environments.cella.image_config import parse_image_record
+from titanium.environments.cella.line import (
+    ROUTER_DOCKERFILE,
+    TASK_WIRE_ADDRESS,
+    line_grants_text,
+    proxy_env,
+    router_entries,
+    router_policy_text,
+    wire_up_commands,
+)
 from titanium.environments.cella.podman import (
     PodmanError,
     build_image,
@@ -186,9 +204,15 @@ class CellaEnvironment(BaseEnvironment):
         # --ek values arrive as strings; anything but an explicit yes
         # is enforce mode.
         self._dry_run = str(dry_run).lower() in ("true", "1", "yes")
-        self._engine: subprocess.Popen | None = None
-        self._engine_port: int | None = None
+        self._engines: dict[str, tuple[subprocess.Popen, int]] = {}
         self._work: Path | None = None
+        # The agent line (line.py): active exactly when an agent is
+        # baked -- the oracle carries no install spec and gets no line.
+        self._line_active = self.agent_install_spec is not None
+        self._router: str | None = None
+        self._router_bridge: subprocess.Popen | None = None
+        self._router_thaw: threading.Thread | None = None
+        self._router_stop = threading.Event()
         # Cycle 0 boots from the prepared tar; every later cycle boots
         # from the previous cycle's evidence disk, edited in place.
         self._base_tar: Path | None = None
@@ -208,6 +232,10 @@ class CellaEnvironment(BaseEnvironment):
         return EnvironmentCapabilities(
             disable_internet=True,
             preinstall_agents=True,
+            # The agent line: cella's E3 forwarding topology -- a wire
+            # to a router guest proxying only the agent's allowlisted
+            # domains. See line.py.
+            filtered_egress=True,
         )
 
     @classmethod
@@ -260,7 +288,9 @@ class CellaEnvironment(BaseEnvironment):
 
     async def start(self, force_build: bool) -> None:
         self.preflight()
-        if self._topology.judged and not self._bridge_bin().is_file():
+        if (
+            self._topology.judged or self._line_active
+        ) and not self._bridge_bin().is_file():
             raise CellaError(
                 f"no bridge at {self._bridge_bin()}: the judged topology "
                 "needs cella-engine (re-run `make .cella`)"
@@ -305,6 +335,8 @@ class CellaEnvironment(BaseEnvironment):
                 shutil.copyfile(prepared.rootfs_tar, self._base_tar)
         finally:
             untag_image(tag)
+        if self._line_active:
+            self._ensure_router()
 
     # ----------------------------------------------------------- uploads
 
@@ -365,22 +397,41 @@ class CellaEnvironment(BaseEnvironment):
         merged_env.update(self._persistent_env)
         merged_env.update(env or {})
 
+        # The identity ladder matches the container rungs: an explicit
+        # user, else titanium's declared default, else the image's own
+        # Config.User -- which after an agent bake is the agent user
+        # the install steps ran as (their `USER` directive wins), so
+        # the baked agent's ~/.local paths resolve. runuser supplies
+        # that user's HOME.
         run_as = user if user is not None else self.default_user
+        if run_as is None:
+            run_as = self._image_config.get("User") or None
+        if run_as in (None, 0, "0"):
+            run_as = "root"
         exports = "".join(
             f"export {key}={_shell_quote(value)}\n" for key, value in merged_env.items()
         )
-        if run_as in (None, 0, "0", "root"):
-            invoke = f"bash {_RUNNER_DIR}/command.sh"
-        else:
-            invoke = (
-                f"runuser -u {_shell_quote(str(run_as))} -- "
-                f"bash {_RUNNER_DIR}/command.sh"
-            )
+        # Always through runuser, root included: the job runs under a
+        # systemd unit with no HOME at all, and a baked agent's
+        # ~/.local paths need the target user's real HOME. runuser
+        # sets HOME/USER/LOGNAME for the target and keeps the exports.
+        invoke = (
+            f"runuser -u {_shell_quote(str(run_as))} -- bash {_RUNNER_DIR}/command.sh"
+        )
+        # The wire nic has no kernel autoconfiguration (cella's ip=
+        # covers world nics only), so the job addresses it with ip(8),
+        # which provisioning guarantees. eth0 on a wire-only guest,
+        # eth1 beside a world nic (--net order).
+        wire_prelude = ""
+        if self._line_active:
+            interface = "eth1" if self._topology.judged else "eth0"
+            wire_prelude = wire_up_commands(interface, TASK_WIRE_ADDRESS)
         job = (
             "#!/bin/bash\n"
             "# Generated by titanium's cella environment: one exec, one boot.\n"
             f"mkdir -p {_RUNNER_DIR}/result /logs/agent /logs/verifier /logs/artifacts\n"
-            f"cd {_shell_quote(effective_cwd)} || cd /\n"
+            + wire_prelude
+            + f"cd {_shell_quote(effective_cwd)} || cd /\n"
             f"{exports}"
             f"{invoke} > {_RUNNER_DIR}/result/stdout 2> {_RUNNER_DIR}/result/stderr\n"
             "rc=$?\n"
@@ -439,16 +490,34 @@ class CellaEnvironment(BaseEnvironment):
         make target carries it back to the example for review."""
         return self.environment_dir / "cella.policy"
 
-    def _ensure_engine(self) -> int:
-        """Start the policy engine once per trial; return its port.
+    def _task_policy_path(self) -> Path:
+        """The policy the task machine's engine serves.
 
-        One loopback listener for the trial's duration, nothing more:
-        the engine is a judge on cella's shipped gRPC seam. Its log
-        lands in the trial directory as evidence.
+        Without the line it is the task's own file. With the line it
+        is a composed copy in the work directory: the task's grants
+        plus the wire-peer grants from line.py -- the harness's need,
+        kept out of the task's reviewable file.
         """
-        if self._engine is not None and self._engine.poll() is None:
-            assert self._engine_port is not None
-            return self._engine_port
+        if not self._line_active:
+            return self._policy_path()
+        assert self._work is not None
+        composed = self._work / "task.policy"
+        if not composed.exists():
+            task_text = ""
+            if self._policy_path().exists():
+                task_text = self._policy_path().read_text()
+            composed.write_text(task_text + line_grants_text())
+        return composed
+
+    def _ensure_engine(self, key: str, policy_path: Path, dry_run: bool) -> int:
+        """Start one policy engine per judged machine kind; return its
+        port. Keyed because the task's and the router's membranes serve
+        different policies. Each log lands in the trial directory as
+        evidence.
+        """
+        running = self._engines.get(key)
+        if running is not None and running[0].poll() is None:
+            return running[1]
         import socket as socket_module
 
         with socket_module.socket() as probe:
@@ -461,12 +530,12 @@ class CellaEnvironment(BaseEnvironment):
             "--listen",
             f"127.0.0.1:{port}",
             "--policy",
-            str(self._policy_path()),
+            str(policy_path),
         ]
-        if self._dry_run:
+        if dry_run:
             arguments.append("--dry-run")
-        log = (self.trial_paths.trial_dir / "cella-engine.log").open("ab")
-        self._engine = subprocess.Popen(
+        log = (self.trial_paths.trial_dir / f"cella-engine-{key}.log").open("ab")
+        process = subprocess.Popen(
             arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=log
         )
         log.close()
@@ -481,18 +550,17 @@ class CellaEnvironment(BaseEnvironment):
                 time.sleep(0.2)
         else:
             raise CellaError("the policy engine did not start listening in time")
-        self._engine_port = port
+        self._engines[key] = (process, port)
         return port
 
-    def _stop_engine(self) -> None:
-        if self._engine is not None:
-            self._engine.terminate()
+    def _stop_engines(self) -> None:
+        for process, _port in self._engines.values():
+            process.terminate()
             try:
-                self._engine.wait(timeout=10)
+                process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self._engine.kill()
-            self._engine = None
-            self._engine_port = None
+                process.kill()
+        self._engines = {}
 
     def _spawn_bridge(self, name: str, port: int) -> subprocess.Popen:
         log = (self.trial_paths.trial_dir / "cella-bridge.log").open("ab")
@@ -505,6 +573,157 @@ class CellaEnvironment(BaseEnvironment):
             )
         finally:
             log.close()
+
+    def _wire_name(self) -> str:
+        return f"{_flavor_name(self.session_id, 0)[:40].rstrip('-')}-line"
+
+    def _task_net(self) -> str:
+        """The task machine's --net: the topology's nic, plus the wire
+        to the router when the line is active. An airgapped task with
+        a line is wire-only -- task egress impossible by topology, the
+        strongest reading of allow_internet=false."""
+        if not self._line_active:
+            return self._topology.net
+        wire = f"wire:{self._wire_name()}"
+        if self._topology.judged:
+            return f"world,{wire}"
+        return wire
+
+    def _ensure_router(self) -> None:
+        """Build and start the agent-line router guest, once per trial.
+
+        The router is cella's E3 gateway: --net world,wire, its world
+        membrane judged by its own engine serving line.py's coarse
+        policy, names enforced by its baked tinyproxy. It runs for the
+        trial's whole life; a background thread thaws it through every
+        park (the park is the freeze, and the router parks on every
+        DNS and API flow it forwards).
+        """
+        if self._router is not None:
+            return
+        assert self._work is not None
+        router_dir = self._work / "router-environment"
+        router_dir.mkdir()
+        (router_dir / "Dockerfile").write_text(ROUTER_DOCKERFILE)
+        context = prepare_build_context(
+            environment_dir=router_dir, context_dir=self._work / "router-context"
+        )
+        tag = new_build_tag("titanium-cella-router")
+        try:
+            build_image(
+                context_dir=context.context_dir,
+                build_file=context.build_file,
+                tag=tag,
+                timeout_sec=self.task_env_config.build_timeout_sec,
+            )
+            record = parse_image_record(
+                inspect_image(tag, timeout_sec=self.task_env_config.build_timeout_sec)
+            )
+            router_tar = self._work / "router.tar"
+            export_rootfs_tar(
+                image=tag,
+                dest_tar=router_tar,
+                timeout_sec=self.task_env_config.build_timeout_sec,
+            )
+            prepared = prepare_systemd_rootfs(
+                source_tag=tag,
+                source_image_id=record.image_id,
+                source_rootfs_tar=router_tar,
+                work_dir=self._work,
+                plan_provisioning=plan_systemd_provisioning,
+                timeout_sec=self.task_env_config.build_timeout_sec,
+            )
+            domains = list(self.network_allowlist.domains)
+            layer = BootLayer(entries=tuple(router_entries(domains)))
+            name = f"{_flavor_name(self.session_id, 0)[:38].rstrip('-')}-router"
+            with staging_flavor_dir(home=None) as staging:
+                artifact = staging / ROOTFS_ARTIFACT_NAME
+                build_ext4(
+                    rootfs_tar=prepared.rootfs_tar,
+                    boot_layer=layer,
+                    size_bytes=2 << 30,
+                    dest=artifact,
+                    timeout_sec=self.task_env_config.build_timeout_sec,
+                )
+                write_manifest(
+                    staging,
+                    render_golden_json(
+                        flavor=name,
+                        sha3_256=sha3_256_file(artifact),
+                        size_bytes=artifact.stat().st_size,
+                        built_epoch=int(time.time()),
+                        extra_fields={},
+                    ),
+                )
+                destination = rootfs_flavor_dir(name)
+                if destination.exists():
+                    shutil.rmtree(destination)
+                os.rename(staging, destination)
+                staging.mkdir(exist_ok=True)
+        finally:
+            untag_image(tag)
+
+        router_policy = self._work / "router.policy"
+        router_policy.write_text(router_policy_text())
+        self._cella(
+            "create",
+            name,
+            "--kernel",
+            "canonical",
+            "--rootfs",
+            name,
+            "--mem-mb",
+            "512",
+            "--net",
+            f"world,wire:{self._wire_name()}",
+            "--root",
+            "rw",
+        )
+        self._cella("start", name)
+        self._cella("gateway", name, "open")
+        port = self._ensure_engine("router", router_policy, dry_run=False)
+        self._router_bridge = self._spawn_bridge(name, port)
+        self._router = name
+        self._router_stop.clear()
+        self._router_thaw = threading.Thread(
+            target=self._thaw_forever, args=(name,), daemon=True
+        )
+        self._router_thaw.start()
+
+    def _thaw_forever(self, name: str) -> None:
+        """The router's side of the freeze dance, for the machine's
+        whole life: every park freezes it, every staged decision
+        applies at the thaw."""
+        state = self._machine_dir(name) / "state"
+        while not self._router_stop.is_set():
+            if state.is_file():
+                time.sleep(0.5)
+                try:
+                    self._cella("thaw", name)
+                except (CellaError, subprocess.TimeoutExpired):
+                    pass
+            else:
+                time.sleep(0.5)
+
+    def _stop_router(self) -> None:
+        if self._router is None:
+            return
+        self._router_stop.set()
+        if self._router_thaw is not None:
+            self._router_thaw.join(timeout=10)
+            self._router_thaw = None
+        if self._router_bridge is not None:
+            self._router_bridge.terminate()
+            try:
+                self._router_bridge.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._router_bridge.kill()
+            self._router_bridge = None
+        self._destroy_quietly(self._router)
+        flavor_dir = rootfs_flavor_dir(self._router)
+        if flavor_dir.exists():
+            shutil.rmtree(flavor_dir, ignore_errors=True)
+        self._router = None
 
     def _world_entries(self) -> list[BootEntry]:
         """The guest-side network configuration a judged machine needs:
@@ -799,15 +1018,19 @@ class CellaEnvironment(BaseEnvironment):
     ) -> ExecResult:
         if self._base_tar is None:
             raise CellaError("exec before start: the environment is not running")
+        if self._line_active:
+            env = {**proxy_env(), **(env or {})}
         job_entries = self._job_files(command, cwd, env, user)
         if self._topology.judged:
             job_entries = self._world_entries() + job_entries
+
         boot_layer = BootLayer(entries=tuple(self._pending) + tuple(job_entries))
         flavor = self._publish_cycle_flavor(boot_layer)
         name = flavor
         self._machine = name
         memory_mb = self._effective_memory_mb or 1024
         bridge: subprocess.Popen | None = None
+        judged = self._topology.judged or self._line_active
         try:
             self._cella(
                 "create",
@@ -819,16 +1042,21 @@ class CellaEnvironment(BaseEnvironment):
                 "--mem-mb",
                 str(memory_mb),
                 "--net",
-                self._topology.net,
+                self._task_net(),
                 "--root",
                 "rw",
             )
             self._cella("start", name)
-            if self._topology.judged:
+            if judged:
                 # E1's order: start, then open -- open is the membrane,
                 # and from here every crossing parks for the engine.
+                # One valve per machine: with the line, the wire parks
+                # under the same open.
                 self._cella("gateway", name, "open")
-                bridge = self._spawn_bridge(name, self._ensure_engine())
+                port = self._ensure_engine(
+                    "task", self._task_policy_path(), self._dry_run
+                )
+                bridge = self._spawn_bridge(name, port)
             budget = (timeout_sec or _DEFAULT_EXEC_TIMEOUT_SEC) + _BOOT_MARGIN_SEC
             self._wait_for_result(name, time.monotonic() + budget)
             try:
@@ -988,7 +1216,8 @@ class CellaEnvironment(BaseEnvironment):
     # -------------------------------------------------------------- stop
 
     async def stop(self, delete: bool) -> None:
-        self._stop_engine()
+        self._stop_router()
+        self._stop_engines()
         if self._machine is not None:
             self._destroy_quietly(self._machine)
             self._machine = None
