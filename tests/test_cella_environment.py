@@ -346,6 +346,8 @@ async def test_chronicle_is_preserved_before_destroy(tmp_path, monkeypatch):
     (machine / "manifest.json").write_text("{}")
     (machine / "disk.img").write_bytes(b"HUGE")  # never copied
     monkeypatch.setattr(env, "_machine_dir", lambda name: machine)
+    # cella --dump is the authoritative decoder; stand in for it.
+    monkeypatch.setattr(env, "_cella", lambda *a, **k: f"DUMP {a[-1]}\n")
 
     env._preserve_chronicle("m")
 
@@ -357,6 +359,12 @@ async def test_chronicle_is_preserved_before_destroy(tmp_path, monkeypatch):
     assert (out / "manifest.json").read_text() == "{}"
     # The disk is evidence, not audit record: never copied.
     assert not (out / "disk.img").exists()
+    # Each framed book gets a .txt rendering; the JSON manifest does not.
+    assert (out / "network" / "ledger.txt").exists()
+    assert (out / "verdict.txt").exists()
+    assert (out / "audit.txt").exists()
+    assert (out / "membrane-memory.txt").exists()
+    assert not (out / "manifest.json.txt").exists()
 
 
 @pytest.mark.asyncio
@@ -368,9 +376,11 @@ async def test_chronicle_preservation_skips_absent_files(tmp_path, monkeypatch):
     machine.mkdir(parents=True)
     (machine / "audit").write_bytes(b"AUDIT")
     monkeypatch.setattr(env, "_machine_dir", lambda name: machine)
+    monkeypatch.setattr(env, "_cella", lambda *a, **k: "DUMP\n")
 
     env._preserve_chronicle("air")  # must not raise
 
     out = env.trial_paths.trial_dir / "cella-chronicle" / "air"
     assert (out / "audit").read_bytes() == b"AUDIT"
+    assert (out / "audit.txt").exists()
     assert not (out / "verdict").exists()
