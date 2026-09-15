@@ -659,6 +659,31 @@ def test_a_wildcard_grant_remembers_each_concrete_destination():
     assert b[1].membrane_memory.destination.ip == bytes([1, 1, 1, 1])
 
 
+def test_concrete_grants_pre_plant_at_stream_open_but_names_do_not():
+    # Like cella-engine motor: ARP and exact-ip grants pre-plant their
+    # skip_freeze memory before any crossing, so the first ARP never
+    # freezes and the wire comes up at once. Host and wildcard-ip grants
+    # name no concrete destination, so they are not pre-planted.
+    policy = Policy.parse(
+        "release outgoing arp (keep_open=24h) (skip_freeze=true)\n"
+        "release outgoing 10.77.0.1:443/tcp (keep_open=5m) (skip_freeze=true)\n"
+        "release incoming 10.77.0.1:443/tcp\n"
+        "release outgoing example.com:443/tcp (keep_open=5m) (skip_freeze=true)\n"
+        "release outgoing *:53/udp (keep_open=90s) (skip_freeze=true)\n"
+    )
+    judge = PolicyJudge(policy=policy)
+    standing = judge.standing_decisions()
+    dests = [d.membrane_memory.destination for d in standing]
+    # ARP (ethertype) and the exact ip -- not the host, not the wildcard.
+    assert any(x.ethertype == ETHERTYPE_ARP and not x.ip for x in dests)
+    assert any(bytes(x.ip) == bytes([10, 77, 0, 1]) and x.port == 443 for x in dests)
+    assert len(standing) == 2
+    assert all(d.membrane_memory.skip_freeze for d in standing)
+    # Pre-planted destinations are not re-planted reactively.
+    again = judge.decide(_op(ip=(10, 77, 0, 1), port=443, proto=6))
+    assert len(again) == 1 and again[0].release is not None
+
+
 def test_an_incoming_grant_never_plants_a_memory():
     # An incoming park never freezes, so an incoming memory is
     # meaningless -- and cella keys a memory by destination alone, so an
