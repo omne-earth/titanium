@@ -659,6 +659,19 @@ def test_a_wildcard_grant_remembers_each_concrete_destination():
     assert b[1].membrane_memory.destination.ip == bytes([1, 1, 1, 1])
 
 
+def test_an_incoming_grant_never_plants_a_memory():
+    # An incoming park never freezes, so an incoming memory is
+    # meaningless -- and cella keys a memory by destination alone, so an
+    # incoming memory (skip_freeze=False) would collide with and suppress
+    # the outgoing leg's skip_freeze=True memory for the same
+    # destination. The incoming leg must plant nothing.
+    policy = Policy.parse("release incoming 10.77.0.2:50002/udp (keep_open=1h)\n")
+    decisions = PolicyJudge(policy=policy).decide(
+        _op(ip=(10, 77, 0, 2), port=50002, proto=17, direction=DIRECTION_INCOMING)
+    )
+    assert len(decisions) == 1  # verdict only, no memory
+
+
 def test_a_grant_without_a_window_plants_no_memory():
     policy = Policy.parse("release outgoing 1.1.1.1:443/tcp\n")
     decisions = PolicyJudge(policy=policy).decide(_op(ip=(1, 1, 1, 1), port=443))
