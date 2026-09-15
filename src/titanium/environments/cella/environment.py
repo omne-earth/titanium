@@ -205,6 +205,15 @@ class CellaEnvironment(BaseEnvironment):
         self._term_bridge: subprocess.Popen | None = None
         self._term_thaw: threading.Thread | None = None
         self._term_stop = threading.Event()
+        # One lifecycle at a time on this environment. A `to_thread`
+        # body cannot be cancelled, so when a verifier `wait_for` times
+        # out it abandons the *await* while the worker thread keeps
+        # running; the retry then calls exec again. Without this lock the
+        # two threads would race on the shared cycle state and disk paths
+        # (a FileExistsError on the harvest dir). The lock serializes them
+        # per environment; different trials hold different locks and stay
+        # concurrent.
+        self._lifecycle = threading.Lock()
         # Cycle 0 boots from the prepared tar; every later cycle boots
         # from the previous cycle's evidence disk, edited in place.
         self._base_tar: Path | None = None
@@ -1045,6 +1054,20 @@ class CellaEnvironment(BaseEnvironment):
         timeout_sec: int | None,
         user: str | int | None,
     ) -> ExecResult:
+        # Serialize with any lifecycle still running from an abandoned
+        # (timed-out) await: hold the lock for the whole cycle so no two
+        # execs share the mutable cycle state or a disk path.
+        with self._lifecycle:
+            return self._exec_locked(command, cwd, env, timeout_sec, user)
+
+    def _exec_locked(
+        self,
+        command: str,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout_sec: int | None,
+        user: str | int | None,
+    ) -> ExecResult:
         if self._base_tar is None:
             raise CellaError("exec before start: the environment is not running")
         job_entries = self._job_files(command, cwd, env, user)
@@ -1328,16 +1351,19 @@ class CellaEnvironment(BaseEnvironment):
         await asyncio.to_thread(self._stop_blocking, delete)
 
     def _stop_blocking(self, delete: bool) -> None:
-        self._stop_terminator()
-        self._stop_engines()
-        if self._machine is not None:
-            self._destroy_quietly(self._machine)
-            self._machine = None
-        if delete and self._work is not None:
-            shutil.rmtree(self._work, ignore_errors=True)
-            self._work = None
-            self._base_tar = None
-            self._state_img = None
+        # Wait for any abandoned exec thread to finish before teardown,
+        # so destroy does not race a cycle still writing its evidence.
+        with self._lifecycle:
+            self._stop_terminator()
+            self._stop_engines()
+            if self._machine is not None:
+                self._destroy_quietly(self._machine)
+                self._machine = None
+            if delete and self._work is not None:
+                shutil.rmtree(self._work, ignore_errors=True)
+                self._work = None
+                self._base_tar = None
+                self._state_img = None
 
 
 def _flavor_name(session_id: str, cycle: int) -> str:
