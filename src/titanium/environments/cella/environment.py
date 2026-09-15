@@ -9,30 +9,27 @@ firewall posture inside one.
 which every rung must honor however it can. On the cella rung the two
 values are two different machines:
 
-- ``false`` -- ``--net none``. No nic exists. Not a shut valve on a
-  network: no translator, no membrane traffic, no ledger, and none of
-  the judgment machinery (no ``gateway open``, no engine, no bridge).
-- ``true`` -- ``--net world``, then ``cella gateway <vm> open`` after
-  start. Open is the membrane, not a free path: every crossing parks
-  for a decision, and the engine enforcing the task's ``cella.policy``
-  is what answers.
+- ``false`` -- ``--net none`` for an agentless trial. No nic exists:
+  no translator, no membrane traffic, no ledger, and none of the
+  judgment machinery.
+- ``true`` (or an agent present) -- **the terminated pair**
+  (:mod:`titanium.environments.cella.terminator`, cella's
+  docs/integration/TLS-TERMINATOR.md). The task machine is a *member*
+  on a ``wire:`` to a terminator appliance that holds the world nic;
+  both borders are judged by titanium's engine. Open is the membrane,
+  not a free path: every crossing parks for a decision.
 
-The two knobs are orthogonal, and stay so: harbor's flag picks which
-of these machines exists, and ``cella.policy`` states the egress and
-ingress rules at a border. Neither reads the other -- an engine only
-runs where a border exists, so it never consults the flag, and the
-flag never reaches into a grant.
-
-The mapping above is the *task's* topology, total and closed. One
-orthogonal addition composes with it: **the agent line**
-(:mod:`titanium.environments.cella.line`). A real agent lives inside
-the sealed guest and always needs its inference API -- titanium's
-``filtered_egress`` assumption -- so when an agent is baked, the task
-guest additionally gets a ``wire:`` nic to a router guest that
-proxies exactly the agent's allowlisted domains, every hop judged.
-``allow_internet=false`` with a line is then wire-only: task egress
-stays impossible by topology while the line rides the wire. Oracle
-and nop trials carry no line and the plain mapping holds untouched.
+The two knobs stay orthogonal: harbor's flag decides whether the
+task's *own* world domains are granted on the appliance border, and
+``cella.policy`` states the rules. An agent always needs its inference
+line, so the pair stands whenever an agent is baked *or*
+``allow_internet=true``; only an agentless airgapped trial is bare
+``--net none``. The appliance grants the agent's inference host
+always, and the task's declared egress domains only when
+``allow_internet=true`` -- so an airgapped task stays airgapped while
+its agent still resolves its API. World egress is judged by the
+resolved **name** the appliance stamps on each crossing, never by a
+rotating ip.
 """
 
 from __future__ import annotations
@@ -119,15 +116,6 @@ from titanium.environments.cella.flavor import (
     write_manifest,
 )
 from titanium.environments.cella.image_config import parse_image_record
-from titanium.environments.cella.line import (
-    ROUTER_DOCKERFILE,
-    TASK_WIRE_ADDRESS,
-    line_grants_text,
-    proxy_env,
-    router_entries,
-    router_policy_text,
-    wire_up_commands,
-)
 from titanium.environments.cella.podman import (
     PodmanError,
     build_image,
@@ -137,6 +125,7 @@ from titanium.environments.cella.podman import (
     run_podman,
     untag_image,
 )
+from titanium.environments.cella.policy import Policy
 from titanium.environments.cella.rootfs import (
     build_ext4,
     ensure_rootfs_builder_image,
@@ -147,6 +136,15 @@ from titanium.environments.cella.systemd_boot import (
     plan_systemd_provisioning,
     prepare_systemd_rootfs,
 )
+from titanium.environments.cella.terminator import (
+    appliance_border_policy_text,
+    member_policy_text,
+    member_prelude,
+    member_trust_entries,
+    pair_ca_path,
+    terminator_conf_entry,
+    terminator_golden_rootfs,
+)
 
 # The guest-side scratch the runner owns. Deliberately one directory:
 # excluded from the state carried to the next cycle, so a cycle's
@@ -155,17 +153,6 @@ _RUNNER_DIR = "/titanium"
 
 # How long past the exec timeout the guest gets to boot and halt.
 _BOOT_MARGIN_SEC = 180.0
-
-# The world plane's addresses, cella's own (docs/EXAMPLES.md, E1): the
-# guest is .2 and the translator answers as .1 at the edge. Nothing
-# configures the guest's nic for it, so the boot layer does.
-_WORLD_GUEST_ADDRESS = "192.168.210.2/24"
-_WORLD_GATEWAY = "192.168.210.1"
-
-_WORLD_NETWORK_CONF = (
-    "[Match]\nType=ether\n\n"
-    f"[Network]\nAddress={_WORLD_GUEST_ADDRESS}\nGateway={_WORLD_GATEWAY}\n"
-)
 
 _DEFAULT_EXEC_TIMEOUT_SEC = 600.0
 
@@ -189,13 +176,14 @@ def cella_bin() -> str:
 class CellaEnvironment(BaseEnvironment):
     """``--env cella``: the sealed-VM rung.
 
-    ``allow_internet = false`` boots ``--net none`` machines: no nic,
-    no judge. ``allow_internet = true`` boots judged machines: a world
-    nic, the gateway opened, titanium's policy engine serving the
-    task's ``cella.policy`` on loopback, and cella's bridge streaming
-    every park to it. ``--ek dry_run=true`` flips the engine to
-    collection: every crossing releases and lands in the task's
-    ``cella.policy`` as a grant.
+    An agentless ``allow_internet = false`` trial boots ``--net none``
+    machines: no nic, no judge. Otherwise the terminated pair stands: a
+    member on a wire to a terminator appliance holding the world,
+    titanium's engine judging both borders (the member's fixed wire
+    grants and the appliance's world leg, by name), and cella's bridge
+    streaming every park to it. ``--ek dry_run=true`` flips the
+    appliance engine to collection: every world crossing releases and
+    its resolved name lands in the task's ``cella.policy`` as a grant.
     """
 
     def __init__(self, *args, dry_run: bool | str = False, **kwargs):
@@ -206,13 +194,16 @@ class CellaEnvironment(BaseEnvironment):
         self._dry_run = str(dry_run).lower() in ("true", "1", "yes")
         self._engines: dict[str, tuple[subprocess.Popen, int]] = {}
         self._work: Path | None = None
-        # The agent line (line.py): active exactly when an agent is
-        # baked -- the oracle carries no install spec and gets no line.
-        self._line_active = self.agent_install_spec is not None
-        self._router: str | None = None
-        self._router_bridge: subprocess.Popen | None = None
-        self._router_thaw: threading.Thread | None = None
-        self._router_stop = threading.Event()
+        # The terminated pair (terminator.py) stands when the workload
+        # needs the world at all: an agent always needs its inference
+        # line, and allow_internet=true adds the task's own egress. Only
+        # an agentless airgapped trial (--net none) needs no appliance.
+        self._agent = self.agent_install_spec is not None
+        self._paired = self._agent or self._topology.judged
+        self._term: str | None = None
+        self._term_bridge: subprocess.Popen | None = None
+        self._term_thaw: threading.Thread | None = None
+        self._term_stop = threading.Event()
         # Cycle 0 boots from the prepared tar; every later cycle boots
         # from the previous cycle's evidence disk, edited in place.
         self._base_tar: Path | None = None
@@ -232,9 +223,9 @@ class CellaEnvironment(BaseEnvironment):
         return EnvironmentCapabilities(
             disable_internet=True,
             preinstall_agents=True,
-            # The agent line: cella's E3 forwarding topology -- a wire
-            # to a router guest proxying only the agent's allowlisted
-            # domains. See line.py.
+            # The agent line: cella's terminated pair -- a wire to a
+            # terminator appliance that resolves, terminates, and splices
+            # named world egress, judged by name. See terminator.py.
             filtered_egress=True,
         )
 
@@ -296,11 +287,9 @@ class CellaEnvironment(BaseEnvironment):
 
     async def start(self, force_build: bool) -> None:
         self.preflight()
-        if (
-            self._topology.judged or self._line_active
-        ) and not self._bridge_bin().is_file():
+        if self._paired and not self._bridge_bin().is_file():
             raise CellaError(
-                f"no bridge at {self._bridge_bin()}: the judged topology "
+                f"no bridge at {self._bridge_bin()}: the terminated pair "
                 "needs cella-engine (re-run `make .cella`)"
             )
         self._work = Path(
@@ -343,8 +332,8 @@ class CellaEnvironment(BaseEnvironment):
                 shutil.copyfile(prepared.rootfs_tar, self._base_tar)
         finally:
             untag_image(tag)
-        if self._line_active:
-            self._ensure_router()
+        if self._paired:
+            self._ensure_terminator()
 
     # ----------------------------------------------------------- uploads
 
@@ -426,14 +415,13 @@ class CellaEnvironment(BaseEnvironment):
         invoke = (
             f"runuser -u {_shell_quote(str(run_as))} -- bash {_RUNNER_DIR}/command.sh"
         )
-        # The wire nic has no kernel autoconfiguration (cella's ip=
-        # covers world nics only), so the job addresses it with ip(8),
-        # which provisioning guarantees. eth0 on a wire-only guest,
-        # eth1 beside a world nic (--net order).
+        # A paired member is wire-only: the appliance holds the world, so
+        # its one nic is eth0. The prelude addresses it (no kernel
+        # autoconfiguration on a wire), folds the pair CA into the trust
+        # bundle, and pins the ephemeral range to the reply window.
         wire_prelude = ""
-        if self._line_active:
-            interface = "eth1" if self._topology.judged else "eth0"
-            wire_prelude = wire_up_commands(interface, TASK_WIRE_ADDRESS)
+        if self._paired:
+            wire_prelude = member_prelude("eth0")
         job = (
             "#!/bin/bash\n"
             "# Generated by titanium's cella environment: one exec, one boot.\n"
@@ -498,23 +486,47 @@ class CellaEnvironment(BaseEnvironment):
         make target carries it back to the example for review."""
         return self.environment_dir / "cella.policy"
 
-    def _task_policy_path(self) -> Path:
-        """The policy the task machine's engine serves.
+    def _member_policy_path(self) -> Path:
+        """The policy the member (task) machine's engine serves.
 
-        Without the line it is the task's own file. With the line it
-        is a composed copy in the work directory: the task's grants
-        plus the wire-peer grants from line.py -- the harness's need,
-        kept out of the task's reviewable file.
+        A paired member reaches only its appliance, so its border is
+        fixed (terminator.py's wire grants) -- the wire plane's ARP and
+        the appliance's three ports. The task's own cella.policy names
+        *world* domains, which are judged on the appliance's border, not
+        here. An unpaired airgapped member has no engine at all.
         """
-        if not self._line_active:
-            return self._policy_path()
         assert self._work is not None
-        composed = self._work / "task.policy"
+        composed = self._work / "member.policy"
         if not composed.exists():
-            task_text = ""
-            if self._policy_path().exists():
-                task_text = self._policy_path().read_text()
-            composed.write_text(task_text + line_grants_text())
+            composed.write_text(member_policy_text())
+        return composed
+
+    def _world_hosts(self) -> list[str]:
+        """The world domains the appliance may reach for this trial: the
+        agent's inference host always (an agent always needs its line),
+        and the task's own cella.policy domains when allow_internet=true
+        (its declared egress). allow_internet=false keeps the task
+        airgapped while the agent still resolves its API."""
+        hosts: set[str] = set()
+        if self._agent:
+            hosts.update(self.network_allowlist.domains)
+        if self._topology.judged and self._policy_path().exists():
+            task_policy = Policy.parse(self._policy_path().read_text())
+            hosts.update(
+                grant.host
+                for grant in task_policy.grants
+                if grant.host and grant.verb == "release"
+            )
+        return sorted(hosts)
+
+    def _appliance_policy_path(self) -> Path:
+        """The policy the appliance's engine serves: the world leg,
+        judged by name (terminator.py). Composed in the work directory
+        from the trial's allowed world hosts; in dry-run the appliance
+        instead records what it saw into the task's reviewable file."""
+        assert self._work is not None
+        composed = self._work / "appliance.policy"
+        composed.write_text(appliance_border_policy_text(self._world_hosts()))
         return composed
 
     def _ensure_engine(self, key: str, policy_path: Path, dry_run: bool) -> int:
@@ -586,93 +598,64 @@ class CellaEnvironment(BaseEnvironment):
         return f"{_flavor_name(self.session_id, 0)[:40].rstrip('-')}-line"
 
     def _task_net(self) -> str:
-        """The task machine's --net: the topology's nic, plus the wire
-        to the router when the line is active. An airgapped task with
-        a line is wire-only -- task egress impossible by topology, the
-        strongest reading of allow_internet=false."""
-        if not self._line_active:
+        """The member (task) machine's --net. A paired member is
+        wire-only: the appliance holds the world, and the member reaches
+        it over the wire -- so task egress is impossible except through
+        the terminator, whatever allow_internet says. An unpaired
+        airgapped member has no nic at all (--net none)."""
+        if not self._paired:
             return self._topology.net
-        wire = f"wire:{self._wire_name()}"
-        if self._topology.judged:
-            return f"world,{wire}"
-        return wire
+        return f"wire:{self._wire_name()}"
 
-    def _ensure_router(self) -> None:
-        """Build and start the agent-line router guest, once per trial.
+    def _ensure_terminator(self) -> None:
+        """Stand the terminator appliance for the trial, once.
 
-        The router is cella's E3 gateway: --net world,wire, its world
-        membrane judged by its own engine serving line.py's coarse
-        policy, names enforced by its baked tinyproxy. It runs for the
-        trial's whole life; a background thread thaws it through every
-        park (the park is the freeze, and the router parks on every
-        DNS and API flow it forwards).
+        The appliance is cella's terminator golden with titanium's
+        constant ``/etc/cella-terminator.conf`` injected: --net
+        world,wire, its world membrane judged by titanium's engine
+        serving the appliance border (the world leg, by name --
+        terminator.py). It runs for the trial's whole life; a
+        background thread thaws it through every park (the park is the
+        freeze, and the appliance parks on every DNS and world flow it
+        forwards -- standing memory keeps the hot paths live).
         """
-        if self._router is not None:
+        if self._term is not None:
             return
         assert self._work is not None
-        router_dir = self._work / "router-environment"
-        router_dir.mkdir()
-        (router_dir / "Dockerfile").write_text(ROUTER_DOCKERFILE)
-        context = prepare_build_context(
-            environment_dir=router_dir, context_dir=self._work / "router-context"
-        )
-        tag = new_build_tag("titanium-cella-router")
-        try:
-            build_image(
-                context_dir=context.context_dir,
-                build_file=context.build_file,
-                tag=tag,
+        ca_path = pair_ca_path(Path.home())
+        if not ca_path.is_file():
+            raise CellaError(
+                f"no pair CA at {ca_path}: the terminator golden is not "
+                "built (re-run `make .cella`)"
+            )
+        # Titanium's appliance flavor: a copy of the terminator golden
+        # with the conf injected. The conf is constant, so this is a
+        # per-trial rebuild of one fixed template.
+        name = f"{_flavor_name(self.session_id, 0)[:38].rstrip('-')}-term"
+        with staging_flavor_dir(home=None) as staging:
+            artifact = staging / ROOTFS_ARTIFACT_NAME
+            shutil.copyfile(terminator_golden_rootfs(Path.home()), artifact)
+            place_into_ext4(
+                image=artifact,
+                boot_layer=BootLayer(entries=(terminator_conf_entry(),)),
                 timeout_sec=self.task_env_config.build_timeout_sec,
             )
-            record = parse_image_record(
-                inspect_image(tag, timeout_sec=self.task_env_config.build_timeout_sec)
+            write_manifest(
+                staging,
+                render_golden_json(
+                    flavor=name,
+                    sha3_256=sha3_256_file(artifact),
+                    size_bytes=artifact.stat().st_size,
+                    built_epoch=int(time.time()),
+                    extra_fields={},
+                ),
             )
-            router_tar = self._work / "router.tar"
-            export_rootfs_tar(
-                image=tag,
-                dest_tar=router_tar,
-                timeout_sec=self.task_env_config.build_timeout_sec,
-            )
-            prepared = prepare_systemd_rootfs(
-                source_tag=tag,
-                source_image_id=record.image_id,
-                source_rootfs_tar=router_tar,
-                work_dir=self._work,
-                plan_provisioning=plan_systemd_provisioning,
-                timeout_sec=self.task_env_config.build_timeout_sec,
-            )
-            domains = list(self.network_allowlist.domains)
-            layer = BootLayer(entries=tuple(router_entries(domains)))
-            name = f"{_flavor_name(self.session_id, 0)[:38].rstrip('-')}-router"
-            with staging_flavor_dir(home=None) as staging:
-                artifact = staging / ROOTFS_ARTIFACT_NAME
-                build_ext4(
-                    rootfs_tar=prepared.rootfs_tar,
-                    boot_layer=layer,
-                    size_bytes=2 << 30,
-                    dest=artifact,
-                    timeout_sec=self.task_env_config.build_timeout_sec,
-                )
-                write_manifest(
-                    staging,
-                    render_golden_json(
-                        flavor=name,
-                        sha3_256=sha3_256_file(artifact),
-                        size_bytes=artifact.stat().st_size,
-                        built_epoch=int(time.time()),
-                        extra_fields={},
-                    ),
-                )
-                destination = rootfs_flavor_dir(name)
-                if destination.exists():
-                    shutil.rmtree(destination)
-                os.rename(staging, destination)
-                staging.mkdir(exist_ok=True)
-        finally:
-            untag_image(tag)
+            destination = rootfs_flavor_dir(name)
+            if destination.exists():
+                shutil.rmtree(destination)
+            os.rename(staging, destination)
+            staging.mkdir(exist_ok=True)
 
-        router_policy = self._work / "router.policy"
-        router_policy.write_text(router_policy_text())
         self._cella(
             "create",
             name,
@@ -689,21 +672,28 @@ class CellaEnvironment(BaseEnvironment):
         )
         self._cella("start", name)
         self._cella("gateway", name, "open")
-        port = self._ensure_engine("router", router_policy, dry_run=False)
-        self._router_bridge = self._spawn_bridge(name, port)
-        self._router = name
-        self._router_stop.clear()
-        self._router_thaw = threading.Thread(
+        # In dry-run the appliance records the world leg (by name) into
+        # the task's reviewable cella.policy; otherwise it enforces the
+        # composed appliance border.
+        if self._dry_run:
+            port = self._ensure_engine("appliance", self._policy_path(), dry_run=True)
+        else:
+            port = self._ensure_engine(
+                "appliance", self._appliance_policy_path(), dry_run=False
+            )
+        self._term_bridge = self._spawn_bridge(name, port)
+        self._term = name
+        self._term_stop.clear()
+        self._term_thaw = threading.Thread(
             target=self._thaw_forever, args=(name,), daemon=True
         )
-        self._router_thaw.start()
-
+        self._term_thaw.start()
     def _thaw_forever(self, name: str) -> None:
-        """The router's side of the freeze dance, for the machine's
+        """The appliance's side of the freeze dance, for the machine's
         whole life: every park freezes it, every staged decision
         applies at the thaw."""
         state = self._machine_dir(name) / "state"
-        while not self._router_stop.is_set():
+        while not self._term_stop.is_set():
             if state.is_file():
                 time.sleep(0.5)
                 try:
@@ -713,50 +703,29 @@ class CellaEnvironment(BaseEnvironment):
             else:
                 time.sleep(0.5)
 
-    def _stop_router(self) -> None:
-        if self._router is None:
+    def _stop_terminator(self) -> None:
+        if self._term is None:
             return
-        self._router_stop.set()
-        if self._router_thaw is not None:
-            self._router_thaw.join(timeout=10)
-            self._router_thaw = None
-        if self._router_bridge is not None:
-            self._router_bridge.terminate()
+        self._term_stop.set()
+        if self._term_thaw is not None:
+            self._term_thaw.join(timeout=10)
+            self._term_thaw = None
+        if self._term_bridge is not None:
+            self._term_bridge.terminate()
             try:
-                self._router_bridge.wait(timeout=10)
+                self._term_bridge.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self._router_bridge.kill()
-            self._router_bridge = None
-        # The router's border is judged too; its chronicle is part of
-        # the run's record (the world leg of every agent-line crossing).
-        self._preserve_chronicle(self._router)
-        self._destroy_quietly(self._router)
-        flavor_dir = rootfs_flavor_dir(self._router)
+                self._term_bridge.kill()
+            self._term_bridge = None
+        # The appliance's border is judged too; its chronicle is part of
+        # the run's record -- the world leg of every crossing the member
+        # made, granted and refused, judged by name.
+        self._preserve_chronicle(self._term)
+        self._destroy_quietly(self._term)
+        flavor_dir = rootfs_flavor_dir(self._term)
         if flavor_dir.exists():
             shutil.rmtree(flavor_dir, ignore_errors=True)
-        self._router = None
-
-    def _world_entries(self) -> list[BootEntry]:
-        """The guest-side network configuration a judged machine needs:
-        the static world-plane address and systemd-networkd enabled.
-        cella's translator answers ARP and the gateway's echo at the
-        edge; nothing hands out addresses, so the boot layer states
-        them."""
-        return [
-            GuestFile(
-                path="/etc/systemd/network/10-titanium-world.network",
-                contents=_WORLD_NETWORK_CONF.encode(),
-                mode=0o644,
-                uid=0,
-                gid=0,
-            ),
-            GuestSymlink(
-                path="/etc/systemd/system/multi-user.target.wants/systemd-networkd.service",
-                target="/lib/systemd/system/systemd-networkd.service",
-                uid=0,
-                gid=0,
-            ),
-        ]
+        self._term = None
 
     def _publish_cycle_flavor(self, boot_layer: BootLayer) -> str:
         assert self._work is not None
@@ -1029,11 +998,13 @@ class CellaEnvironment(BaseEnvironment):
     ) -> ExecResult:
         if self._base_tar is None:
             raise CellaError("exec before start: the environment is not running")
-        if self._line_active:
-            env = {**proxy_env(), **(env or {})}
         job_entries = self._job_files(command, cwd, env, user)
-        if self._topology.judged:
-            job_entries = self._world_entries() + job_entries
+        if self._paired:
+            # A paired member bakes the pair CA and points its resolver
+            # at the appliance; the prelude folds the CA into the trust
+            # bundle. No proxy env -- the resolver is the interceptor.
+            ca_pem = pair_ca_path(Path.home()).read_bytes()
+            job_entries = member_trust_entries(ca_pem) + job_entries
 
         boot_layer = BootLayer(entries=tuple(self._pending) + tuple(job_entries))
         flavor = self._publish_cycle_flavor(boot_layer)
@@ -1041,7 +1012,7 @@ class CellaEnvironment(BaseEnvironment):
         self._machine = name
         memory_mb = self._effective_memory_mb or 1024
         bridge: subprocess.Popen | None = None
-        judged = self._topology.judged or self._line_active
+        judged = self._paired
         try:
             self._cella(
                 "create",
@@ -1064,8 +1035,11 @@ class CellaEnvironment(BaseEnvironment):
                 # One valve per machine: with the line, the wire parks
                 # under the same open.
                 self._cella("gateway", name, "open")
+                # The member border is fixed and always enforced; the
+                # world leg (and any dry-run collection) is the
+                # appliance's, stood up once in start().
                 port = self._ensure_engine(
-                    "task", self._task_policy_path(), self._dry_run
+                    "member", self._member_policy_path(), dry_run=False
                 )
                 bridge = self._spawn_bridge(name, port)
             budget = (timeout_sec or _DEFAULT_EXEC_TIMEOUT_SEC) + _BOOT_MARGIN_SEC
@@ -1287,7 +1261,7 @@ class CellaEnvironment(BaseEnvironment):
     # -------------------------------------------------------------- stop
 
     async def stop(self, delete: bool) -> None:
-        self._stop_router()
+        self._stop_terminator()
         self._stop_engines()
         if self._machine is not None:
             self._destroy_quietly(self._machine)
