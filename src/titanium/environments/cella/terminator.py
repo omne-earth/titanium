@@ -192,14 +192,18 @@ def appliance_border_policy_text(world_hosts: list[str]) -> str:
     crossing, so a rotated CDN ip is a non-issue. Everything else is
     refused, on the record."""
     lines = [
-        "# The appliance border (titanium's engine): the world leg,\n"
-        "# judged by the resolved name. ARP, the upstream resolver,\n"
-        "# the member's reply window, and each allowed world host.\n",
+        (
+            "# The appliance border (titanium's engine): the world leg,\n"
+            "# judged by the resolved name. ARP, the upstream resolver,\n"
+            "# the member's reply window, and each allowed world host.\n"
+        ),
         "release outgoing arp (keep_open=24h) (skip_freeze=true)\n",
         "release incoming arp (keep_open=24h)\n",
         _round_trip(f"{UPSTREAM_DNS}:53", "udp", "24h"),
-        "# The member's reply window (the consistent reply port): the\n"
-        "# appliance's answers toward the member are exact destinations.\n",
+        (
+            "# The member's reply window (the consistent reply port): the\n"
+            "# appliance's answers toward the member are exact destinations.\n"
+        ),
     ]
     for port in range(REPLY_PORT_LOW, REPLY_PORT_HIGH + 1):
         lines.append(

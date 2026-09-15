@@ -74,19 +74,13 @@ def test_the_environment_registers_and_declares_itself(tmp_path):
     assert not env.resource_capabilities().cpu_limit
 
 
-def test_a_judged_environment_constructs_and_configures_the_world(tmp_path):
+def test_a_judged_environment_pairs_with_the_terminator(tmp_path):
     env = _make_env(tmp_path, allow_internet=True)
     assert env._topology.judged
-    entries = env._world_entries()
-    conf = next(
-        e for e in entries if e.path == "/etc/systemd/network/10-titanium-world.network"
-    )
-    text = conf.contents.decode()
-    # cella's world plane (E1): the guest is .2, the translator is .1.
-    assert "Address=192.168.210.2/24" in text
-    assert "Gateway=192.168.210.1" in text
-    networkd = next(e for e in entries if "networkd" in e.path)
-    assert networkd.target == "/lib/systemd/system/systemd-networkd.service"
+    # An internet task stands the terminated pair even without an
+    # agent: the member is wire-only (the appliance holds the world).
+    assert env._paired
+    assert env._task_net() == f"wire:{env._wire_name()}"
 
 
 def test_dry_run_accepts_the_string_forms(tmp_path):
@@ -218,69 +212,13 @@ async def test_downloads_read_the_evidence_tree(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The agent line (line.py): pure parts
+# The terminated pair, wired into the environment
 # ---------------------------------------------------------------------------
 
-from titanium.environments.cella.line import (
-    PROXY_PORT,
-    ROUTER_WIRE_ADDRESS,
-    TASK_WIRE_ADDRESS,
-    line_grants_text,
-    proxy_env,
-    router_entries,
-    router_policy_text,
-    wire_up_commands,
-)
 from titanium.environments.cella.policy import Policy
 
 
-def test_line_policies_parse_and_grant_what_they_claim():
-    router = Policy.parse(router_policy_text())
-    lines = {g.line() for g in router.grants}
-    # The world side stays live on the outgoing leg (skip_freeze), so
-    # the gateway does not freeze on the API peer's handshake.
-    assert "release outgoing 1.1.1.1:53/udp (keep_open=90s) (skip_freeze=true)" in lines
-    assert "release outgoing *:443/tcp (keep_open=5m) (skip_freeze=true)" in lines
-    # The wire side: the task peer reaching the proxy, both ways,
-    # wildcard port (an incoming crossing is named by source).
-    assert any(f"release incoming {TASK_WIRE_ADDRESS}:*/tcp" in line for line in lines)
-    assert any(f"release outgoing {TASK_WIRE_ADDRESS}:*/tcp" in line for line in lines)
-    task_side = Policy.parse(line_grants_text())
-    assert any(
-        f"release outgoing {ROUTER_WIRE_ADDRESS}:{PROXY_PORT}/tcp" in g.line()
-        for g in task_side.grants
-    )
-
-
-def test_router_entries_hold_the_allowlist_and_the_wire():
-    entries = router_entries(["openrouter.ai", ".anthropic.com"])
-    by_path = {e.path: e for e in entries}
-    conf = by_path["/etc/tinyproxy/tinyproxy.conf"].contents.decode()
-    assert f"Listen {ROUTER_WIRE_ADDRESS}" in conf
-    assert f"Allow {TASK_WIRE_ADDRESS}" in conf
-    assert "FilterDefaultDeny Yes" in conf
-    flt = by_path["/etc/tinyproxy/filter"].contents.decode().splitlines()
-    # An exact domain matches itself; a leading-dot suffix matches the
-    # bare domain and every subdomain.
-    assert flt == ["openrouter.ai", "*.anthropic.com", "anthropic.com"]
-    unit = by_path["/etc/systemd/system/titanium-line-proxy.service"]
-    text = unit.contents.decode()
-    assert f"ip addr replace {ROUTER_WIRE_ADDRESS}/24 dev eth1" in text
-
-
-def test_wire_up_commands_are_idempotent_ip8():
-    lines = wire_up_commands("eth0", TASK_WIRE_ADDRESS)
-    assert f"ip addr replace {TASK_WIRE_ADDRESS}/24 dev eth0" in lines
-    assert "|| true" in lines
-
-
-def test_proxy_env_points_at_the_wire_peer():
-    env = proxy_env()
-    assert env["HTTPS_PROXY"] == f"http://{ROUTER_WIRE_ADDRESS}:{PROXY_PORT}"
-    assert "NO_PROXY" in env
-
-
-def _make_line_env(tmp_path, allow_internet):
+def _make_agent_env(tmp_path, allow_internet):
     environment_dir = tmp_path / "environment"
     environment_dir.mkdir(exist_ok=True)
     (environment_dir / "Dockerfile").write_text("FROM debian:12-slim\n")
@@ -291,7 +229,7 @@ def _make_line_env(tmp_path, allow_internet):
     return CellaEnvironment(
         environment_dir=environment_dir,
         environment_name="cella-task",
-        session_id="line-task__abc",
+        session_id="pair-task__abc",
         trial_paths=trial_paths,
         task_env_config=TaskEnvironmentConfig(allow_internet=allow_internet),
         agent_install_spec=AgentInstallSpec(
@@ -301,35 +239,61 @@ def _make_line_env(tmp_path, allow_internet):
     )
 
 
-def test_the_line_activates_with_a_baked_agent(tmp_path):
-    env = _make_line_env(tmp_path, allow_internet=False)
-    assert env._line_active
-    # Airgapped with a line: wire-only -- task egress impossible by
-    # topology, the line as the only nic.
+def test_an_agent_stands_the_pair_even_airgapped(tmp_path):
+    env = _make_agent_env(tmp_path, allow_internet=False)
+    # An agent always needs its inference line, so the pair stands and
+    # the member is wire-only -- egress only through the terminator.
+    assert env._paired
     assert env._task_net() == f"wire:{env._wire_name()}"
-    www = _make_line_env(tmp_path, allow_internet=True)
-    assert www._task_net().startswith("world,wire:")
 
 
-def test_the_composed_task_policy_appends_the_line(tmp_path):
-    env = _make_line_env(tmp_path, allow_internet=False)
+def test_the_member_policy_is_fixed_wire_grants(tmp_path):
+    env = _make_agent_env(tmp_path, allow_internet=False)
+    # A task cella.policy naming world domains does not touch the member
+    # border; the member reaches only the appliance.
     (tmp_path / "environment" / "cella.policy").write_text(
-        "release outgoing 9.9.9.9:53/udp\n"
+        "release outgoing deb.debian.org:80/tcp\n"
     )
     env._work = tmp_path / "work"
     env._work.mkdir()
-    composed = Policy.load(env._task_policy_path())
-    lines = {g.line() for g in composed.grants}
-    assert "release outgoing 9.9.9.9:53/udp" in lines
-    assert any(
-        f"release outgoing {ROUTER_WIRE_ADDRESS}:{PROXY_PORT}/tcp" in line
-        for line in lines
+    member = Policy.load(env._member_policy_path())
+    assert all(g.host == "" for g in member.grants)
+    assert any("10.77.0.1:443/tcp" in g.line() for g in member.grants)
+
+
+def test_the_appliance_border_carries_the_task_domains(tmp_path):
+    # allow_internet=true routes the task's declared domains to the
+    # appliance border, judged by name; the agent's host rides too.
+    env = _make_agent_env(tmp_path, allow_internet=True)
+    env.network_allowlist.domains = ["openrouter.ai"]
+    (tmp_path / "environment" / "cella.policy").write_text(
+        "release outgoing deb.debian.org:80/tcp\n"
+        "release outgoing astral.sh:443/tcp\n"
     )
+    env._work = tmp_path / "work"
+    env._work.mkdir()
+    assert set(env._world_hosts()) == {"openrouter.ai", "deb.debian.org", "astral.sh"}
+    appliance = Policy.load(env._appliance_policy_path())
+    host_grants = {g.host for g in appliance.grants if g.host}
+    assert {"openrouter.ai", "deb.debian.org", "astral.sh"} <= host_grants
 
 
-def test_without_a_line_nothing_changes(tmp_path):
+def test_airgapped_keeps_task_domains_off_the_appliance(tmp_path):
+    # allow_internet=false: the agent's inference host is granted, but
+    # the task's own declared domains are not -- airgapped-except-line.
+    env = _make_agent_env(tmp_path, allow_internet=False)
+    env.network_allowlist.domains = ["openrouter.ai"]
+    (tmp_path / "environment" / "cella.policy").write_text(
+        "release outgoing deb.debian.org:80/tcp\n"
+    )
+    env._work = tmp_path / "work"
+    env._work.mkdir()
+    assert env._world_hosts() == ["openrouter.ai"]
+
+
+def test_an_agentless_airgapped_trial_has_no_pair(tmp_path):
     env = _make_env(tmp_path)
-    assert not env._line_active
+    assert not env._paired
     assert env._task_net() == "none"
 
 
@@ -392,7 +356,6 @@ async def test_chronicle_preservation_skips_absent_files(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 from titanium.environments.cella import terminator as term
-from titanium.environments.cella.policy import PolicyError
 
 
 def test_the_terminator_conf_is_constant_and_complete():
