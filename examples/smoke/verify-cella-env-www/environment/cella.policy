@@ -1,15 +1,11 @@
-# cella.policy — the crossings this task is granted.
+# cella.policy — the world domains this task is granted.
 # <release|refuse> <incoming|outgoing> <destination> (key=value)*
-# keys: keep_open=<90s|5m|24h> skip_freeze=true reason="..."
-# '*' matches any ip or any port. Everything not granted is refused.
 #
-# Every grant is exact, and every flow is a round trip at this border:
-# the request parks outgoing and the reply parks in the ingress lane,
-# so a granted destination needs its reply twin. keep_open + skip_freeze
-# on the outgoing leg keep the machine live through the handshake --
-# what keeps a real peer's TLS inside its patience -- instead of a
-# freeze per crossing. Everything else is refused, on the record.
-release outgoing arp (keep_open=24h) (skip_freeze=true)
-release incoming arp (keep_open=24h)
-release outgoing 1.1.1.1:443/tcp (keep_open=5m) (skip_freeze=true)
-release incoming 1.1.1.1:443/tcp (keep_open=5m)
+# Under the terminated pair (allow_internet=true), titanium routes these
+# host grants to the appliance's world-leg border, judged by the name
+# the terminator resolves and stamps on each crossing (never a rotating
+# ip). The member border (the wire to the appliance) is titanium's own
+# fixed grant; only the world names belong here. Everything not granted
+# is refused, on the record.
+release outgoing example.com:443/tcp (keep_open=5m) (skip_freeze=true)
+release incoming example.com:443/tcp (keep_open=5m)

@@ -1,47 +1,46 @@
-# In-guest probe of the judged cella world nic
+# In-guest verification of the terminated pair
 
-Read this first: **no model runs this task.** An agent would have to
-live inside the guest, and this task's `cella.policy` grants exactly
-one destination — no inference API is reachable. The smoke runs with
-the oracle agent, which applies the checked-in `solution/solve.sh`.
-This file specifies the report that solution must produce and the
-offline verifier pins.
+Read this first: **no model runs this task.** The smoke runs with the
+oracle agent, which applies the checked-in `solution/solve.sh`. This
+file specifies the report that solution must produce and the offline
+verifier pins.
 
-The machine has a world nic (`allow_internet = true`), the gateway is
-open, and every crossing parks for titanium's policy engine, which
-enforces `environment/cella.policy`:
-
-    allow outgoing arp
-    allow incoming arp
-    allow outgoing 1.1.1.1:443/tcp
-    allow incoming 1.1.1.1:443/tcp
+`allow_internet = true`, so titanium stands the terminated pair: this
+machine is a **member** with no world nic of its own, wired to a
+terminator appliance that holds the world. The member reaches the
+world only by **name** — the appliance is the resolver (it answers
+every name with its own address), reads the SNI, terminates TLS on a
+leaf minted from the pair CA (which titanium folded into this image's
+trust bundle), and connects the world leg itself. titanium's engine
+judges that world leg by the resolved name against
+`environment/cella.policy`, which grants `example.com` and nothing
+else.
 
 The probe writes `/app/report.json` with exactly these keys:
 
-- `granted_tcp_ok`: a TCP connection to `1.1.1.1:443` succeeded
-  (expected: true — the grant releases it; retried for up to 60 s,
-  because the address arrives via systemd-networkd and each new flow
-  waits one park-judge-release round trip)
-- `denied_tcp_blocked`: a TCP connection to `8.8.8.8:443` did NOT
-  succeed (expected: true — no grant names it, so the engine refuses
-  it in-frame)
-- `dns`: whether name resolution works for example.com (recorded, not
-  asserted: no resolver is granted, and how it fails is data)
-- `uid`: the numeric user id (expected: 0)
-- `net_interfaces`: the sorted entries of `/sys/class/net` (expected:
-  a real ethernet interface beside `lo` — this guest HAS a network;
-  it is judged, not absent)
+- `granted_https_ok`: three sequential HTTPS GETs to the granted name
+  `example.com` all succeeded (expected: true — the minted leaf
+  verified against the pair CA; the first is retried for up to 240 s
+  across the boot and the first-crossing freezes)
+- `calls`: one entry per call, `{measured_at, secs}` — the guest wall
+  clock it started at and the guest-perceived seconds it took, cold
+  then two warm (verified: the standing memory makes the second and
+  third run live, so neither is slower than the cold first). Both are
+  cryogenic; paired with the audit book's `host_ns` they show the
+  frozen time the guest slept through
+- `denied_https_blocked`: an HTTPS GET to the ungranted name
+  `example.org` did NOT succeed (expected: true — its world leg is
+  refused on the appliance, on the record)
+- `resolver_is_appliance`: `example.com` resolves to the appliance
+  `10.77.0.1` (expected: true — the resolver is the interceptor)
 - `pid1_comm`: `/proc/1/comm`, stripped (expected: `systemd`)
-- `nproc`: the CPU count (expected: 1)
+- `uid`: numeric user id (expected: 0)
+- `nproc`: CPU count (expected: 1)
+- `mem_total_kb`: `MemTotal` in kB (the task declares 1024 MB)
 - `kernel_release`: `uname -r`, stripped (informational)
 
-Rules the solution follows, and any replacement must too: bounded
-retries with short per-attempt timeouts on the granted probe, a short
-timeout on the denied probe, permission errors treated as data, and
-the report is valid JSON even when a probe fails.
-
-To regenerate the policy from observation instead of writing it by
-hand: `make smoke-cella-policy-engine-www DRY_RUN=true` runs the same
-trial with the engine in collection mode — every crossing releases and
-lands in `cella.policy` as a grant — then copies the collected file
-back here for review.
+Rules: the probe must speak TLS (a bare TCP connect carries no name for
+the appliance to route); bounded retries with short per-attempt
+timeouts on the granted probe, a short timeout on the denied probe,
+permission errors are data, and the report is valid JSON even when a
+probe fails.

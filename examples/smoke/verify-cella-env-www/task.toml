@@ -3,7 +3,7 @@ artifacts = ["/app/report.json"]
 
 [task]
 name = "titanium/verify-cella-env-www"
-description = "In-guest verification of the judged cella world nic: allow_internet=true opens the membrane, the engine enforces cella.policy, a granted crossing is released, an ungranted one is refused, and the address is cella's own kernel autoconfiguration."
+description = "In-guest verification of the cella terminated pair: allow_internet=true stands the terminator appliance, the engine judges the world leg by resolved name, a granted name completes a pair-CA-verified TLS handshake, and an ungranted name is refused."
 keywords = ["smoke", "sandbox", "cella"]
 [[task.authors]]
 name = "Shree Raj Shrestha"
