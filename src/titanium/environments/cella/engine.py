@@ -158,37 +158,51 @@ class EngineService:
         # message by default, which deadlocks the two -- each side
         # waiting for the other, measured against the real bridge.
         await stream.send_initial_metadata()
-        while (event := await stream.recv_message()) is not None:
-            operation = event.parked
-            if operation is None:
-                # Completions and looks are evidence, not questions.
-                logger.debug("cella engine: event (not a park)")
-                continue
-            destination = operation.destination
-            for decision in self._policy.decide(operation):
-                if decision.membrane_memory is not None:
-                    logger.info(
-                        "cella engine: remember ip=%s port=%d skip_freeze=%s keep_open=%d",
-                        ".".join(
-                            str(b) for b in (destination.ip if destination else b"")
-                        ),
-                        destination.port if destination else 0,
-                        decision.membrane_memory.skip_freeze,
-                        decision.membrane_memory.keep_open,
-                    )
-                else:
-                    logger.info(
-                        "cella engine: %s id=%s host=%r ip=%s port=%d direction=%d",
-                        "release" if decision.release is not None else "refuse",
-                        operation.id.hex(),
-                        destination.host if destination else "",
-                        ".".join(
-                            str(b) for b in (destination.ip if destination else b"")
-                        ),
-                        destination.port if destination else 0,
-                        operation.direction,
-                    )
-                await stream.send_message(decision)
+        try:
+            while (event := await stream.recv_message()) is not None:
+                operation = event.parked
+                if operation is None:
+                    # Completions and looks are evidence, not questions.
+                    logger.debug("cella engine: event (not a park)")
+                    continue
+                destination = operation.destination
+                for decision in self._policy.decide(operation):
+                    if decision.membrane_memory is not None:
+                        logger.info(
+                            "cella engine: remember ip=%s port=%d skip_freeze=%s keep_open=%d",
+                            ".".join(
+                                str(b) for b in (destination.ip if destination else b"")
+                            ),
+                            destination.port if destination else 0,
+                            decision.membrane_memory.skip_freeze,
+                            decision.membrane_memory.keep_open,
+                        )
+                    else:
+                        logger.info(
+                            "cella engine: %s id=%s host=%r ip=%s port=%d direction=%d",
+                            "release" if decision.release is not None else "refuse",
+                            operation.id.hex(),
+                            destination.host if destination else "",
+                            ".".join(
+                                str(b) for b in (destination.ip if destination else b"")
+                            ),
+                            destination.port if destination else 0,
+                            operation.direction,
+                        )
+                    await stream.send_message(decision)
+        except (ConnectionError, OSError, asyncio.CancelledError) as exc:
+            # The bridge (`cella-engine <machine> --dial`) exits with its
+            # machine when an exec cycle ends, dropping this stream. That
+            # is a normal teardown, not a fault -- this engine persists,
+            # and the next cycle's bridge reconnects. Say so plainly
+            # instead of grpclib's bare "Request was cancelled: Connection
+            # lost" (its own logger is quieted in main()).
+            logger.info(
+                "cella engine: bridge closed (%s) -- cycle ended, awaiting reconnect",
+                type(exc).__name__,
+            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise  # cancellation must propagate
 
 
 async def serve(policy: PolicyJudge, host: str = "127.0.0.1", port: int = 0) -> Server:
@@ -268,6 +282,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # grpclib logs every bridge disconnect at INFO as "Request was
+    # cancelled: Connection lost" -- one per exec-cycle teardown, which
+    # is normal and which Decide already reports in cella's own words.
+    # Quiet grpclib's bare version so the engine log stays readable.
+    logging.getLogger("grpclib.server").setLevel(logging.WARNING)
     host, port = args.listen
 
     if args.dry_run:
