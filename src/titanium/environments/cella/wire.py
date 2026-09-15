@@ -379,12 +379,64 @@ class Refusal:
 
 
 @dataclass
+class MembraneMemory:
+    """A standing entry for the membrane's memory (cella.MembraneMemory).
+
+    Not a verdict on one park: a memory names a *destination*, and the
+    engine plants it so matching crossings need no fresh judgment. Its
+    one power is over freezing (``skip_freeze``, outgoing only) -- a
+    remembered egress destination waits *live* instead of freezing the
+    machine, which is what keeps a TLS handshake's flights inside the
+    real peer's patience. ``keep_open`` is a policy window in seconds;
+    ``written`` is left zero for the engine to send -- the bridge
+    stamps it with the host clock as the entry lands, and expiry is
+    ``written + keep_open``, absolute.
+    """
+
+    destination: Destination | None = None
+    skip_freeze: bool = False
+    keep_open: int = 0
+    written: int = 0
+
+    def SerializeToString(self) -> bytes:
+        out = b""
+        if self.destination is not None:
+            out += _len_field(1, self.destination.SerializeToString())
+        out += _varint_field(2, 1 if self.skip_freeze else 0)
+        out += _varint_field(3, self.keep_open)
+        out += _varint_field(4, self.written)
+        return out
+
+    @classmethod
+    def FromString(cls, data: bytes) -> MembraneMemory:
+        msg = cls()
+        for number, value in _iter_fields(data):
+            if number == 1:
+                msg.destination = Destination.FromString(
+                    _expect_bytes(value, "MembraneMemory.destination")
+                )
+            elif number == 2:
+                msg.skip_freeze = _expect_int(value, "MembraneMemory.skip_freeze") != 0
+            elif number == 3:
+                msg.keep_open = _expect_int(value, "MembraneMemory.keep_open")
+            elif number == 4:
+                msg.written = _expect_int(value, "MembraneMemory.written")
+        return msg
+
+
+@dataclass
 class Decision:
-    """The external word on one operation (cella.Decision)."""
+    """The external word on one operation (cella.Decision).
+
+    Three arms, one oneof: ``release`` and ``refusal`` answer a park by
+    id; ``membrane_memory`` plants a standing entry (its id is empty --
+    a memory names a destination, not an operation).
+    """
 
     id: bytes = b""
     release: Release | None = None
     refusal: Refusal | None = None
+    membrane_memory: MembraneMemory | None = None
 
     def SerializeToString(self) -> bytes:
         out = _bytes_field(1, self.id)
@@ -394,6 +446,8 @@ class Decision:
             out += _len_field(2, self.release.SerializeToString())
         elif self.refusal is not None:
             out += _len_field(3, self.refusal.SerializeToString())
+        elif self.membrane_memory is not None:
+            out += _len_field(4, self.membrane_memory.SerializeToString())
         return out
 
     @classmethod
@@ -408,5 +462,9 @@ class Decision:
             elif number == 3:
                 decision.refusal = Refusal.FromString(
                     _expect_bytes(value, "Decision.refusal")
+                )
+            elif number == 4:
+                decision.membrane_memory = MembraneMemory.FromString(
+                    _expect_bytes(value, "Decision.membrane_memory")
                 )
         return decision
