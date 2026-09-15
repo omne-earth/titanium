@@ -14,6 +14,8 @@
 #   ~/.cella/bin/*                                     the field binaries
 #                                        (Cella's scripts/setup/install.sh)
 #   ~/.cella/kernel/canonical/                         the kernel golden
+#   ~/.cella/rootfs/terminator/{rootfs.ext4,ca.pem}    the terminator golden
+#                                        (the pair CA for allow_internet=true)
 #   /usr/local/share/titanium/cella.sha3-512           the digest pin
 #
 # The field flavor only: no console, the production posture. The lab
@@ -116,6 +118,23 @@ if [[ ! -f "$HOME/.cella/kernel/canonical/bzImage" ]]; then
   "$CELLA" build kernel canonical
 fi
 
+# --- the terminator golden -------------------------------------------------
+
+# The one network appliance for allow_internet=true (the terminated pair,
+# docs/integration/TLS-TERMINATOR.md): one golden per host, and its build
+# mints the pair CA. The key is baked into the image and never leaves it;
+# ca.pem exports beside the golden, and titanium bakes that ca.pem into
+# every task image's trust store so the member consents to the middle.
+# Present-and-verifying means done, like the kernel golden.
+if [[ ! -f "$HOME/.cella/rootfs/terminator/rootfs.ext4" ]]; then
+  echo "building the terminator golden (mints this host's pair CA)"
+  "$CELLA" build rootfs terminator
+fi
+[[ -f "$HOME/.cella/rootfs/terminator/ca.pem" ]] || {
+  echo "cella build rootfs terminator did not export the pair ca.pem" >&2
+  exit 1
+}
+
 # --- the digest pin --------------------------------------------------------
 
 # Trust-on-first-use, like the krun and runsc pins, with the git rev as the
@@ -137,5 +156,5 @@ fi
 
 # Cella's own preflight has the last word: it names any unmet host
 # precondition on its own stdout, so nothing is captured or restated here.
-"$CELLA" doctor gate kvm bwrap golden:kernel:canonical
+"$CELLA" doctor gate kvm bwrap golden:kernel:canonical golden:rootfs:terminator
 echo "cella provisioned: $CELLA ($CELLA_GIT_REV)"
