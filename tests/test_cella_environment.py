@@ -331,3 +331,46 @@ def test_without_a_line_nothing_changes(tmp_path):
     env = _make_env(tmp_path)
     assert not env._line_active
     assert env._task_net() == "none"
+
+
+@pytest.mark.asyncio
+async def test_chronicle_is_preserved_before_destroy(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+    # A fake machine dir with the audit files a real run leaves.
+    machine = tmp_path / "machines" / "m"
+    (machine / "network").mkdir(parents=True)
+    (machine / "network" / "ledger").write_bytes(b"LEDGER")
+    (machine / "verdict").write_bytes(b"VERDICT")
+    (machine / "audit").write_bytes(b"AUDIT")
+    (machine / "membrane-memory").write_bytes(b"MEM")
+    (machine / "manifest.json").write_text("{}")
+    (machine / "disk.img").write_bytes(b"HUGE")  # never copied
+    monkeypatch.setattr(env, "_machine_dir", lambda name: machine)
+
+    env._preserve_chronicle("m")
+
+    out = env.trial_paths.trial_dir / "cella-chronicle" / "m"
+    assert (out / "network" / "ledger").read_bytes() == b"LEDGER"
+    assert (out / "verdict").read_bytes() == b"VERDICT"
+    assert (out / "audit").read_bytes() == b"AUDIT"
+    assert (out / "membrane-memory").read_bytes() == b"MEM"
+    assert (out / "manifest.json").read_text() == "{}"
+    # The disk is evidence, not audit record: never copied.
+    assert not (out / "disk.img").exists()
+
+
+@pytest.mark.asyncio
+async def test_chronicle_preservation_skips_absent_files(tmp_path, monkeypatch):
+    # An airgapped machine (--net none) has an audit book but no
+    # verdict or membrane-memory; preservation just skips them.
+    env = _make_env(tmp_path)
+    machine = tmp_path / "machines" / "air"
+    machine.mkdir(parents=True)
+    (machine / "audit").write_bytes(b"AUDIT")
+    monkeypatch.setattr(env, "_machine_dir", lambda name: machine)
+
+    env._preserve_chronicle("air")  # must not raise
+
+    out = env.trial_paths.trial_dir / "cella-chronicle" / "air"
+    assert (out / "audit").read_bytes() == b"AUDIT"
+    assert not (out / "verdict").exists()
