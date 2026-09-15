@@ -50,6 +50,7 @@ from pathlib import Path
 
 from titanium.environments.cella.wire import (
     DIRECTION_INCOMING,
+    Destination,
     MembraneMemory,
     Operation,
 )
@@ -185,6 +186,40 @@ class Grant:
         return MembraneMemory(
             destination=operation.destination,
             skip_freeze=self.skip_freeze,
+            keep_open=self.keep_open,
+        )
+
+    def standing_memory(self) -> MembraneMemory | None:
+        """The memory to pre-plant at stream open, before any crossing --
+        the reference engine (cella-engine motor) does this so the first
+        crossing to a granted destination never freezes. Only a grant
+        with a *concrete* outgoing destination and a live window
+        qualifies: ARP (an ethertype), or an exact ip:port/proto. A host
+        or wildcard-ip grant names no concrete destination until the
+        appliance resolves it, so its first crossing plants reactively in
+        :meth:`memory_for` and freezes once, unavoidably."""
+        if (
+            self.verb != "release"
+            or self.direction != "outgoing"
+            or self.keep_open <= 0
+            or not self.skip_freeze
+            or self.host
+        ):
+            return None
+        if self.ethertype != 0:
+            destination = Destination(ethertype=self.ethertype)
+        elif self.ip != "*":
+            destination = Destination(
+                ip=bytes(int(o) for o in self.ip.split(".")),
+                port=self.port,
+                proto=self.proto,
+                ethertype=0x0800,
+            )
+        else:
+            return None  # a wildcard ip has no concrete destination
+        return MembraneMemory(
+            destination=destination,
+            skip_freeze=True,
             keep_open=self.keep_open,
         )
 

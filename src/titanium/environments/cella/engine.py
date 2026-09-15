@@ -105,6 +105,27 @@ class PolicyJudge:
         self.recorder = recorder
         self._planted: set[tuple] = set()
 
+    def standing_decisions(self) -> list[Decision]:
+        """The memories to pre-plant when a bridge stream opens, before
+        any Event -- the reference engine (cella-engine motor) does this
+        so the first crossing to a granted concrete destination never
+        freezes. Without it, every destination's first crossing freezes
+        once (ARP included), which under load wedges the wire at ARP.
+        Each is marked planted so :meth:`decide` does not repeat it."""
+        if self.policy is None or self.recorder is not None:
+            return []
+        decisions = []
+        for grant in self.policy.grants:
+            memory = grant.standing_memory()
+            if memory is None:
+                continue
+            key = _memory_key(memory.destination)
+            if key in self._planted:
+                continue
+            self._planted.add(key)
+            decisions.append(Decision(id=b"", membrane_memory=memory))
+        return decisions
+
     def decide(self, operation: Operation) -> list[Decision]:
         if self.recorder is not None:
             self.recorder.record(operation)
@@ -158,7 +179,22 @@ class EngineService:
         # message by default, which deadlocks the two -- each side
         # waiting for the other, measured against the real bridge.
         await stream.send_initial_metadata()
+        # Pre-plant the standing memories before the first Event (as
+        # cella-engine motor does): the first crossing to each granted
+        # concrete destination -- ARP, the appliance's ports, the reply
+        # window -- then never freezes, so the wire comes up at once
+        # instead of wedging on a first-ARP freeze under load.
         try:
+            for decision in self._policy.standing_decisions():
+                memory = decision.membrane_memory
+                logger.info(
+                    "cella engine: pre-plant ip=%s port=%d ethertype=0x%04x keep_open=%d",
+                    ".".join(str(b) for b in memory.destination.ip),
+                    memory.destination.port,
+                    memory.destination.ethertype,
+                    memory.keep_open,
+                )
+                await stream.send_message(decision)
             while (event := await stream.recv_message()) is not None:
                 operation = event.parked
                 if operation is None:
