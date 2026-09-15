@@ -373,7 +373,10 @@ def test_member_trust_bakes_the_ca_and_points_the_resolver():
     assert entries[term.MEMBER_CA_PATH].contents == b"PAIRCA"
     assert entries[term.MEMBER_CA_PATH].mode == 0o444
     resolv = entries["/etc/resolv.conf"].contents.decode()
-    assert resolv == f"nameserver {term.APPLIANCE_WIRE_ADDRESS}\n"
+    assert f"nameserver {term.APPLIANCE_WIRE_ADDRESS}\n" in resolv
+    # Patience past the appliance's first-crossing freeze, or the lookup
+    # times out before the frozen reply is thawed.
+    assert "timeout:30" in resolv
 
 
 def test_member_prelude_trusts_the_pair_and_pins_the_reply_window():
