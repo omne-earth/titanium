@@ -384,3 +384,75 @@ async def test_chronicle_preservation_skips_absent_files(tmp_path, monkeypatch):
     assert (out / "audit").read_bytes() == b"AUDIT"
     assert (out / "audit.txt").exists()
     assert not (out / "verdict").exists()
+
+
+# ---------------------------------------------------------------------------
+# The terminated pair (the terminator): the agent line as cella's own
+# appliance, replacing the tinyproxy router.
+# ---------------------------------------------------------------------------
+
+from titanium.environments.cella import terminator as term
+from titanium.environments.cella.policy import PolicyError
+
+
+def test_the_terminator_conf_is_constant_and_complete():
+    conf = term.terminator_conf_text()
+    assert f"wire_ip={term.APPLIANCE_WIRE_ADDRESS}" in conf
+    assert f"upstream_dns={term.UPSTREAM_DNS}" in conf
+    assert "listen=443,80" in conf
+    entry = term.terminator_conf_entry()
+    assert entry.path == "/etc/cella-terminator.conf"
+    assert entry.contents.decode() == conf
+
+
+def test_member_trust_bakes_the_ca_and_points_the_resolver():
+    entries = {e.path: e for e in term.member_trust_entries(b"PAIRCA")}
+    assert entries[term.MEMBER_CA_PATH].contents == b"PAIRCA"
+    assert entries[term.MEMBER_CA_PATH].mode == 0o444
+    resolv = entries["/etc/resolv.conf"].contents.decode()
+    assert resolv == f"nameserver {term.APPLIANCE_WIRE_ADDRESS}\n"
+
+
+def test_member_prelude_trusts_the_pair_and_pins_the_reply_window():
+    prelude = term.member_prelude("eth0")
+    assert f"ip addr replace {term.MEMBER_WIRE_ADDRESS}/24 dev eth0" in prelude
+    # The pair CA is folded into the system bundle every https client reads.
+    assert f"cat {term.MEMBER_CA_PATH} >> {term.SYSTEM_CA_BUNDLE}" in prelude
+    # The ephemeral range is pinned to the appliance's granted reply window.
+    assert (
+        f"echo '{term.REPLY_PORT_LOW} {term.REPLY_PORT_HIGH}' "
+        "> /proc/sys/net/ipv4/ip_local_port_range" in prelude
+    )
+
+
+def test_member_policy_reaches_only_the_appliance():
+    policy = Policy.parse(term.member_policy_text())
+    lines = {g.line() for g in policy.grants}
+    gw = term.APPLIANCE_WIRE_ADDRESS
+    assert f"release outgoing {gw}:443/tcp (keep_open=5m) (skip_freeze=true)" in lines
+    assert f"release outgoing {gw}:80/tcp (keep_open=5m) (skip_freeze=true)" in lines
+    assert f"release outgoing {gw}:53/udp (keep_open=90s) (skip_freeze=true)" in lines
+    # No world name ever appears on the member border.
+    assert all(g.host == "" for g in policy.grants)
+
+
+def test_appliance_border_judges_the_world_by_name():
+    policy = Policy.parse(
+        term.appliance_border_policy_text(["deb.debian.org", "astral.sh"])
+    )
+    host_grants = {(g.host, g.port) for g in policy.grants if g.host}
+    assert ("deb.debian.org", 443) in host_grants
+    assert ("deb.debian.org", 80) in host_grants
+    assert ("astral.sh", 443) in host_grants
+    # The upstream resolver and the member's reply window are present.
+    ips = {(g.ip, g.port, g.proto) for g in policy.grants if not g.host}
+    assert (term.UPSTREAM_DNS, 53, 17) in ips
+    assert (term.MEMBER_WIRE_ADDRESS, term.REPLY_PORT_LOW, 6) in ips
+    assert (term.MEMBER_WIRE_ADDRESS, term.REPLY_PORT_HIGH, 17) in ips
+
+
+def test_appliance_border_parses_with_no_hosts():
+    # An agentless, task-egress-free trial still stands the pair; the
+    # border is just DNS, ARP, and the reply window. Must parse.
+    policy = Policy.parse(term.appliance_border_policy_text([]))
+    assert not any(g.host for g in policy.grants)
