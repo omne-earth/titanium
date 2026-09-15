@@ -727,6 +727,9 @@ class CellaEnvironment(BaseEnvironment):
             except subprocess.TimeoutExpired:
                 self._router_bridge.kill()
             self._router_bridge = None
+        # The router's border is judged too; its chronicle is part of
+        # the run's record (the world leg of every agent-line crossing).
+        self._preserve_chronicle(self._router)
         self._destroy_quietly(self._router)
         flavor_dir = rootfs_flavor_dir(self._router)
         if flavor_dir.exists():
@@ -1085,6 +1088,7 @@ class CellaEnvironment(BaseEnvironment):
                     bridge.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     bridge.kill()
+            self._preserve_chronicle(name)
             self._destroy_quietly(name)
             self._machine = None
             flavor_dir = rootfs_flavor_dir(flavor)
@@ -1094,6 +1098,39 @@ class CellaEnvironment(BaseEnvironment):
         self._pending_paths = set()
         self._cycle += 1
         return result
+
+    # The per-machine files that make the run auditable: the Event
+    # chronicle, the Decision record, the witnessed verb book, and the
+    # standing memories the engine planted. Destroy takes them with the
+    # machine, so they are copied out first -- the rung's whole point is
+    # the record of every crossing the workload attempted, granted and
+    # refused. Plain files cella documents as readable; the disk, ram,
+    # and transient sockets are deliberately not audit evidence.
+    _CHRONICLE_FILES = (
+        "network/ledger",
+        "verdict",
+        "audit",
+        "membrane-memory",
+        "manifest.json",
+    )
+
+    def _preserve_chronicle(self, name: str) -> None:
+        """Copy a still machine's audit files into the trial dir before
+        it is destroyed. Best-effort: a missing file (an airgapped
+        machine has no verdict or memory) is simply skipped, and a copy
+        error never fails the exec that produced a result."""
+        machine_dir = self._machine_dir(name)
+        out = self.trial_paths.trial_dir / "cella-chronicle" / name
+        for relative in self._CHRONICLE_FILES:
+            source = machine_dir / relative
+            if not source.is_file():
+                continue
+            destination = out / relative
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            except OSError as exc:
+                self.logger.warning("cella: could not preserve %s: %s", source, exc)
 
     def _destroy_quietly(self, name: str) -> None:
         for verb in ("stop", "destroy"):
