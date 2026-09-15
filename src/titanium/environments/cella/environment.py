@@ -686,6 +686,10 @@ class CellaEnvironment(BaseEnvironment):
             os.rename(staging, destination)
             staging.mkdir(exist_ok=True)
 
+        # Idempotent create: a trial-level retry regenerates this exact
+        # appliance name (per session, no cycle) while the prior
+        # attempt's may linger. Clear it first.
+        self._destroy_quietly(name)
         self._cella(
             "create",
             name,
@@ -1059,6 +1063,12 @@ class CellaEnvironment(BaseEnvironment):
         bridge: subprocess.Popen | None = None
         judged = self._paired
         try:
+            # Idempotent create: a trial-level retry builds a fresh
+            # environment with the same session id, so it regenerates
+            # this exact machine name while the failed attempt's machine
+            # may still linger. Clear it first -- cella refuses to create
+            # over an existing name, and the name is this trial's alone.
+            self._destroy_quietly(name)
             self._cella(
                 "create",
                 name,
@@ -1113,9 +1123,16 @@ class CellaEnvironment(BaseEnvironment):
             flavor_dir = rootfs_flavor_dir(flavor)
             if flavor_dir.exists():
                 shutil.rmtree(flavor_dir, ignore_errors=True)
+            # Advance the cycle even when this exec raised: the verifier
+            # retries a failed exec, and reusing the cycle number would
+            # name the next machine after this one -- which cella refuses
+            # as "already exists". A fresh number per attempt, always.
+            self._cycle += 1
+        # Success only (skipped when the exec raised): the queued uploads
+        # were baked into this cycle and are done; a retry after a failure
+        # keeps them so it re-bakes the same inputs.
         self._pending = []
         self._pending_paths = set()
-        self._cycle += 1
         return result
 
     # The per-machine files that make the run auditable: the Event
