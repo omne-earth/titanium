@@ -285,11 +285,12 @@ def _op(
     proto=6,
     ethertype=0x0800,
     direction=0,
+    host="",
 ) -> Operation:
     return Operation(
         id=b"\x21" * 16,
         destination=Destination(
-            ip=bytes(ip), port=port, proto=proto, ethertype=ethertype
+            host=host, ip=bytes(ip), port=port, proto=proto, ethertype=ethertype
         ),
         direction=direction,
     )
@@ -297,6 +298,46 @@ def _op(
 
 def _grants(policy, operation):
     return policy.evaluate(operation).release
+
+
+def test_a_host_grant_matches_the_resolved_name_not_the_ip():
+    # The terminator stamps the resolved name on the crossing; a host
+    # grant releases by that name, so a rotated ip is a non-issue.
+    policy = Policy.parse(
+        "release outgoing deb.debian.org:80/tcp (keep_open=5m) (skip_freeze=true)\n"
+    )
+    # Same name, two different (CDN-rotated) ips: both released.
+    assert _grants(policy, _op(ip=(1, 2, 3, 4), port=80, host="deb.debian.org"))
+    assert _grants(policy, _op(ip=(9, 9, 9, 9), port=80, host="deb.debian.org"))
+    # A crossing to a different name is refused.
+    assert not _grants(policy, _op(ip=(1, 2, 3, 4), port=80, host="evil.example"))
+    # An unnamed (ip-only) crossing never matches a host grant: fail closed.
+    assert not _grants(policy, _op(ip=(1, 2, 3, 4), port=80, host=""))
+    # The port and proto still bind.
+    assert not _grants(policy, _op(port=443, host="deb.debian.org"))
+
+
+def test_a_leading_dot_host_grant_matches_subdomains():
+    policy = Policy.parse("release outgoing .pythonhosted.org:443/tcp\n")
+    assert _grants(policy, _op(host="files.pythonhosted.org"))
+    assert _grants(policy, _op(host="pythonhosted.org"))  # the bare domain too
+    assert not _grants(policy, _op(host="pythonhosted.org.evil.com"))
+    assert not _grants(policy, _op(host="notpythonhosted.org"))
+
+
+def test_a_host_grant_round_trips_through_its_line():
+    grant = Policy.parse(
+        "release outgoing deb.debian.org:80/tcp (keep_open=5m)\n"
+    ).grants[0]
+    assert grant.host == "deb.debian.org" and grant.ip == "*"
+    assert grant.line() == "release outgoing deb.debian.org:80/tcp (keep_open=5m)"
+
+
+def test_a_bare_word_is_not_a_host():
+    # No dot: not a host, not an ip, not '*' -- a strict parse error,
+    # never a silently-dropped rule.
+    with pytest.raises(PolicyError):
+        Policy.parse("release outgoing localhost:80/tcp\n")
 
 
 def test_grants_match_exactly_and_by_wildcard():
