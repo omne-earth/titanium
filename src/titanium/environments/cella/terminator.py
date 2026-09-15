@@ -123,7 +123,16 @@ def member_trust_entries(ca_pem: bytes) -> list[BootEntry]:
         ),
         GuestFile(
             path="/etc/resolv.conf",
-            contents=f"nameserver {APPLIANCE_WIRE_ADDRESS}\n".encode(),
+            # The appliance freezes once on the first reply to each of
+            # the member's reply ports (the park is the freeze, before
+            # the standing memory is planted), and a deep thaw re-warms
+            # for seconds. The resolver's patience must outlast that, or
+            # the lookup times out before the frozen reply is thawed and
+            # delivered -- the member never reaches the world at all.
+            contents=(
+                f"nameserver {APPLIANCE_WIRE_ADDRESS}\n"
+                "options timeout:30 attempts:3 single-request\n"
+            ).encode(),
             mode=0o644,
             uid=0,
             gid=0,
@@ -156,12 +165,15 @@ def member_prelude(interface: str) -> str:
 
 
 def _round_trip(dest: str, proto: str, window: str) -> str:
-    """A granted destination and its reply twin: the request parks
-    outgoing (live, so the machine does not freeze reaching it) and the
-    reply parks in the ingress lane."""
+    """A granted destination and its reply twin. The outgoing leg carries
+    a window and skip_freeze, so the machine waits live instead of
+    freezing on the crossing. The incoming twin is bare: an incoming park
+    never freezes, so a window there would only plant an inert memory
+    (skip_freeze is outgoing-only by cella's design) -- the verdict
+    releases it, no memory needed."""
     return (
         f"release outgoing {dest}/{proto} (keep_open={window}) (skip_freeze=true)\n"
-        f"release incoming {dest}/{proto} (keep_open={window})\n"
+        f"release incoming {dest}/{proto}\n"
     )
 
 
@@ -177,7 +189,7 @@ def member_policy_text() -> str:
         "# ARP and the appliance. The member's only peer is its\n"
         "# terminator; the world names are judged at the appliance.\n"
         "release outgoing arp (keep_open=24h) (skip_freeze=true)\n"
-        "release incoming arp (keep_open=24h)\n"
+        "release incoming arp\n"
         + _round_trip(f"{gw}:443", "tcp", "5m")
         + _round_trip(f"{gw}:80", "tcp", "5m")
         + _round_trip(f"{gw}:53", "udp", "90s")
@@ -198,22 +210,23 @@ def appliance_border_policy_text(world_hosts: list[str]) -> str:
             "# the member's reply window, and each allowed world host.\n"
         ),
         "release outgoing arp (keep_open=24h) (skip_freeze=true)\n",
-        "release incoming arp (keep_open=24h)\n",
+        "release incoming arp\n",
         _round_trip(f"{UPSTREAM_DNS}:53", "udp", "24h"),
         (
             "# The member's reply window (the consistent reply port): the\n"
-            "# appliance's answers toward the member are exact destinations.\n"
+            "# member pins its ephemeral ports to this range, so a crossing\n"
+            "# to the member is named by one of these exact ports -- both\n"
+            "# the member's request arriving (incoming, named by its source\n"
+            "# port) and the appliance's answer going back (outgoing).\n"
         ),
     ]
     for port in range(REPLY_PORT_LOW, REPLY_PORT_HIGH + 1):
-        lines.append(
-            f"release outgoing {MEMBER_WIRE_ADDRESS}:{port}/tcp "
-            "(keep_open=1h) (skip_freeze=true)\n"
-        )
-        lines.append(
-            f"release outgoing {MEMBER_WIRE_ADDRESS}:{port}/udp "
-            "(keep_open=1h) (skip_freeze=true)\n"
-        )
+        for proto in ("tcp", "udp"):
+            lines.append(
+                f"release outgoing {MEMBER_WIRE_ADDRESS}:{port}/{proto} "
+                "(keep_open=1h) (skip_freeze=true)\n"
+            )
+            lines.append(f"release incoming {MEMBER_WIRE_ADDRESS}:{port}/{proto}\n")
     if world_hosts:
         lines.append("# The allowed world hosts, by name.\n")
         for host in world_hosts:
