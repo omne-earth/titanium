@@ -13,10 +13,15 @@ wire's words and the chronicle's words, with no translation table:
     refuse  outgoing 169.254.169.254:80/tcp (keep_open=24h) (reason="metadata")
 
 A destination is exact -- ``ip:port/proto`` (``tcp``/``udp``/a bare IP
-protocol number), or an ethertype word (``arp``, ``ipv6``, ``0xNNNN``).
-``*`` matches any ip or any port in a *verdict*; MACs are never named
-(they change on every rebuild). Everything not granted is refused --
-default-refuse is the ground state.
+protocol number), a **host** name (``deb.debian.org:80/tcp``, or a
+leading-dot suffix ``.debian.org`` for every subdomain), or an
+ethertype word (``arp``, ``ipv6``, ``0xNNNN``). A host grant matches
+the name the terminator resolved and stamped on the crossing
+(proto/cella.proto, "the ratchet acts on names"), so it survives the
+ip rotation a CDN gives an exact-ip grant; an ip-only crossing never
+matches a host grant. ``*`` matches any ip or any port in a *verdict*;
+MACs are never named (they change on every rebuild). Everything not
+granted is refused -- default-refuse is the ground state.
 
 The keys carry cella's membrane memory (N.F.7):
 
@@ -100,22 +105,40 @@ def _parse_window(value: str, lineno: int) -> int:
 class Grant:
     """One grant line.
 
-    ``verb`` is release or refuse; the destination is one of the two
-    shapes cella names a frame by (``ethertype`` non-zero for L2, else
-    ip/port/proto). ``keep_open`` > 0 plants a membrane memory for a
-    matched crossing's *exact* destination; ``skip_freeze`` makes that
-    memory a live wait; ``reason`` is the refusal's recorded why.
+    ``verb`` is release or refuse; the destination is one of the three
+    shapes a frame is named by: an ``ethertype`` (non-zero, for an L2
+    frame), a ``host`` (a domain, matched against the name the
+    appliance resolved and stamped on the crossing -- proto/cella.proto,
+    "the ratchet acts on names"), or ``ip``/port/proto. ``keep_open`` >
+    0 plants a membrane memory for a matched crossing's *exact*
+    destination; ``skip_freeze`` makes that memory a live wait;
+    ``reason`` is the refusal's recorded why.
+
+    A host destination is exact (``deb.debian.org``) or a leading-dot
+    suffix (``.debian.org`` matches the bare domain and every
+    subdomain -- harbor's other allowlist form). It reaches only what
+    the terminator resolved: an ip-only crossing (no name on it) never
+    matches a host grant, so a name grant fails closed.
     """
 
     verb: str = "release"
     direction: str = "outgoing"
     ethertype: int = 0
+    host: str = ""
     ip: str = "*"
     port: int = 0  # 0 is the wildcard, matching the wire's default
     proto: int = 6
     keep_open: int = 0
     skip_freeze: bool = False
     reason: str = ""
+
+    def _host_matches(self, name: str) -> bool:
+        if not name:
+            return False  # an unnamed crossing never matches a name grant
+        if self.host.startswith("."):
+            bare = self.host[1:]
+            return name == bare or name.endswith("." + bare)
+        return name == self.host
 
     def matches(self, operation: Operation) -> bool:
         direction = (
@@ -130,7 +153,10 @@ class Grant:
             return self.ethertype != 0 and destination.ethertype == self.ethertype
         if self.ethertype != 0:
             return False
-        if self.ip != "*" and self.ip != ".".join(str(b) for b in destination.ip):
+        if self.host:
+            if not self._host_matches(destination.host):
+                return False
+        elif self.ip != "*" and self.ip != ".".join(str(b) for b in destination.ip):
             return False
         if self.port != 0 and self.port != destination.port:
             return False
@@ -156,7 +182,7 @@ class Grant:
         else:
             port = "*" if self.port == 0 else str(self.port)
             proto = _PROTO_NAMES.get(self.proto, str(self.proto))
-            dest = f"{self.ip}:{port}/{proto}"
+            dest = f"{self.host or self.ip}:{port}/{proto}"
         parts = [self.verb, self.direction, dest]
         if self.keep_open > 0:
             parts.append(f"(keep_open={_format_window(self.keep_open)})")
@@ -180,6 +206,16 @@ def grant_for(operation: Operation) -> Grant | None:
         return Grant(
             verb="release", direction=direction, ethertype=destination.ethertype
         )
+    # Prefer the resolved name when the terminator stamped one: a name
+    # grant survives the ip rotation an exact-ip grant would not.
+    if destination.host:
+        return Grant(
+            verb="release",
+            direction=direction,
+            host=destination.host.lower(),
+            port=destination.port,
+            proto=destination.proto,
+        )
     return Grant(
         verb="release",
         direction=direction,
@@ -190,6 +226,19 @@ def grant_for(operation: Operation) -> Grant | None:
 
 
 _KEY_RE = re.compile(r"\(([a-z_]+)=(.*?)\)")
+
+# A domain destination: dotted labels of letters, digits, and hyphens,
+# with an optional leading dot for a subdomain suffix (``.debian.org``).
+# At least one dot, so a bare word is never mistaken for a host.
+_HOST_RE = re.compile(
+    r"^\.?(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
+    r"[a-zA-Z](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$"
+)
+
+
+def _looks_like_ipv4(text: str) -> bool:
+    parts = text.split(".")
+    return len(parts) == 4 and all(p.isdigit() for p in parts)
 
 
 def _parse_destination(spec: str, lineno: int) -> dict:
@@ -212,17 +261,27 @@ def _parse_destination(spec: str, lineno: int) -> dict:
     ip, _, port_word = address.rpartition(":")
     if not address or not ip:
         raise PolicyError(
-            f"cella.policy line {lineno}: want <ip>:<port>/<proto>, got {spec!r}."
+            f"cella.policy line {lineno}: want <ip|host>:<port>/<proto>, got {spec!r}."
         )
-    if ip != "*":
+    host = ""
+    if ip == "*":
+        pass
+    elif _looks_like_ipv4(ip):
         octets = ip.split(".")
-        if len(octets) != 4 or not all(
-            o.isdigit() and 0 <= int(o) <= 255 for o in octets
-        ):
+        if not all(o.isdigit() and 0 <= int(o) <= 255 for o in octets):
             raise PolicyError(
-                f"cella.policy line {lineno}: {ip!r} is not an IPv4 address or '*'."
+                f"cella.policy line {lineno}: {ip!r} is not an IPv4 address."
             )
         ip = ".".join(str(int(o)) for o in octets)
+    elif _HOST_RE.match(ip):
+        # A domain name: matched against the name the terminator
+        # resolved and stamped on the crossing, not against the ip.
+        host, ip = ip.lower(), "*"
+    else:
+        raise PolicyError(
+            f"cella.policy line {lineno}: {ip!r} is not an IPv4 address, a "
+            f"host name, or '*'."
+        )
     if port_word == "*":
         port = 0
     else:
@@ -250,7 +309,7 @@ def _parse_destination(spec: str, lineno: int) -> dict:
             raise PolicyError(
                 f"cella.policy line {lineno}: protocol {proto} is out of range."
             )
-    return {"ip": ip, "port": port, "proto": proto}
+    return {"host": host, "ip": ip, "port": port, "proto": proto}
 
 
 def _parse_grant(line: str, lineno: int) -> Grant:
