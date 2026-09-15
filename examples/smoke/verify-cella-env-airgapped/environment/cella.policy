@@ -1,6 +1,6 @@
 # cella.policy — the crossings this task is granted.
-# One grant per line: allow <direction> <ip>:<port>/<proto>
-#                  or allow <direction> <ethertype>
+# <release|refuse> <incoming|outgoing> <destination> (key=value)*
+# keys: keep_open=<90s|5m|24h> skip_freeze=true reason="..."
 # '*' matches any ip or any port. Everything not granted is refused.
 #
 # This task declares allow_internet = false, so the machine is created

@@ -47,7 +47,6 @@ import argparse
 import asyncio
 import logging
 import signal
-from dataclasses import dataclass
 from pathlib import Path
 
 from grpclib.const import Cardinality, Handler
@@ -56,6 +55,7 @@ from grpclib.server import Server, Stream
 from titanium.environments.cella.policy import Policy, PolicyRecorder
 from titanium.environments.cella.wire import (
     Decision,
+    Destination,
     Event,
     Operation,
     Refusal,
@@ -71,30 +71,67 @@ DECIDE_METHOD = "/cella.Engine/Decide"
 REFUSAL_WHY_NO_GRANT = "no cella.policy grants this crossing"
 
 
-@dataclass(frozen=True)
+def _memory_key(destination: Destination) -> tuple:
+    """The exact identity of a destination, for planting each membrane
+    memory once. A memory names an exact destination, so two crossings
+    to the same (ip, port, proto) or the same ethertype share one."""
+    if destination.ip:
+        return ("ip", bytes(destination.ip), destination.port, destination.proto)
+    return ("l2", destination.ethertype)
+
+
 class PolicyJudge:
     """The task's ``cella.policy`` grants as a per-crossing judge.
 
-    A crossing a grant names is released; everything else is refused
-    as :data:`REFUSAL_WHY_NO_GRANT`. ``policy=None`` is a border with
-    no file behind it, which grants nothing: fail closed.
+    ``decide`` returns the verdict for one park -- release, or refuse
+    with the grant's reason (or :data:`REFUSAL_WHY_NO_GRANT` when no
+    grant matches: default-refuse). When the matching grant carries a
+    ``keep_open`` window, ``decide`` also returns a membrane memory to
+    plant, built from the park's *exact* destination and sent once per
+    destination -- so a remembered crossing waits live instead of
+    freezing the machine.
 
-    A *recorder* replaces judgment with collection (``--dry-run``):
-    every crossing is released and written to the policy file as the
-    grant that would have released it. The grants are not consulted --
-    a dry run exists to observe what the task asks for.
+    ``policy=None`` is a border with no file: grants nothing, fail
+    closed. A *recorder* (``--dry-run``) replaces judgment with
+    collection: every crossing releases and lands in the policy file.
     """
 
-    policy: Policy | None = None
-    recorder: PolicyRecorder | None = None
+    def __init__(
+        self,
+        policy: Policy | None = None,
+        recorder: PolicyRecorder | None = None,
+    ) -> None:
+        self.policy = policy
+        self.recorder = recorder
+        self._planted: set[tuple] = set()
 
-    def decide(self, operation: Operation) -> Decision:
+    def decide(self, operation: Operation) -> list[Decision]:
         if self.recorder is not None:
             self.recorder.record(operation)
-            return Decision(id=operation.id, release=Release())
-        if self.policy is not None and self.policy.grants_crossing(operation):
-            return Decision(id=operation.id, release=Release())
-        return Decision(id=operation.id, refusal=Refusal(why=REFUSAL_WHY_NO_GRANT))
+            return [Decision(id=operation.id, release=Release())]
+
+        if self.policy is None:
+            return [
+                Decision(id=operation.id, refusal=Refusal(why=REFUSAL_WHY_NO_GRANT))
+            ]
+
+        match = self.policy.evaluate(operation)
+        if match.release:
+            verdict = Decision(id=operation.id, release=Release())
+        else:
+            why = match.reason or REFUSAL_WHY_NO_GRANT
+            verdict = Decision(id=operation.id, refusal=Refusal(why=why))
+
+        decisions = [verdict]
+        # Plant the standing memory once per exact destination: the
+        # bridge stamps and appends it, and the membrane stops freezing
+        # on that crossing. id empty -- a memory names a destination.
+        if match.memory is not None and operation.destination is not None:
+            key = _memory_key(operation.destination)
+            if key not in self._planted:
+                self._planted.add(key)
+                decisions.append(Decision(id=b"", membrane_memory=match.memory))
+        return decisions
 
 
 class EngineService:
@@ -127,18 +164,31 @@ class EngineService:
                 # Completions and looks are evidence, not questions.
                 logger.debug("cella engine: event (not a park)")
                 continue
-            decision = self._policy.decide(operation)
             destination = operation.destination
-            logger.info(
-                "cella engine: %s id=%s host=%r ip=%s port=%d direction=%d",
-                "release" if decision.release is not None else "refuse",
-                operation.id.hex(),
-                destination.host if destination else "",
-                ".".join(str(b) for b in (destination.ip if destination else b"")),
-                destination.port if destination else 0,
-                operation.direction,
-            )
-            await stream.send_message(decision)
+            for decision in self._policy.decide(operation):
+                if decision.membrane_memory is not None:
+                    logger.info(
+                        "cella engine: remember ip=%s port=%d skip_freeze=%s keep_open=%d",
+                        ".".join(
+                            str(b) for b in (destination.ip if destination else b"")
+                        ),
+                        destination.port if destination else 0,
+                        decision.membrane_memory.skip_freeze,
+                        decision.membrane_memory.keep_open,
+                    )
+                else:
+                    logger.info(
+                        "cella engine: %s id=%s host=%r ip=%s port=%d direction=%d",
+                        "release" if decision.release is not None else "refuse",
+                        operation.id.hex(),
+                        destination.host if destination else "",
+                        ".".join(
+                            str(b) for b in (destination.ip if destination else b"")
+                        ),
+                        destination.port if destination else 0,
+                        operation.direction,
+                    )
+                await stream.send_message(decision)
 
 
 async def serve(policy: PolicyJudge, host: str = "127.0.0.1", port: int = 0) -> Server:

@@ -1,56 +1,66 @@
-"""The per-task ``cella.policy`` file: grants read, or collected.
+"""The per-task ``cella.policy`` file: the engine's grant list.
 
-One file, two directions of travel, one grammar:
+This is cella's own recommended grammar (docs/integration/
+MEMBRANE-MEMORY.md), adopted verbatim so the file's words are the
+wire's words and the chronicle's words, with no translation table:
 
-- **Enforce** (the default): the engine loads the file and releases
-  exactly the crossings a grant names; everything else is refused with
-  the why on the record.
-- **Dry run**: the engine releases every crossing and *writes* the file
-  -- each distinct crossing observed becomes one grant line. The
-  collected file is then reviewed and checked in beside the task's
-  build file, like a lockfile, and the next run enforces it.
-
-The grammar is one grant per line, mirroring how cella itself names a
-crossing (``cella_libs::ledger::Dest``): an IPv4 crossing refines to
-ip, port, and protocol; every other frame is named by its ethertype.
+    <release|refuse> <incoming|outgoing> <destination> (key=value)*
 
     # comment
-    allow outgoing 140.82.112.3:443/tcp
-    allow incoming *:2222/tcp
-    allow outgoing arp
+    release outgoing 140.82.112.3:443/tcp (keep_open=5m) (skip_freeze=true)
+    release incoming 140.82.112.3:443/tcp (keep_open=5m)
+    release outgoing arp (keep_open=24h) (skip_freeze=true)
+    refuse  outgoing 169.254.169.254:80/tcp (keep_open=24h) (reason="metadata")
 
-``*`` matches any ip or any port. The protocol is ``tcp``, ``udp``, or
-a bare IP protocol number. An L2 grant is the ethertype word cella
-prints: ``arp``, ``ipv6``, or ``0xNNNN``. MACs are deliberately not in
-the grammar: a policy that named a MAC would break on every rebuild of
-the machine, and the ethertype is the decision that matters.
+A destination is exact -- ``ip:port/proto`` (``tcp``/``udp``/a bare IP
+protocol number), or an ethertype word (``arp``, ``ipv6``, ``0xNNNN``).
+``*`` matches any ip or any port in a *verdict*; MACs are never named
+(they change on every rebuild). Everything not granted is refused --
+default-refuse is the ground state.
+
+The keys carry cella's membrane memory (N.F.7):
+
+- ``keep_open=<window>`` -- ``90s`` / ``5m`` / ``24h`` / bare seconds.
+  Its presence plants a standing memory for the destination, so the
+  machine stops freezing on the crossing and instead waits *live* --
+  what keeps a TLS handshake's flights inside the real peer's
+  patience. Absent, the crossing is judged the cryogenic way: the park
+  is the freeze.
+- ``skip_freeze=true|false`` -- outgoing only (an incoming park never
+  freezes), and needs ``keep_open``. ``true`` is the live wait above.
+- ``reason="..."`` -- refuse only; lands verbatim in the chronicle's
+  ``Lapsed``.
 
 Parsing is strict: an unreadable line is an error naming its number,
-never a skipped rule -- a policy file that silently lost a grant would
+never a skipped rule -- a policy that silently lost a grant would
 refuse crossings its author allowed, and one that silently lost a
 refusal boundary would be worse.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from titanium.environments.cella.wire import (
     DIRECTION_INCOMING,
+    MembraneMemory,
     Operation,
 )
 
+_VERBS = ("release", "refuse")
 _DIRECTIONS = ("outgoing", "incoming")
 _PROTO_NAMES = {6: "tcp", 17: "udp"}
 _PROTO_NUMBERS = {"tcp": 6, "udp": 17}
 _ETHERTYPE_NAMES = {0x0806: "arp", 0x86DD: "ipv6"}
 _ETHERTYPE_NUMBERS = {"arp": 0x0806, "ipv6": 0x86DD}
+_WINDOW_UNITS = {"s": 1, "m": 60, "h": 3600}
 
 HEADER = (
     "# cella.policy — the crossings this task is granted.\n"
-    "# One grant per line: allow <direction> <ip>:<port>/<proto>\n"
-    "#                  or allow <direction> <ethertype>\n"
+    "# <release|refuse> <incoming|outgoing> <destination> (key=value)*\n"
+    '# keys: keep_open=<90s|5m|24h> skip_freeze=true reason="..."\n'
     "# '*' matches any ip or any port. Everything not granted is refused.\n"
 )
 
@@ -59,20 +69,53 @@ class PolicyError(ValueError):
     """A cella.policy file that cannot be read as written."""
 
 
+def _format_window(seconds: int) -> str:
+    for unit, size in (("h", 3600), ("m", 60)):
+        if seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def _parse_window(value: str, lineno: int) -> int:
+    raw = value
+    unit = 1
+    if value and value[-1] in _WINDOW_UNITS:
+        unit = _WINDOW_UNITS[value[-1]]
+        value = value[:-1]
+    try:
+        seconds = int(value) * unit
+    except ValueError as exc:
+        raise PolicyError(
+            f"cella.policy line {lineno}: keep_open {raw!r} is not a window "
+            f"(seconds, or a number with s/m/h)."
+        ) from exc
+    if seconds <= 0:
+        raise PolicyError(
+            f"cella.policy line {lineno}: keep_open must be positive, got {raw!r}."
+        )
+    return seconds
+
+
 @dataclass(frozen=True, order=True)
 class Grant:
-    """One allowed crossing shape.
+    """One grant line.
 
-    Exactly one of the two shapes cella names a frame by:
-    ``ethertype`` is 0 for an IPv4 grant (ip/port/proto speak), and for
-    an L2 grant it is the ethertype with ip/port/proto silent.
+    ``verb`` is release or refuse; the destination is one of the two
+    shapes cella names a frame by (``ethertype`` non-zero for L2, else
+    ip/port/proto). ``keep_open`` > 0 plants a membrane memory for a
+    matched crossing's *exact* destination; ``skip_freeze`` makes that
+    memory a live wait; ``reason`` is the refusal's recorded why.
     """
 
-    direction: str
+    verb: str = "release"
+    direction: str = "outgoing"
     ethertype: int = 0
     ip: str = "*"
     port: int = 0  # 0 is the wildcard, matching the wire's default
     proto: int = 6
+    keep_open: int = 0
+    skip_freeze: bool = False
+    reason: str = ""
 
     def matches(self, operation: Operation) -> bool:
         direction = (
@@ -84,8 +127,6 @@ class Grant:
         if destination is None:
             return False
         if not destination.ip:
-            # An L2 crossing: only an L2 grant with the same ethertype
-            # speaks for it.
             return self.ethertype != 0 and destination.ethertype == self.ethertype
         if self.ethertype != 0:
             return False
@@ -95,20 +136,40 @@ class Grant:
             return False
         return self.proto == destination.proto
 
+    def memory_for(self, operation: Operation) -> MembraneMemory | None:
+        """The standing memory this grant plants for *operation*, or
+        ``None`` when the grant carries no window. Built from the
+        park's own exact Destination -- a wildcard grant still remembers
+        each concrete crossing it matched, and cella's rule that a
+        memory names an exact destination holds."""
+        if self.keep_open <= 0 or operation.destination is None:
+            return None
+        return MembraneMemory(
+            destination=operation.destination,
+            skip_freeze=self.skip_freeze,
+            keep_open=self.keep_open,
+        )
+
     def line(self) -> str:
         if self.ethertype != 0:
-            name = _ETHERTYPE_NAMES.get(self.ethertype, f"0x{self.ethertype:04x}")
-            return f"allow {self.direction} {name}"
-        port = "*" if self.port == 0 else str(self.port)
-        proto = _PROTO_NAMES.get(self.proto, str(self.proto))
-        return f"allow {self.direction} {self.ip}:{port}/{proto}"
+            dest = _ETHERTYPE_NAMES.get(self.ethertype, f"0x{self.ethertype:04x}")
+        else:
+            port = "*" if self.port == 0 else str(self.port)
+            proto = _PROTO_NAMES.get(self.proto, str(self.proto))
+            dest = f"{self.ip}:{port}/{proto}"
+        parts = [self.verb, self.direction, dest]
+        if self.keep_open > 0:
+            parts.append(f"(keep_open={_format_window(self.keep_open)})")
+        if self.skip_freeze:
+            parts.append("(skip_freeze=true)")
+        if self.reason:
+            parts.append(f'(reason="{self.reason}")')
+        return " ".join(parts)
 
 
 def grant_for(operation: Operation) -> Grant | None:
-    """The exact grant that would release *operation*, for dry-run
-    collection. ``None`` for an operation with no destination: there is
-    nothing to name, and a grant naming nothing would grant anything.
-    """
+    """The release grant that would name *operation*, for dry-run
+    collection. ``None`` for a destinationless or unnamed operation."""
     destination = operation.destination
     if destination is None:
         return None
@@ -116,8 +177,11 @@ def grant_for(operation: Operation) -> Grant | None:
     if not destination.ip:
         if destination.ethertype == 0:
             return None
-        return Grant(direction=direction, ethertype=destination.ethertype)
+        return Grant(
+            verb="release", direction=direction, ethertype=destination.ethertype
+        )
     return Grant(
+        verb="release",
         direction=direction,
         ip=".".join(str(b) for b in destination.ip),
         port=destination.port,
@@ -125,25 +189,13 @@ def grant_for(operation: Operation) -> Grant | None:
     )
 
 
-def _parse_grant(line: str, lineno: int) -> Grant:
-    parts = line.split()
-    if len(parts) != 3 or parts[0] != "allow":
-        raise PolicyError(
-            f"cella.policy line {lineno}: want 'allow <direction> <spec>', "
-            f"got {line!r}."
-        )
-    direction = parts[1]
-    if direction not in _DIRECTIONS:
-        raise PolicyError(
-            f"cella.policy line {lineno}: direction must be one of "
-            f"{_DIRECTIONS}, got {direction!r}."
-        )
-    spec = parts[2]
+_KEY_RE = re.compile(r"\(([a-z_]+)=(.*?)\)")
 
+
+def _parse_destination(spec: str, lineno: int) -> dict:
     if ":" not in spec:
-        # An L2 grant, by ethertype word or number.
         if spec in _ETHERTYPE_NUMBERS:
-            return Grant(direction=direction, ethertype=_ETHERTYPE_NUMBERS[spec])
+            return {"ethertype": _ETHERTYPE_NUMBERS[spec]}
         try:
             ethertype = int(spec, 16) if spec.startswith("0x") else int(spec)
         except ValueError as exc:
@@ -154,15 +206,11 @@ def _parse_grant(line: str, lineno: int) -> Grant:
             raise PolicyError(
                 f"cella.policy line {lineno}: ethertype {spec!r} is out of range."
             )
-        return Grant(direction=direction, ethertype=ethertype)
+        return {"ethertype": ethertype}
 
     address, _, proto_word = spec.rpartition("/")
-    if not address:
-        raise PolicyError(
-            f"cella.policy line {lineno}: want <ip>:<port>/<proto>, got {spec!r}."
-        )
     ip, _, port_word = address.rpartition(":")
-    if not ip:
+    if not address or not ip:
         raise PolicyError(
             f"cella.policy line {lineno}: want <ip>:<port>/<proto>, got {spec!r}."
         )
@@ -174,7 +222,6 @@ def _parse_grant(line: str, lineno: int) -> Grant:
             raise PolicyError(
                 f"cella.policy line {lineno}: {ip!r} is not an IPv4 address or '*'."
             )
-        # One canonical spelling, so two lines cannot name one grant.
         ip = ".".join(str(int(o)) for o in octets)
     if port_word == "*":
         port = 0
@@ -183,10 +230,9 @@ def _parse_grant(line: str, lineno: int) -> Grant:
             port = int(port_word)
         except ValueError as exc:
             raise PolicyError(
-                f"cella.policy line {lineno}: port {port_word!r} is not a "
-                f"number or '*'."
+                f"cella.policy line {lineno}: port {port_word!r} is not a number or '*'."
             ) from exc
-        if not 0 < port <= 65535:
+        if not 0 <= port <= 65535:
             raise PolicyError(
                 f"cella.policy line {lineno}: port {port} is out of range."
             )
@@ -204,17 +250,87 @@ def _parse_grant(line: str, lineno: int) -> Grant:
             raise PolicyError(
                 f"cella.policy line {lineno}: protocol {proto} is out of range."
             )
-    return Grant(direction=direction, ip=ip, port=port, proto=proto)
+    return {"ip": ip, "port": port, "proto": proto}
+
+
+def _parse_grant(line: str, lineno: int) -> Grant:
+    keys = dict(_KEY_RE.findall(line))
+    head = _KEY_RE.sub("", line).split()
+    if len(head) != 3 or head[0] not in _VERBS or head[1] not in _DIRECTIONS:
+        raise PolicyError(
+            f"cella.policy line {lineno}: want "
+            f"'<release|refuse> <incoming|outgoing> <destination> (key=value)*', "
+            f"got {line!r}."
+        )
+    verb, direction, spec = head
+    dest = _parse_destination(spec, lineno)
+
+    keep_open = 0
+    if "keep_open" in keys:
+        keep_open = _parse_window(keys.pop("keep_open"), lineno)
+    skip_freeze = False
+    if "skip_freeze" in keys:
+        raw = keys.pop("skip_freeze").lower()
+        if raw not in ("true", "false"):
+            raise PolicyError(
+                f"cella.policy line {lineno}: skip_freeze must be true or false."
+            )
+        skip_freeze = raw == "true"
+    reason = keys.pop("reason", "").strip('"')
+    if keys:
+        raise PolicyError(f"cella.policy line {lineno}: unknown key(s) {sorted(keys)}.")
+
+    # cella's discipline: skip_freeze needs a window and is outgoing
+    # only; reason is refuse only.
+    if skip_freeze and keep_open <= 0:
+        raise PolicyError(
+            f"cella.policy line {lineno}: skip_freeze needs a keep_open window."
+        )
+    if skip_freeze and direction != "outgoing":
+        raise PolicyError(
+            f"cella.policy line {lineno}: skip_freeze is outgoing only "
+            f"(an incoming park never freezes)."
+        )
+    if reason and verb != "refuse":
+        raise PolicyError(f"cella.policy line {lineno}: reason is refuse only.")
+    return Grant(
+        verb=verb,
+        direction=direction,
+        keep_open=keep_open,
+        skip_freeze=skip_freeze,
+        reason=reason,
+        **dest,
+    )
+
+
+@dataclass(frozen=True)
+class Match:
+    """The engine's read of one park against the policy: the verdict
+    (``release`` bool, ``reason`` for a refuse) and the standing memory
+    to plant, if any."""
+
+    release: bool
+    reason: str = ""
+    memory: MembraneMemory | None = None
 
 
 @dataclass(frozen=True)
 class Policy:
     """A parsed cella.policy: the grants, in file order."""
 
-    grants: tuple[Grant, ...]
+    grants: tuple[Grant, ...] = field(default_factory=tuple)
 
-    def grants_crossing(self, operation: Operation) -> bool:
-        return any(grant.matches(operation) for grant in self.grants)
+    def evaluate(self, operation: Operation) -> Match:
+        """Judge one park: the first matching grant decides, and its
+        window (if any) plants a memory. No match is default-refuse."""
+        for grant in self.grants:
+            if grant.matches(operation):
+                return Match(
+                    release=grant.verb == "release",
+                    reason=grant.reason,
+                    memory=grant.memory_for(operation),
+                )
+        return Match(release=False)
 
     @classmethod
     def parse(cls, text: str) -> Policy:
@@ -241,13 +357,9 @@ class Policy:
 
 
 class PolicyRecorder:
-    """Dry-run collection: every distinct crossing becomes one grant.
-
-    The file is rewritten on every new grant rather than at shutdown,
-    so a run that dies mid-way still leaves everything it observed --
-    the collected policy is evidence, and evidence is written as it
-    happens.
-    """
+    """Dry-run collection: every distinct crossing becomes one release
+    grant. Rewritten on every new grant, so a run that dies mid-way
+    still leaves what it observed."""
 
     def __init__(self, path: Path) -> None:
         self._path = path

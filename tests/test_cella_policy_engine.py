@@ -150,12 +150,16 @@ def _operation(ethertype: int = 0x0800, direction: int = 0) -> Operation:
     )
 
 
+def _verdict(judge, operation):
+    """The verdict decision (the memory, if any, follows it)."""
+    return judge.decide(operation)[0]
+
+
 def test_a_policyless_border_refuses_everything():
-    # The judge knows nothing of allow_internet: topology is harbor's
-    # knob, spent at `cella create`. A border with no cella.policy
-    # behind it grants nothing, both directions.
+    # A border with no cella.policy behind it grants nothing, both
+    # directions.
     for direction in (0, DIRECTION_INCOMING):
-        decision = PolicyJudge().decide(_operation(direction=direction))
+        decision = _verdict(PolicyJudge(), _operation(direction=direction))
         assert decision.id == b"\x07" * 16
         assert decision.release is None
         assert decision.refusal.why == REFUSAL_WHY_NO_GRANT
@@ -164,13 +168,13 @@ def test_a_policyless_border_refuses_everything():
 def test_arp_is_refused_like_everything_else():
     # Unlike cella's motor fixture, there is no ARP carve-out: any
     # finer exception belongs to the per-task cella.policy file.
-    decision = PolicyJudge().decide(_operation(ethertype=ETHERTYPE_ARP))
+    decision = _verdict(PolicyJudge(), _operation(ethertype=ETHERTYPE_ARP))
     assert decision.release is None
     assert decision.refusal is not None
 
 
 def test_a_destinationless_operation_is_refused():
-    decision = PolicyJudge().decide(Operation(id=b"\x09"))
+    decision = _verdict(PolicyJudge(), Operation(id=b"\x09"))
     assert decision.refusal.why == REFUSAL_WHY_NO_GRANT
 
 
@@ -239,10 +243,10 @@ async def test_engine_refuses_over_the_wire_and_skips_evidence():
 _POLICY_TEXT = """\
 # a comment, and a blank line below
 
-allow outgoing 140.82.112.3:443/tcp
-allow incoming *:2222/tcp
-allow outgoing 10.0.0.1:*/udp
-allow outgoing arp
+release outgoing 140.82.112.3:443/tcp (keep_open=5m) (skip_freeze=true)
+release incoming *:2222/tcp
+release outgoing 10.0.0.1:*/udp
+release outgoing arp (keep_open=24h) (skip_freeze=true)
 """
 
 
@@ -256,13 +260,18 @@ def test_policy_parses_and_renders_canonically():
 @pytest.mark.parametrize(
     "line",
     [
-        "deny outgoing 1.2.3.4:443/tcp",
-        "allow sideways 1.2.3.4:443/tcp",
-        "allow outgoing 1.2.3:443/tcp",
-        "allow outgoing 1.2.3.4:70000/tcp",
-        "allow outgoing 1.2.3.4:443/xtp",
-        "allow outgoing bogus",
-        "allow outgoing",
+        "deny outgoing 1.2.3.4:443/tcp",  # not a verb
+        "release sideways 1.2.3.4:443/tcp",  # not a direction
+        "release outgoing 1.2.3:443/tcp",  # short ip
+        "release outgoing 1.2.3.4:70000/tcp",  # port range
+        "release outgoing 1.2.3.4:443/xtp",  # bad proto
+        "release outgoing bogus",  # bad ethertype
+        "release outgoing",  # missing dest
+        "release outgoing 1.2.3.4:443/tcp (keep_open=nope)",  # bad window
+        "release incoming 1.2.3.4:443/tcp (skip_freeze=true)",  # skip on ingress
+        "release outgoing 1.2.3.4:443/tcp (skip_freeze=true)",  # skip w/o window
+        'release outgoing 1.2.3.4:443/tcp (reason="x")',  # reason on release
+        "release outgoing 1.2.3.4:443/tcp (bogus=1)",  # unknown key
     ],
 )
 def test_policy_refuses_unreadable_lines(line):
@@ -286,47 +295,53 @@ def _op(
     )
 
 
+def _grants(policy, operation):
+    return policy.evaluate(operation).release
+
+
 def test_grants_match_exactly_and_by_wildcard():
     policy = Policy.parse(_POLICY_TEXT)
-    assert policy.grants_crossing(_op())
-    assert not policy.grants_crossing(_op(port=80))
-    assert not policy.grants_crossing(_op(proto=17))
+    assert _grants(policy, _op())
+    assert not _grants(policy, _op(port=80))
+    assert not _grants(policy, _op(proto=17))
     # The incoming grant: any source, port 2222, tcp.
-    assert policy.grants_crossing(
-        _op(ip=(8, 8, 8, 8), port=2222, direction=DIRECTION_INCOMING)
+    assert _grants(
+        policy, _op(ip=(8, 8, 8, 8), port=2222, direction=DIRECTION_INCOMING)
     )
-    assert not policy.grants_crossing(_op(port=2222))  # wrong direction
+    assert not _grants(policy, _op(port=2222))  # wrong direction
     # The port wildcard.
-    assert policy.grants_crossing(_op(ip=(10, 0, 0, 1), port=9999, proto=17))
+    assert _grants(policy, _op(ip=(10, 0, 0, 1), port=9999, proto=17))
     # The L2 grant speaks only for its ethertype.
     arp = Operation(
         id=b"\x22",
         destination=Destination(ethertype=ETHERTYPE_ARP, mac=b"\xff" * 6),
     )
-    assert policy.grants_crossing(arp)
+    assert _grants(policy, arp)
     ipv6 = Operation(
         id=b"\x23", destination=Destination(ethertype=0x86DD, mac=b"\xff" * 6)
     )
-    assert not policy.grants_crossing(ipv6)
+    assert not _grants(policy, ipv6)
 
 
 def test_grant_for_names_the_crossing_exactly():
     assert grant_for(_op()) == Grant(
-        direction="outgoing", ip="140.82.112.3", port=443, proto=6
+        verb="release", direction="outgoing", ip="140.82.112.3", port=443, proto=6
     )
     arp = Operation(
         id=b"\x22",
         destination=Destination(ethertype=ETHERTYPE_ARP, mac=b"\xff" * 6),
     )
-    assert grant_for(arp) == Grant(direction="outgoing", ethertype=ETHERTYPE_ARP)
+    assert grant_for(arp) == Grant(
+        verb="release", direction="outgoing", ethertype=ETHERTYPE_ARP
+    )
     assert grant_for(Operation(id=b"\x24")) is None
 
 
 def test_enforce_releases_granted_and_refuses_the_rest():
     policy = Policy.parse(_POLICY_TEXT)
     judge = PolicyJudge(policy=policy)
-    assert judge.decide(_op()).release is not None
-    refused = judge.decide(_op(port=80))
+    assert _verdict(judge, _op()).release is not None
+    refused = _verdict(judge, _op(port=80))
     assert refused.refusal is not None
     assert refused.refusal.why == REFUSAL_WHY_NO_GRANT
 
@@ -344,7 +359,7 @@ def test_dry_run_releases_everything_and_collects_the_policy(tmp_path):
         ),
     ]
     for crossing in crossings:
-        assert judge.decide(crossing).release is not None
+        assert _verdict(judge, crossing).release is not None
 
     collected = Policy.load(path)
     assert len(collected.grants) == 3
@@ -352,8 +367,8 @@ def test_dry_run_releases_everything_and_collects_the_policy(tmp_path):
     # file releases exactly what was observed and refuses the rest.
     enforcing = PolicyJudge(policy=collected)
     for crossing in crossings:
-        assert enforcing.decide(crossing).release is not None
-    assert enforcing.decide(_op(port=80)).refusal is not None
+        assert _verdict(enforcing, crossing).release is not None
+    assert _verdict(enforcing, _op(port=80)).refusal is not None
 
 
 # ---------------------------------------------------------------------------
@@ -415,11 +430,11 @@ def test_negative_varints_cannot_be_encoded():
 @pytest.mark.parametrize(
     "line",
     [
-        "allow outgoing 0x10000",  # ethertype out of range
-        "allow outgoing 1.2.3.4:443/300",  # proto out of range
-        "allow outgoing 1.2.3.4:abc/tcp",  # port not a number
-        "allow outgoing :443/tcp",  # no ip at all
-        "allow outgoing 1.2.3.4:443",  # no proto separator
+        "release outgoing 0x10000",  # ethertype out of range
+        "release outgoing 1.2.3.4:443/300",  # proto out of range
+        "release outgoing 1.2.3.4:abc/tcp",  # port not a number
+        "release outgoing :443/tcp",  # no ip at all
+        "release outgoing 1.2.3.4:443",  # no proto separator
     ],
 )
 def test_more_unreadable_policy_lines(line):
@@ -428,7 +443,7 @@ def test_more_unreadable_policy_lines(line):
 
 
 def test_numeric_ethertype_and_proto_parse():
-    policy = Policy.parse("allow outgoing 0x88cc\nallow incoming 1.2.3.4:443/47\n")
+    policy = Policy.parse("release outgoing 0x88cc\nrelease incoming 1.2.3.4:443/47\n")
     lldp, gre = policy.grants
     assert lldp.ethertype == 0x88CC
     assert gre.proto == 47
@@ -522,7 +537,7 @@ def test_cli_dry_run_builds_a_recorder(captured_judge, tmp_path):
 
 def test_cli_enforces_an_existing_policy_file(captured_judge, tmp_path):
     path = tmp_path / "cella.policy"
-    path.write_text("allow outgoing 1.2.3.4:443/tcp\n")
+    path.write_text("release outgoing 1.2.3.4:443/tcp\n")
     judge = captured_judge(["--listen", "127.0.0.1:0", "--policy", str(path)])
     assert judge.recorder is None
     assert len(judge.policy.grants) == 1
@@ -566,3 +581,66 @@ async def test_run_serves_until_closed(monkeypatch):
     monkeypatch.setattr(engine_module, "serve", fake_serve)
     monkeypatch.setattr(engine_module, "bound_port", lambda server: 12345)
     await asyncio.wait_for(_run("127.0.0.1", 0, PolicyJudge()), timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Accord 4: membrane memory
+# ---------------------------------------------------------------------------
+
+
+def test_a_windowed_grant_plants_memory_once():
+    policy = Policy.parse(
+        "release outgoing 1.1.1.1:443/tcp (keep_open=5m) (skip_freeze=true)\n"
+    )
+    judge = PolicyJudge(policy=policy)
+    op = _op(ip=(1, 1, 1, 1), port=443, proto=6)
+    first = judge.decide(op)
+    # First park: verdict, then the standing memory for the exact dest.
+    assert len(first) == 2
+    assert first[0].release is not None
+    mem = first[1].membrane_memory
+    assert mem is not None and mem.skip_freeze and mem.keep_open == 300
+    assert mem.destination.port == 443 and first[1].id == b""
+    # Second park to the same dest: verdict only, memory already planted.
+    second = judge.decide(op)
+    assert len(second) == 1 and second[0].release is not None
+
+
+def test_a_wildcard_grant_remembers_each_concrete_destination():
+    policy = Policy.parse(
+        "release outgoing *:443/tcp (keep_open=5m) (skip_freeze=true)\n"
+    )
+    judge = PolicyJudge(policy=policy)
+    a = judge.decide(_op(ip=(104, 20, 23, 154), port=443))
+    b = judge.decide(_op(ip=(1, 1, 1, 1), port=443))
+    # Each concrete IP gets its own exact memory, though the grant is *.
+    assert a[1].membrane_memory.destination.ip == bytes([104, 20, 23, 154])
+    assert b[1].membrane_memory.destination.ip == bytes([1, 1, 1, 1])
+
+
+def test_a_grant_without_a_window_plants_no_memory():
+    policy = Policy.parse("release outgoing 1.1.1.1:443/tcp\n")
+    decisions = PolicyJudge(policy=policy).decide(_op(ip=(1, 1, 1, 1), port=443))
+    assert len(decisions) == 1  # verdict only: the park is the freeze
+
+
+def test_a_windowed_refusal_carries_its_reason_and_no_memory():
+    policy = Policy.parse(
+        'refuse outgoing 8.8.8.8:53/udp (keep_open=1h) (reason="no public dns")\n'
+    )
+    decisions = PolicyJudge(policy=policy).decide(
+        _op(ip=(8, 8, 8, 8), port=53, proto=17)
+    )
+    # A memory only rides a release verdict here; the refusal reason lands.
+    assert decisions[0].refusal.why == "no public dns"
+
+
+def test_the_window_sugar_round_trips():
+    for text, seconds in [("90s", 90), ("5m", 300), ("24h", 86400), ("45", 45)]:
+        g = Policy.parse(f"release outgoing 1.2.3.4:443/tcp (keep_open={text})\n")
+        assert g.grants[0].keep_open == seconds
+    # Render prefers the largest exact unit.
+    rendered = Policy.parse(
+        "release outgoing 1.2.3.4:443/tcp (keep_open=3600)\n"
+    ).render()
+    assert "keep_open=1h" in rendered

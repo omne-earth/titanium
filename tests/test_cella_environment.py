@@ -237,16 +237,19 @@ from titanium.environments.cella.policy import Policy
 def test_line_policies_parse_and_grant_what_they_claim():
     router = Policy.parse(router_policy_text())
     lines = {g.line() for g in router.grants}
-    assert "allow outgoing 1.1.1.1:53/udp" in lines
-    assert "allow outgoing *:443/tcp" in lines
+    # The world side stays live on the outgoing leg (skip_freeze), so
+    # the gateway does not freeze on the API peer's handshake.
+    assert "release outgoing 1.1.1.1:53/udp (keep_open=90s) (skip_freeze=true)" in lines
+    assert "release outgoing *:443/tcp (keep_open=5m) (skip_freeze=true)" in lines
     # The wire side: the task peer reaching the proxy, both ways,
     # wildcard port (an incoming crossing is named by source).
-    assert f"allow incoming {TASK_WIRE_ADDRESS}:*/tcp" in lines
-    assert f"allow outgoing {TASK_WIRE_ADDRESS}:*/tcp" in lines
+    assert any(f"release incoming {TASK_WIRE_ADDRESS}:*/tcp" in line for line in lines)
+    assert any(f"release outgoing {TASK_WIRE_ADDRESS}:*/tcp" in line for line in lines)
     task_side = Policy.parse(line_grants_text())
-    assert f"allow outgoing {ROUTER_WIRE_ADDRESS}:{PROXY_PORT}/tcp" in {
-        g.line() for g in task_side.grants
-    }
+    assert any(
+        f"release outgoing {ROUTER_WIRE_ADDRESS}:{PROXY_PORT}/tcp" in g.line()
+        for g in task_side.grants
+    )
 
 
 def test_router_entries_hold_the_allowlist_and_the_wire():
@@ -311,14 +314,17 @@ def test_the_line_activates_with_a_baked_agent(tmp_path):
 def test_the_composed_task_policy_appends_the_line(tmp_path):
     env = _make_line_env(tmp_path, allow_internet=False)
     (tmp_path / "environment" / "cella.policy").write_text(
-        "allow outgoing 9.9.9.9:53/udp\n"
+        "release outgoing 9.9.9.9:53/udp\n"
     )
     env._work = tmp_path / "work"
     env._work.mkdir()
     composed = Policy.load(env._task_policy_path())
     lines = {g.line() for g in composed.grants}
-    assert "allow outgoing 9.9.9.9:53/udp" in lines
-    assert f"allow outgoing {ROUTER_WIRE_ADDRESS}:{PROXY_PORT}/tcp" in lines
+    assert "release outgoing 9.9.9.9:53/udp" in lines
+    assert any(
+        f"release outgoing {ROUTER_WIRE_ADDRESS}:{PROXY_PORT}/tcp" in line
+        for line in lines
+    )
 
 
 def test_without_a_line_nothing_changes(tmp_path):
