@@ -164,11 +164,23 @@ class Grant:
 
     def memory_for(self, operation: Operation) -> MembraneMemory | None:
         """The standing memory this grant plants for *operation*, or
-        ``None`` when the grant carries no window. Built from the
-        park's own exact Destination -- a wildcard grant still remembers
-        each concrete crossing it matched, and cella's rule that a
-        memory names an exact destination holds."""
-        if self.keep_open <= 0 or operation.destination is None:
+        ``None`` when the grant plants none. Built from the park's own
+        exact Destination -- a wildcard grant still remembers each
+        concrete crossing it matched, and cella's rule that a memory
+        names an exact destination holds.
+
+        An **incoming** grant never plants a memory: an incoming park
+        never freezes (skip_freeze is outgoing only), so its memory
+        would be meaningless -- and worse, cella keys a memory by its
+        destination alone, so an incoming memory (skip_freeze=False)
+        would collide with and suppress the outgoing grant's
+        skip_freeze=True memory for the same destination, defeating the
+        live wait the outgoing leg asked for."""
+        if (
+            self.keep_open <= 0
+            or self.direction == "incoming"
+            or operation.destination is None
+        ):
             return None
         return MembraneMemory(
             destination=operation.destination,
