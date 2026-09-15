@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-cella unit-core unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella smoke-cella-all smoke-cella-rootfs smoke-cella-policy-engine smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-cella unit-core unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella smoke-cella-all smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -265,57 +265,40 @@ smoke-krun-podman: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
 # Cella's own verbs drive it through boot -> freeze -> thaw -> stop -> archive
 # -> destroy with the guest's network disabled.
 #
-# oracle-only, verify tasks alone: the shared tasks need agents and
-# egress the sealed rung does not carry (docs/environments/CELLA.md §9)
-smoke-cella: SMOKE_TASKS =
-smoke-cella: sync .podman .cella $(RUN_TASKS)/$(BACKEND)/smoke-cella
-	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
-	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
-		$(UNIT_CELLA_TESTS) \
-		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
-		--self-contained-html --cov=titanium.environments.cella \
-		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
-	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
-
-smoke-cella-all: smoke-cella-rootfs smoke-cella-policy-engine smoke-cella
-
-# The policy-engine proof, one leg at a time. Both legs run through
-# `titanium run --env cella` with the oracle agent and gate on the task's
-# own offline verifier, exactly like fix-git-offline -- no runner user
-# (cella's jail owns separation), no scripts/smoke driver. The task is
-# staged alone: the shared SMOKE_TASKS need agents and egress this rung
-# does not carry yet.
-#
-# -airgapped: allow_internet=false is the topology --net none. No nic, no
-# judge; the proof is the sealed bake-run-collect loop end to end.
-# -www: allow_internet=true, the judged world nic and cella.policy. Not
-# implemented yet; the sub-target says so and exits 2.
-smoke-cella-policy-engine: smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www
-
-smoke-cella-policy-engine-airgapped: sync .podman .cella
-	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
-	cp -r examples/smoke/cella-policy-engine-airgapped $(RUN_TASKS)/$(BACKEND)/$@/
-	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
-	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
-		$(UNIT_CELLA_TESTS) \
-		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
-		--self-contained-html --cov=titanium.environments.cella \
-		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
-	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+# Every cella probe task, one oracle `titanium run`, one jobs dir. The
+# tasks stay separate -- each is its own topology (airgapped is --net
+# none; www is the judged world nic and cella.policy) -- but they run
+# together and land under .run/jobs/<backend>/smoke-cella, one signal.
+# Oracle-only, no runner user (cella's jail owns separation), gating on
+# each task's own offline verifier like fix-git-offline. The shared
+# SMOKE_TASKS are excluded: they need agents and egress the sealed rung
+# does not carry yet (docs/environments/CELLA.md §9).
+CELLA_SMOKE_TASKS := \
+	examples/smoke/cella-policy-engine-airgapped \
+	examples/smoke/cella-policy-engine-www \
+	examples/smoke/verify-cella-env-airgapped \
+	examples/smoke/verify-cella-env-www
 
 # DRY_RUN=true flips the engine to collection: every crossing releases
-# and lands in the staged task's cella.policy, which is then copied
-# back to the example for review and check-in -- observe once, enforce
-# forever.
+# and each www task's cella.policy is collected, then copied back to
+# the example for review -- observe once, enforce forever.
 DRY_RUN ?= false
-smoke-cella-policy-engine-www: sync .podman .cella
+smoke-cella: sync .podman .cella
 	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
-	cp -r examples/smoke/cella-policy-engine-www $(RUN_TASKS)/$(BACKEND)/$@/
+	cp -r $(CELLA_SMOKE_TASKS) $(RUN_TASKS)/$(BACKEND)/$@/
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		$(UNIT_CELLA_TESTS) \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=titanium.environments.cella \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ \
 		$(if $(filter true,$(DRY_RUN)),TITANIUM_EXTRA_ARGS="--ek dry_run=true",)
-	$(if $(filter true,$(DRY_RUN)),cp $(RUN_TASKS)/$(BACKEND)/$@/cella-policy-engine-www/environment/cella.policy \
-		examples/smoke/cella-policy-engine-www/environment/cella.policy \
-		&& echo "collected cella.policy copied back -- review and commit it",)
+	$(if $(filter true,$(DRY_RUN)),for t in cella-policy-engine-www verify-cella-env-www; do \
+		cp $(RUN_TASKS)/$(BACKEND)/$@/$$t/environment/cella.policy examples/smoke/$$t/environment/cella.policy \
+		&& echo "collected $$t/cella.policy copied back -- review and commit it"; done)
+
+smoke-cella-all: smoke-cella-rootfs smoke-cella
 
 # The smoke needs the lab flavor -- the field flavor writes no console.log,
 # so the guest cannot be observed. .cella-debug builds it from the rev pinned
