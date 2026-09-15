@@ -266,6 +266,14 @@ class CellaEnvironment(BaseEnvironment):
     # ------------------------------------------------------------- verbs
 
     def _cella(self, *args: str, timeout_sec: float | None = 120.0) -> str:
+        # Inherit cella's own environment untouched -- in particular
+        # never set CELLA_THAW_PREFAULT. Its default (deep) re-warms all
+        # guest memory on a thaw, which is what keeps frozen time truly
+        # cryogenic: the guest cannot tell it was frozen. Cheapening the
+        # thaw (ept/off) lazy-faults and lets real time bleed into the
+        # freeze, breaking that guarantee. Latency is answered by
+        # membrane memory (not freezing on hot paths), never by a
+        # weaker thaw.
         command = [cella_bin(), *args]
         completed = subprocess.run(
             command,
