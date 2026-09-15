@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
 
 -include .secrets
 
@@ -213,6 +213,15 @@ smoke-krun-podman: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
 		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
 		--self-contained-html --cov=titanium.environments.krun \
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	$(MAKE) titanium-run TITANIUM_ENV=krun-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+
+# Reproduction smoke: two tasks that deliberately exceed their agent
+# timeout so an AgentTimeoutError is recorded. No unit tests yet -- this
+# is the harness the continue-on-timeout work will be tested against.
+AGENT_TIMEOUT_TASKS ?= examples/tasks/agent-timeout-wedge examples/tasks/agent-timeout-sleep
+
+smoke-on-agent-timeout: SMOKE_TASKS = $(AGENT_TIMEOUT_TASKS)
+smoke-on-agent-timeout: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-on-agent-timeout
 	$(MAKE) titanium-run TITANIUM_ENV=krun-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 # The Cella rootfs acceptance proof. No runner, no agent, no `titanium run`:
