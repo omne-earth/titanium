@@ -1114,11 +1114,19 @@ class CellaEnvironment(BaseEnvironment):
         "manifest.json",
     )
 
+    # The framed-protobuf books cella's ``--dump`` renders to text. The
+    # manifest is already JSON; the disk and transients are not audit
+    # evidence. ``--dump`` keys membrane-memory on its basename, which
+    # the preserved copy keeps.
+    _CHRONICLE_DUMPABLE = ("network/ledger", "verdict", "audit", "membrane-memory")
+
     def _preserve_chronicle(self, name: str) -> None:
         """Copy a still machine's audit files into the trial dir before
-        it is destroyed. Best-effort: a missing file (an airgapped
-        machine has no verdict or memory) is simply skipped, and a copy
-        error never fails the exec that produced a result."""
+        it is destroyed, and render each book to a ``.txt`` beside its
+        raw bytes with ``cella --dump``. Best-effort throughout: a
+        missing file (an airgapped machine has no verdict or memory) is
+        skipped, and neither a copy nor a dump error ever fails the
+        exec that produced a result."""
         machine_dir = self._machine_dir(name)
         out = self.trial_paths.trial_dir / "cella-chronicle" / name
         for relative in self._CHRONICLE_FILES:
@@ -1131,6 +1139,24 @@ class CellaEnvironment(BaseEnvironment):
                 shutil.copyfile(source, destination)
             except OSError as exc:
                 self.logger.warning("cella: could not preserve %s: %s", source, exc)
+                continue
+            if relative in self._CHRONICLE_DUMPABLE:
+                self._dump_chronicle(destination)
+
+    def _dump_chronicle(self, raw: Path) -> None:
+        """Render one preserved book to ``<raw>.txt`` via ``cella --dump``.
+        The dump is cella's authoritative decoder; titanium keeps no
+        codec of its own for this. Best-effort: a decode failure leaves
+        the raw bytes as the record."""
+        try:
+            text = self._cella("--dump", str(raw), timeout_sec=60.0)
+        except (CellaError, subprocess.TimeoutExpired) as exc:
+            self.logger.warning("cella: could not dump %s: %s", raw, exc)
+            return
+        try:
+            raw.with_suffix(raw.suffix + ".txt").write_text(text)
+        except OSError as exc:
+            self.logger.warning("cella: could not write dump for %s: %s", raw, exc)
 
     def _destroy_quietly(self, name: str) -> None:
         for verb in ("stop", "destroy"):
