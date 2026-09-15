@@ -81,6 +81,7 @@ def network_topology(allow_internet: bool) -> NetworkTopology:
 # tar. Nothing reaches into a running guest, nothing is installed after
 # a boot, and no channel outlives a cycle.
 
+import asyncio
 import os
 import re
 import shutil
@@ -286,6 +287,17 @@ class CellaEnvironment(BaseEnvironment):
     # ------------------------------------------------------------- start
 
     async def start(self, force_build: bool) -> None:
+        # The whole cella lifecycle is blocking: podman/krun builds, cella
+        # verbs (subprocess.run), VM boot waits, and sleeps. Run it in a
+        # worker thread so it never holds the asyncio event loop -- the
+        # trial queue runs every trial as a coroutine on one loop, and a
+        # blocking body here would serialize all of them (one cella-env
+        # at a time on an otherwise idle host). Threads release the GIL
+        # across subprocess/IO/sleep, which is exactly what this does, so
+        # the trials genuinely overlap.
+        await asyncio.to_thread(self._start_blocking, force_build)
+
+    def _start_blocking(self, force_build: bool) -> None:
         self.preflight()
         if self._paired and not self._bridge_bin().is_file():
             raise CellaError(
@@ -356,9 +368,14 @@ class CellaEnvironment(BaseEnvironment):
         )
 
     async def upload_file(self, source_path: Path | str, target_path: str) -> None:
-        self._queue_file(Path(source_path), str(PurePosixPath(target_path)))
+        await asyncio.to_thread(
+            self._queue_file, Path(source_path), str(PurePosixPath(target_path))
+        )
 
     async def upload_dir(self, source_dir: Path | str, target_dir: str) -> None:
+        await asyncio.to_thread(self._upload_dir_sync, source_dir, target_dir)
+
+    def _upload_dir_sync(self, source_dir: Path | str, target_dir: str) -> None:
         source = Path(source_dir)
         base = PurePosixPath(target_dir)
         for root, _dirs, files in os.walk(source):
@@ -499,6 +516,7 @@ class CellaEnvironment(BaseEnvironment):
         composed = self._work / "member.policy"
         if not composed.exists():
             composed.write_text(member_policy_text())
+        self._preserve_policy(composed)
         return composed
 
     def _world_hosts(self) -> list[str]:
@@ -527,7 +545,19 @@ class CellaEnvironment(BaseEnvironment):
         assert self._work is not None
         composed = self._work / "appliance.policy"
         composed.write_text(appliance_border_policy_text(self._world_hosts()))
+        self._preserve_policy(composed)
         return composed
+
+    def _preserve_policy(self, composed: Path) -> None:
+        """Copy a composed border policy into the trial's evidence, so
+        what the engine actually enforced survives the work directory's
+        cleanup and sits beside the chronicle it decided. The task's own
+        cella.policy is its reviewable source and stays in place; these
+        are the harness-composed borders (member wire grants, appliance
+        world leg) that the run computed."""
+        kept = self.trial_paths.trial_dir / "cella-policy"
+        kept.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(composed, kept / composed.name)
 
     def _ensure_engine(self, key: str, policy_path: Path, dry_run: bool) -> int:
         """Start one policy engine per judged machine kind; return its
@@ -996,6 +1026,21 @@ class CellaEnvironment(BaseEnvironment):
         timeout_sec: int | None = None,
         user: str | int | None = None,
     ) -> ExecResult:
+        # Off the event loop: one exec is a whole VM boot/run/collect
+        # cycle of blocking cella verbs, sleeps, and krun disk reads.
+        # See _start_blocking on why this must not block the loop.
+        return await asyncio.to_thread(
+            self._exec_blocking, command, cwd, env, timeout_sec, user
+        )
+
+    def _exec_blocking(
+        self,
+        command: str,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout_sec: int | None,
+        user: str | int | None,
+    ) -> ExecResult:
         if self._base_tar is None:
             raise CellaError("exec before start: the environment is not running")
         job_entries = self._job_files(command, cwd, env, user)
@@ -1152,7 +1197,7 @@ class CellaEnvironment(BaseEnvironment):
         return tarfile.open(self._base_tar, "r:")
 
     async def download_file(self, source_path: str, target_path: Path | str) -> None:
-        self._download_file_sync(source_path, target_path)
+        await asyncio.to_thread(self._download_file_sync, source_path, target_path)
 
     def _download_file_sync(self, source_path: str, target_path: Path | str) -> None:
         if self._state_img is not None:
@@ -1175,7 +1220,7 @@ class CellaEnvironment(BaseEnvironment):
                 shutil.copyfileobj(handle, sink)
 
     async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
-        self._download_dir_sync(source_dir, target_dir)
+        await asyncio.to_thread(self._download_dir_sync, source_dir, target_dir)
 
     def _image_file_read(self, source_path: str, target: Path) -> None:
         assert self._work is not None and self._state_img is not None
@@ -1261,6 +1306,11 @@ class CellaEnvironment(BaseEnvironment):
     # -------------------------------------------------------------- stop
 
     async def stop(self, delete: bool) -> None:
+        # Off the event loop: teardown thaws/destroys machines (blocking
+        # cella verbs) and preserves the chronicle. See _start_blocking.
+        await asyncio.to_thread(self._stop_blocking, delete)
+
+    def _stop_blocking(self, delete: bool) -> None:
         self._stop_terminator()
         self._stop_engines()
         if self._machine is not None:
