@@ -624,14 +624,39 @@ def test_a_grant_without_a_window_plants_no_memory():
     assert len(decisions) == 1  # verdict only: the park is the freeze
 
 
-def test_a_windowed_refusal_carries_its_reason_and_no_memory():
+def test_a_standing_refusal_plants_a_skip_freeze_memory_once():
+    # The negative-probe pattern (cella docs MEMBRANE-MEMORY.md): a
+    # refuse line carrying skip_freeze plants a standing refusal, so
+    # every SYN retransmit to the refused destination lapses live
+    # instead of paying a full deep re-warm per park.
     policy = Policy.parse(
-        'refuse outgoing 8.8.8.8:53/udp (keep_open=1h) (reason="no public dns")\n'
+        "refuse outgoing 8.8.8.8:443/tcp "
+        '(keep_open=24h) (skip_freeze=true) (reason="ungranted")\n'
+    )
+    judge = PolicyJudge(policy=policy)
+    op = _op(ip=(8, 8, 8, 8), port=443, proto=6)
+    first = judge.decide(op)
+    # First park: the refusal verdict, then the standing memory.
+    assert len(first) == 2
+    assert first[0].refusal is not None and first[0].refusal.why == "ungranted"
+    mem = first[1].membrane_memory
+    assert mem is not None and mem.skip_freeze and mem.keep_open == 86400
+    assert mem.destination.port == 443 and first[1].id == b""
+    # Second park to the same dest: verdict only, memory already planted.
+    second = judge.decide(op)
+    assert len(second) == 1 and second[0].refusal is not None
+
+
+def test_a_bare_refusal_is_deliberately_costly():
+    # No window on the refuse line: no standing memory, so the park is
+    # the freeze -- the deliberately costly refusal cella documents.
+    policy = Policy.parse(
+        'refuse outgoing 8.8.8.8:53/udp (reason="no public dns")\n'
     )
     decisions = PolicyJudge(policy=policy).decide(
         _op(ip=(8, 8, 8, 8), port=53, proto=17)
     )
-    # A memory only rides a release verdict here; the refusal reason lands.
+    assert len(decisions) == 1
     assert decisions[0].refusal.why == "no public dns"
 
 

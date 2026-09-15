@@ -13,3 +13,11 @@ release outgoing arp (keep_open=24h) (skip_freeze=true)
 release incoming arp (keep_open=24h)
 release outgoing 1.1.1.1:443/tcp (keep_open=5m) (skip_freeze=true)
 release incoming 1.1.1.1:443/tcp (keep_open=5m)
+# The verifier probes an ungranted destination and asserts it stays
+# refused. A negative probe MUST ride a standing refusal: skip_freeze on
+# the refuse line answers every retransmit live, so the guest pays one
+# freeze and no more, instead of a full deep re-warm per SYN retransmit
+# (cella docs MEMBRANE-MEMORY.md -- "a policy that probes negatives MUST
+# use the standing refusal"). A bare refusal is legal but deliberately
+# costly; a probed negative is exactly where the window earns its keep.
+refuse outgoing 8.8.8.8:443/tcp (keep_open=24h) (skip_freeze=true) (reason="ungranted, probed by the verifier")
