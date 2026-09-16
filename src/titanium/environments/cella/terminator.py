@@ -252,6 +252,6 @@ def appliance_border_policy_text(world_hosts: list[str]) -> str:
     if world_hosts:
         lines.append("# The allowed world hosts, by name.\n")
         for host in world_hosts:
-            lines.append(_round_trip(f"{host}:443", "tcp", "5m"))
-            lines.append(_round_trip(f"{host}:80", "tcp", "5m"))
+            lines.append(_round_trip(f"{host}:443", "tcp", "60m"))
+            lines.append(_round_trip(f"{host}:80", "tcp", "60m"))
     return "".join(lines)
