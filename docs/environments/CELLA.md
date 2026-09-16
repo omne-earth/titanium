@@ -577,6 +577,28 @@ The wire itself does not wait. Titanium pre-plants the memory for ARP
 and the appliance ports before the first crossing (§3.2). So the wire
 comes up at once. You do not tune this.
 
+### G.10 Keep a machine for forensics
+
+By default titanium destroys each machine when it ends. The evidence is
+already copied out (G.7), so the machine is not needed.
+
+To keep a machine instead, pass `on_completion=archive`.
+```bash
+titanium run --env cella --ek on_completion=archive --path <task> ...
+```
+`archive` stops each machine and keeps it as a cella artifact, not a
+deleted machine. You can thaw it or inspect it later.
+```bash
+cella list                    # find the archived machine
+cella thaw <machine>          # resume the frozen instant
+```
+Use this to hold a run for a human to inspect — for example, an agent
+that reached an ungranted name. The default, `teardown`, deletes the
+machine.
+
+`archive` keeps `disk.img` and `ram.img` per machine (gigabytes each).
+Use it for a targeted run, not a routine smoke.
+
 ## 9. Limitations and future work
 
 * **One vCPU.** Every cella machine runs a single vCPU. The
