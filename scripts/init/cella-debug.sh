@@ -54,6 +54,13 @@ LAB="$SRC/target/lab/cella"
   echo "build-lab did not produce $LAB" >&2
   exit 1
 }
-"$LAB" doctor check 2>/dev/null | grep -E 'flavor:.*the lab' \
+# Read the flavor from `doctor check`, but do not let its overall exit
+# decide this: `doctor check` reports every gate and returns non-zero when
+# any is unmet -- rootfs goldens titanium never builds are missing on a
+# fresh host -- while still printing the flavor line. Capture the output
+# (tolerating that exit), then judge the flavor line alone. Under
+# `pipefail` a bare pipe would conflate a red gate with a wrong flavor.
+lab_report="$("$LAB" doctor check 2>/dev/null || true)"
+printf '%s\n' "$lab_report" | grep -qE 'flavor:.*the lab' \
   || { echo "$LAB does not report the lab flavor" >&2; exit 1; }
 echo "cella lab flavor ready: $LAB ($CELLA_GIT_REV)"
