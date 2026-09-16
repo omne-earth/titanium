@@ -357,6 +357,11 @@ smoke-cella: sync .podman .cella | .sentinel/tasks
 	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
 	cp -r $(CELLA_BENCH_TASKS) $(RUN_TASKS)/$(BACKEND)/$@/
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		$(UNIT_CELLA_TESTS) \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=titanium.environments.cella \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ \
 		$(if $(filter true,$(DRY_RUN)),TITANIUM_EXTRA_ARGS="--ek dry_run=true",)
 	$(if $(filter true,$(DRY_RUN)),cp $(RUN_TASKS)/$(BACKEND)/$@/build-pmars/environment/cella.policy \
