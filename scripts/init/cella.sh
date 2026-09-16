@@ -128,7 +128,11 @@ fi
 # Present-and-verifying means done, like the kernel golden.
 if [[ ! -f "$HOME/.cella/rootfs/terminator/rootfs.ext4" ]]; then
   echo "building the terminator golden (mints this host's pair CA)"
-  "$CELLA" build rootfs terminator
+  # The golden compiles a static cella-terminator from source, and
+  # cella-build reads its source from the current directory, so this
+  # runs from the checkout -- exactly as the install and bridge builds
+  # above do.
+  ( cd "$SRC" && "$CELLA" build rootfs terminator )
 fi
 [[ -f "$HOME/.cella/rootfs/terminator/ca.pem" ]] || {
   echo "cella build rootfs terminator did not export the pair ca.pem" >&2
