@@ -243,6 +243,9 @@ class CellaEnvironment(BaseEnvironment):
         self._pending: list[BootEntry] = []
         self._pending_paths: set[str] = set()
         self._cycle = 0
+        # Set once the verifier phase begins (begin_verification), so the
+        # verifier's per-command machines are named apart from the agent's.
+        self._verifying = False
         self._image_config: dict = {}
         self._machine: str | None = None
 
@@ -849,9 +852,17 @@ class CellaEnvironment(BaseEnvironment):
             shutil.rmtree(flavor_dir, ignore_errors=True)
         self._appliance = None
 
+    async def begin_verification(self) -> None:
+        """The verifier phase is starting: name every machine from here on
+        with a ``-verifier`` suffix, so its cycles (and their chronicle and
+        engine logs) read apart from the agent's."""
+        self._verifying = True
+
     def _publish_cycle_flavor(self, boot_layer: BootLayer) -> str:
         assert self._work is not None
         flavor = _flavor_name(self.session_id, self._cycle)
+        if self._verifying:
+            flavor = f"{flavor}-verifier"
         size_bytes = (self._effective_storage_mb or 5120) * (1 << 20)
         with staging_flavor_dir(home=None) as staging:
             artifact = staging / ROOTFS_ARTIFACT_NAME

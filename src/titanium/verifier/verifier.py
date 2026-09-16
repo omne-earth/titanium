@@ -133,6 +133,7 @@ class Verifier:
         Returns:
             (VerifierResult): The result of the verifier.
         """
+        await self._environment.begin_verification()
         env_paths = self._environment.env_paths
         task_os = self._task.config.environment.os
         test_source_dirs, tests_source_dir, host_test_path = self._resolve_tests()
