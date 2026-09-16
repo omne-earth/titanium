@@ -361,6 +361,9 @@ smoke-cella: sync .podman .cella | .sentinel/tasks
 	$(LOG)
 	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
 	cp -r $(CELLA_BENCH_TASKS) $(RUN_TASKS)/$(BACKEND)/$@/
+	# build-pmars is a full compile on a boot-per-command rung: double its
+	# staged run and verifier timeouts (900s -> 1800s) so the build fits.
+	sed -i 's/^timeout_sec = 900\.0/timeout_sec = 1800.0/' $(RUN_TASKS)/$(BACKEND)/$@/build-pmars/task.toml
 	mkdir -p $(RUN_TASKS)/$(BACKEND)/$@/build-pmars/environment
 	$(if $(filter true,$(DRY_RUN)),,cp examples/smoke/policies/build-pmars/cella.policy \
 		$(RUN_TASKS)/$(BACKEND)/$@/build-pmars/environment/cella.policy)
