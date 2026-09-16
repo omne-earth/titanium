@@ -4,5 +4,5 @@
 # reviewed: only the world name is kept -- the appliance's own infra
 # (upstream DNS, the reply window, ARP) is composed by titanium, not
 # declared here. The window keeps the flow live instead of freezing.
-release outgoing deb.debian.org:80/tcp (keep_open=5m) (skip_freeze=true)
+release outgoing deb.debian.org:80/tcp (keep_open=60m) (skip_freeze=true)
 release incoming deb.debian.org:80/tcp
