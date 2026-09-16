@@ -40,15 +40,13 @@ RESOLVER_ATTEMPTS = 3
 
 # --- Timeouts and margins (seconds) ------------------------------------
 
-# One exec is a whole VM boot/run/collect cycle. This is the default budget
-# for the guest to produce a result; a caller may override it. It is high
-# because a single cella exec can be an entire agent run or a full build:
-# the agent framework runs the agent command with no per-exec timeout (it
-# bounds the whole run with an outer asyncio wait_for at the task's
-# [agent] timeout_sec), so cella's own default must not undercut that outer
-# bound, or the exec is cut off before the task's declared budget. Matched
-# to the bench tasks' 1800s agent/verifier timeouts.
-EXEC_TIMEOUT_SEC = 1800.0
+# The last-resort per-exec ceiling, used ONLY when the task declares no
+# timeout for the phase. The canonical budget is the task's own
+# `[agent]`/`[verifier] timeout_sec` (plumbed to the environment and chosen
+# by phase); this is the safety net for when that is absent, so a hung VM --
+# whose exec cannot be cancelled from outside -- is still bounded rather than
+# leaking a live machine and a thread forever. Not the normal path.
+CELLA_EXEC_TIMEOUT = 1800.0
 
 # Added on top of the exec budget for the boot, the freeze/thaw cycles, and
 # the collect, before the harness gives up on a machine.

@@ -157,8 +157,6 @@ _RUNNER_DIR = "/titanium"
 # How long past the exec timeout the guest gets to boot and halt.
 _BOOT_MARGIN_SEC = config.BOOT_MARGIN_SEC
 
-_DEFAULT_EXEC_TIMEOUT_SEC = config.EXEC_TIMEOUT_SEC
-
 
 class CellaError(RuntimeError):
     """A cella verb or an evidence read failed."""
@@ -1212,7 +1210,16 @@ class CellaEnvironment(BaseEnvironment):
                     name, self._member_policy_path(), dry_run=False
                 )
                 bridge = self._spawn_bridge(name, port)
-            budget = (timeout_sec or _DEFAULT_EXEC_TIMEOUT_SEC) + _BOOT_MARGIN_SEC
+            # Canonical budget: the task's own declared timeout for this
+            # phase (verifier once begin_verification has fired, else the
+            # agent). A caller-supplied timeout wins; the config ceiling is
+            # only the last resort when the task declared neither.
+            phase_timeout = (
+                self.verifier_timeout_sec if self._verifying else self.agent_timeout_sec
+            )
+            budget = (
+                timeout_sec or phase_timeout or config.CELLA_EXEC_TIMEOUT
+            ) + _BOOT_MARGIN_SEC
             self._wait_for_result(name, time.monotonic() + budget)
             try:
                 self._cella("stop", name)
