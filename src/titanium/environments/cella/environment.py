@@ -82,11 +82,11 @@ def network_topology(allow_internet: bool) -> NetworkTopology:
 # a boot, and no channel outlives a cycle.
 
 import asyncio
+import logging
 import os
 import re
 import shutil
 import subprocess
-import sys
 import tarfile
 import tempfile
 import threading
@@ -108,6 +108,7 @@ from titanium.environments.cella.buildfile import (
     discover_build_file,
     prepare_build_context,
 )
+from titanium.environments.cella.engine import bound_port, build_judge, serve
 from titanium.environments.cella.flavor import (
     ROOTFS_ARTIFACT_NAME,
     cella_home,
@@ -193,7 +194,12 @@ class CellaEnvironment(BaseEnvironment):
         # --ek values arrive as strings; anything but an explicit yes
         # is enforce mode.
         self._dry_run = str(dry_run).lower() in ("true", "1", "yes")
-        self._engines: dict[str, tuple[subprocess.Popen, int]] = {}
+        # Each engine is an in-process grpclib server (no subprocess):
+        # {vm-id: (server, port)}, all hosted on one background asyncio
+        # loop thread so they never block the harness's event loop.
+        self._engines: dict[str, tuple] = {}
+        self._engine_loop: asyncio.AbstractEventLoop | None = None
+        self._engine_loop_thread: threading.Thread | None = None
         self._work: Path | None = None
         # The terminated pair (terminator.py) stands when the workload
         # needs the world at all: an agent always needs its inference
@@ -577,71 +583,94 @@ class CellaEnvironment(BaseEnvironment):
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
-    def _ensure_engine(self, key: str, policy_path: Path, dry_run: bool) -> int:
-        """Start one policy engine for the machine named *key*; return
-        its port. Keyed by the machine (vm id): the member's engine is a
-        fresh one per exec cycle, the appliance's a stable one for the
-        trial, and each logs under cella-engine/<vm-id>/.
-        """
-        running = self._engines.get(key)
-        if running is not None and running[0].poll() is None:
-            return running[1]
-        import socket as socket_module
+    def _ensure_engine_loop(self) -> asyncio.AbstractEventLoop:
+        """The one background asyncio loop that hosts every in-process
+        engine server for this environment, started on first use. The
+        harness drives cella from a worker thread (`_exec_blocking`), so
+        the engines get their own loop rather than borrow that thread."""
+        if self._engine_loop is None:
+            self._engine_loop = asyncio.new_event_loop()
+            # grpclib logs each bridge disconnect at INFO; Decide already
+            # reports it in cella's words, so quiet grpclib's version.
+            logging.getLogger("grpclib.server").setLevel(logging.WARNING)
+            self._engine_loop_thread = threading.Thread(
+                target=self._engine_loop.run_forever, daemon=True
+            )
+            self._engine_loop_thread.start()
+        return self._engine_loop
 
-        with socket_module.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-        arguments = [
-            sys.executable,
-            "-m",
-            "titanium.environments.cella.engine",
-            "--listen",
-            f"127.0.0.1:{port}",
-            "--policy",
-            str(policy_path),
-        ]
-        if dry_run:
-            arguments.append("--dry-run")
-        log = (self._engine_dir(key) / "engine.log").open("ab")
-        process = subprocess.Popen(
-            arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=log
-        )
-        log.close()
-        # The bridge dials once and dies on a refused connection, so
-        # the engine must be listening before the bridge exists.
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            try:
-                with socket_module.create_connection(("127.0.0.1", port), timeout=1):
-                    break
-            except OSError:
-                time.sleep(0.2)
-        else:
-            raise CellaError("the policy engine did not start listening in time")
-        self._engines[key] = (process, port)
+    def _engine_logger(self, key: str) -> logging.Logger:
+        """A per-machine logger writing to cella-engine/<vm-id>/engine.log
+        -- one file per machine, so the task's crossings stay separate
+        from the verifier's."""
+        engine_logger = logging.getLogger(f"titanium.cella.engine.{key}")
+        engine_logger.setLevel(logging.INFO)
+        engine_logger.propagate = False
+        if not engine_logger.handlers:
+            handler = logging.FileHandler(self._engine_dir(key) / "engine.log")
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            engine_logger.addHandler(handler)
+        return engine_logger
+
+    def _ensure_engine(self, key: str, policy_path: Path, dry_run: bool) -> int:
+        """Start one in-process policy engine for the machine named
+        *key*; return its port. Keyed by the machine (vm id): the
+        member's engine is a fresh one per exec cycle, the appliance's a
+        stable one for the trial, and each logs under
+        cella-engine/<vm-id>/. No subprocess, no spawn, no readiness
+        poll -- serve() returns only once listening."""
+        running = self._engines.get(key)
+        if running is not None:
+            return running[1]
+        judge = build_judge(policy_path, dry_run)
+        engine_logger = self._engine_logger(key)
+        loop = self._ensure_engine_loop()
+        server = asyncio.run_coroutine_threadsafe(
+            serve(judge, "127.0.0.1", 0, engine_logger=engine_logger), loop
+        ).result(timeout=15)
+        port = bound_port(server)
+        self._engines[key] = (server, port)
         return port
 
+    def _close_server(self, server) -> None:
+        async def _close() -> None:
+            server.close()
+            await server.wait_closed()
+
+        if self._engine_loop is not None:
+            # Best-effort teardown: the close can time out, and the loop
+            # may already be stopping. Either way the daemon loop thread
+            # dies with the process, so a failure here is not fatal.
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _close(), self._engine_loop
+                ).result(timeout=10)
+            except (TimeoutError, OSError, RuntimeError) as exc:
+                self.logger.debug("cella: engine server close failed: %s", exc)
+
     def _kill_engine(self, key: str) -> None:
-        """Stop one machine's engine and forget it -- called when that
-        machine is torn down at the end of its exec cycle."""
+        """Close one machine's engine server and forget it -- called when
+        that machine is torn down at the end of its exec cycle."""
         running = self._engines.pop(key, None)
         if running is None:
             return
-        process, _port = running
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        self._close_server(running[0])
+        engine_logger = logging.getLogger(f"titanium.cella.engine.{key}")
+        for handler in list(engine_logger.handlers):
+            handler.close()
+            engine_logger.removeHandler(handler)
 
     def _stop_engines(self) -> None:
-        for process, _port in self._engines.values():
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
+        for key in list(self._engines):
+            self._kill_engine(key)
         self._engines = {}
+        if self._engine_loop is not None:
+            self._engine_loop.call_soon_threadsafe(self._engine_loop.stop)
+            if self._engine_loop_thread is not None:
+                self._engine_loop_thread.join(timeout=5)
+            self._engine_loop.close()
+            self._engine_loop = None
+            self._engine_loop_thread = None
 
     def _spawn_bridge(self, name: str, port: int) -> subprocess.Popen:
         log = (self._engine_dir(name) / "bridge.log").open("ab")

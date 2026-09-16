@@ -200,8 +200,13 @@ class PolicyJudge:
 class EngineService:
     """The cella.Engine service: Events in, Decisions out, one stream."""
 
-    def __init__(self, policy: PolicyJudge) -> None:
+    def __init__(
+        self, policy: PolicyJudge, engine_logger: logging.Logger | None = None
+    ) -> None:
         self._policy = policy
+        # A per-machine logger when run in-process (one log file per vm),
+        # the module logger when run standalone.
+        self._logger = engine_logger or logger
 
     def __mapping__(self) -> dict[str, Handler]:
         return {
@@ -232,7 +237,7 @@ class EngineService:
         try:
             for decision in self._policy.standing_decisions():
                 memory = decision.membrane_memory
-                logger.info(
+                self._logger.info(
                     "cella engine: pre-plant ip=%s port=%d ethertype=0x%04x keep_open=%d",
                     ".".join(str(b) for b in memory.destination.ip),
                     memory.destination.port,
@@ -244,12 +249,12 @@ class EngineService:
                 operation = event.parked
                 if operation is None:
                     # Completions and looks are evidence, not questions.
-                    logger.debug("cella engine: event (not a park)")
+                    self._logger.debug("cella engine: event (not a park)")
                     continue
                 destination = operation.destination
                 for decision in self._policy.decide(operation):
                     if decision.membrane_memory is not None:
-                        logger.info(
+                        self._logger.info(
                             "cella engine: remember ip=%s port=%d skip_freeze=%s keep_open=%d",
                             ".".join(
                                 str(b) for b in (destination.ip if destination else b"")
@@ -259,7 +264,7 @@ class EngineService:
                             decision.membrane_memory.keep_open,
                         )
                     else:
-                        logger.info(
+                        self._logger.info(
                             "cella engine: %s id=%s host=%r ip=%s port=%d direction=%d",
                             "release" if decision.release is not None else "refuse",
                             operation.id.hex(),
@@ -278,7 +283,7 @@ class EngineService:
             # and the next cycle's bridge reconnects. Say so plainly
             # instead of grpclib's bare "Request was cancelled: Connection
             # lost" (its own logger is quieted in main()).
-            logger.info(
+            self._logger.info(
                 "cella engine: bridge closed (%s) -- cycle ended, awaiting reconnect",
                 type(exc).__name__,
             )
@@ -286,16 +291,36 @@ class EngineService:
                 raise  # cancellation must propagate
 
 
-async def serve(policy: PolicyJudge, host: str = "127.0.0.1", port: int = 0) -> Server:
+async def serve(
+    policy: PolicyJudge,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    engine_logger: logging.Logger | None = None,
+) -> Server:
     """Start the engine listening on *host*:*port*; return the server.
 
     Port 0 binds an ephemeral port; read it back with
-    :func:`bound_port`. The caller owns shutdown: ``server.close()``
-    then ``await server.wait_closed()``.
+    :func:`bound_port`. ``engine_logger`` routes this engine's lines to
+    a per-machine file when embedded in-process. The caller owns
+    shutdown: ``server.close()`` then ``await server.wait_closed()``.
     """
-    server = Server([EngineService(policy)])
+    server = Server([EngineService(policy, engine_logger)])
     await server.start(host, port)
     return server
+
+
+def build_judge(policy_path: Path | None, dry_run: bool) -> PolicyJudge:
+    """Build the judge titanium serves in-process: a recorder in
+    dry-run, otherwise the enforcing policy (a missing file fails
+    closed, refusing every crossing)."""
+    if dry_run:
+        if policy_path is None:
+            raise ValueError("dry-run needs a policy path to collect into")
+        return PolicyJudge(recorder=PolicyRecorder(policy_path))
+    policy = None
+    if policy_path is not None and policy_path.exists():
+        policy = Policy.load(policy_path)
+    return PolicyJudge(policy=policy)
 
 
 def bound_port(server: Server) -> int:
