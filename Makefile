@@ -52,6 +52,9 @@ TITANIUM_JOBS_DIR ?= $(RUN_DIR)/jobs
 TITANIUM_ENV ?= gvisor-podman
 TITANIUM_TASK ?= $(TASKS_DEFAULT)
 TITANIUM_N ?= 1
+# Exported so a target-specific value (e.g. smoke-cella's N=2) reaches the
+# titanium-run sub-make; without export a per-target N stays local.
+export TITANIUM_N
 # Trial execution runs as the dedicated runner user whenever that user has
 # been provisioned (scripts/init/titanium.sh) — secure by default, opt-out
 # with RUNNER= (empty). Unprovisioned hosts run as the invoking user.
@@ -318,6 +321,8 @@ CELLA_SMOKE_TASKS := \
 # and each www task's cella.policy is collected, then copied back to
 # the example for review -- observe once, enforce forever.
 DRY_RUN ?= false
+# N matches the task count so every probe runs concurrently (four tasks).
+smoke-cella-integration: TITANIUM_N = 4
 smoke-cella-integration: sync .podman .cella
 	$(LOG)
 	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
@@ -346,6 +351,8 @@ smoke-cella-all: smoke-cella-rootfs smoke-cella-integration
 # re-collects build-pmars's policy and copies it back for review (§3.1).
 CELLA_BENCH_TASKS := examples/smoke/fix-git-offline $(TASKS_PATH_TB2)/build-pmars
 
+# N matches the task count so both bench tasks run concurrently (two tasks).
+smoke-cella: TITANIUM_N = 2
 smoke-cella: sync .podman .cella | .sentinel/tasks
 	$(LOG)
 	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
