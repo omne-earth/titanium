@@ -188,12 +188,26 @@ class CellaEnvironment(BaseEnvironment):
     its resolved name lands in the task's ``cella.policy`` as a grant.
     """
 
-    def __init__(self, *args, dry_run: bool | str = False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        dry_run: bool | str = False,
+        on_completion: str = "teardown",
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._topology = network_topology(self.task_env_config.allow_internet)
         # --ek values arrive as strings; anything but an explicit yes
         # is enforce mode.
         self._dry_run = str(dry_run).lower() in ("true", "1", "yes")
+        # What to do with a machine when its life ends. `teardown` (the
+        # absent default) destroys it. `archive` keeps it as a cella
+        # artifact (`cella archive`), resumable and inspectable later --
+        # the forensic path for a run you want to hold. Anything but an
+        # explicit `archive` is teardown.
+        self._on_completion = (
+            "archive" if str(on_completion).lower() == "archive" else "teardown"
+        )
         # Each engine is an in-process grpclib server (no subprocess):
         # {vm-id: (server, port)}, all hosted on one background asyncio
         # loop thread so they never block the harness's event loop.
@@ -827,7 +841,7 @@ class CellaEnvironment(BaseEnvironment):
         # made, granted and refused, judged by name.
         self._preserve_chronicle(self._term)
         self._preserve_edge_log(self._term)
-        self._destroy_quietly(self._term)
+        self._retire_machine(self._term)
         flavor_dir = rootfs_flavor_dir(self._term)
         if flavor_dir.exists():
             shutil.rmtree(flavor_dir, ignore_errors=True)
@@ -1209,7 +1223,7 @@ class CellaEnvironment(BaseEnvironment):
             self._kill_engine(name)
             self._preserve_chronicle(name)
             self._preserve_edge_log(name)
-            self._destroy_quietly(name)
+            self._retire_machine(name)
             self._machine = None
             flavor_dir = rootfs_flavor_dir(flavor)
             if flavor_dir.exists():
@@ -1295,6 +1309,21 @@ class CellaEnvironment(BaseEnvironment):
 
     def _destroy_quietly(self, name: str) -> None:
         for verb in ("stop", "destroy"):
+            try:
+                self._cella(verb, name)
+            except (CellaError, subprocess.TimeoutExpired):
+                pass
+
+    def _retire_machine(self, name: str) -> None:
+        """End a machine's life at teardown. `teardown` (the default)
+        destroys it. `archive` stops it and keeps it as a cella artifact
+        (`cella archive`), so it can be thawed or inspected later. The
+        evidence is already copied out either way (the chronicle); this
+        only decides whether the machine itself survives."""
+        if self._on_completion != "archive":
+            self._destroy_quietly(name)
+            return
+        for verb in ("stop", "archive"):
             try:
                 self._cella(verb, name)
             except (CellaError, subprocess.TimeoutExpired):
@@ -1433,7 +1462,7 @@ class CellaEnvironment(BaseEnvironment):
             self._stop_terminator()
             self._stop_engines()
             if self._machine is not None:
-                self._destroy_quietly(self._machine)
+                self._retire_machine(self._machine)
                 self._machine = None
             if delete and self._work is not None:
                 shutil.rmtree(self._work, ignore_errors=True)

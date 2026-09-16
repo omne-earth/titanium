@@ -422,3 +422,39 @@ def test_appliance_border_parses_with_no_hosts():
     # border is just DNS, ARP, and the reply window. Must parse.
     policy = Policy.parse(term.appliance_border_policy_text([]))
     assert not any(g.host for g in policy.grants)
+
+
+def _make_env_with(tmp_path, **kw):
+    ed = tmp_path / "environment"
+    ed.mkdir(exist_ok=True)
+    (ed / "Dockerfile").write_text("FROM debian:12-slim\n")
+    tp = TrialPaths(trial_dir=tmp_path / "trial")
+    tp.mkdir()
+    return CellaEnvironment(
+        environment_dir=ed,
+        environment_name="cella-task",
+        session_id="cella-task__abc",
+        trial_paths=tp,
+        task_env_config=TaskEnvironmentConfig(allow_internet=False),
+        **kw,
+    )
+
+
+def test_on_completion_parses_teardown_and_archive(tmp_path):
+    # The absent default is teardown; only an explicit `archive` archives.
+    assert _make_env_with(tmp_path)._on_completion == "teardown"
+    assert _make_env_with(tmp_path, on_completion="archive")._on_completion == "archive"
+    assert _make_env_with(tmp_path, on_completion="ARCHIVE")._on_completion == "archive"
+    assert _make_env_with(tmp_path, on_completion="nonsense")._on_completion == "teardown"
+
+
+def test_retire_machine_destroys_by_default_and_archives_on_flag(tmp_path):
+    env = _make_env_with(tmp_path)
+    verbs = []
+    env._cella = lambda *a, **k: verbs.append(a[0])
+    env._retire_machine("m")
+    assert verbs == ["stop", "destroy"]  # teardown: the machine is deleted
+    env._on_completion = "archive"
+    verbs.clear()
+    env._retire_machine("m")
+    assert verbs == ["stop", "archive"]  # archive: the machine is kept as an artifact
