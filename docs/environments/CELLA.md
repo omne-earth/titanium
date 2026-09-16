@@ -666,3 +666,37 @@ decision, never on its own plumbing. This applies to every cella task.
 The rule does **not** extend to the appliance's *world-host* windows.
 Those gate real world egress and real re-judgment, so they stay a
 deliberate, shorter knob -- a different border, a different rule.
+
+### The exec budget comes from the task, not a constant
+
+A cella exec is a whole VM boot, run, and collect cycle. Because the
+guest command runs on a background thread that cannot be cancelled from
+outside, cella must bound each exec itself; the outer timeout the harness
+applies at the trial layer cannot stop a guest that has already begun.
+The bound is therefore taken from the task's own declaration, not from a
+figure fixed in cella.
+
+The per-exec budget resolves in the following order, and the first value
+that is set is used:
+
+1. An explicit `timeout_sec` passed to the exec. This is a per-call
+   override and is normally absent, since the harness bounds the agent
+   and verifier at the trial layer rather than per command.
+2. The task's declared timeout for the current phase: `[verifier]
+   timeout_sec` once verification has begun (see `begin_verification`),
+   and `[agent] timeout_sec` otherwise. This value is read from
+   `task.toml`, resolved with any multiplier, and passed to the
+   environment. It is the canonical source.
+3. `CELLA_EXEC_TIMEOUT` (`config.py`). A last-resort ceiling, used only
+   when a task declares no timeout for the phase. It exists so that a
+   hung guest is still bounded, rather than leaking a live machine and a
+   thread; it is not the normal path.
+
+The chosen value is then extended by a fixed boot margin, which covers
+the guest's boot and halt around the command itself.
+
+The intent is that a task states its own time budget and cella honours
+it. A task that needs longer raises its `[agent]`/`[verifier]
+timeout_sec`; nothing in cella needs to change. The constant is the
+floor beneath tasks that state nothing, never the figure a task is held
+to.
