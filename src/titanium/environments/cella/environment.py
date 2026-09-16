@@ -568,11 +568,20 @@ class CellaEnvironment(BaseEnvironment):
         kept.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(composed, kept / composed.name)
 
+    def _engine_dir(self, vm_id: str) -> Path:
+        """The per-machine log directory: cella-engine/<vm-id>/ holds
+        that one machine's engine and bridge logs, so a cycle's crossings
+        (the task) stay separate from the next cycle's (the verifier),
+        each named by the machine that made them."""
+        directory = self.trial_paths.trial_dir / "cella-engine" / vm_id
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
     def _ensure_engine(self, key: str, policy_path: Path, dry_run: bool) -> int:
-        """Start one policy engine per judged machine kind; return its
-        port. Keyed because the task's and the router's membranes serve
-        different policies. Each log lands in the trial directory as
-        evidence.
+        """Start one policy engine for the machine named *key*; return
+        its port. Keyed by the machine (vm id): the member's engine is a
+        fresh one per exec cycle, the appliance's a stable one for the
+        trial, and each logs under cella-engine/<vm-id>/.
         """
         running = self._engines.get(key)
         if running is not None and running[0].poll() is None:
@@ -593,7 +602,7 @@ class CellaEnvironment(BaseEnvironment):
         ]
         if dry_run:
             arguments.append("--dry-run")
-        log = (self.trial_paths.trial_dir / f"cella-engine-{key}.log").open("ab")
+        log = (self._engine_dir(key) / "engine.log").open("ab")
         process = subprocess.Popen(
             arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=log
         )
@@ -612,6 +621,19 @@ class CellaEnvironment(BaseEnvironment):
         self._engines[key] = (process, port)
         return port
 
+    def _kill_engine(self, key: str) -> None:
+        """Stop one machine's engine and forget it -- called when that
+        machine is torn down at the end of its exec cycle."""
+        running = self._engines.pop(key, None)
+        if running is None:
+            return
+        process, _port = running
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
     def _stop_engines(self) -> None:
         for process, _port in self._engines.values():
             process.terminate()
@@ -622,7 +644,7 @@ class CellaEnvironment(BaseEnvironment):
         self._engines = {}
 
     def _spawn_bridge(self, name: str, port: int) -> subprocess.Popen:
-        log = (self.trial_paths.trial_dir / "cella-bridge.log").open("ab")
+        log = (self._engine_dir(name) / "bridge.log").open("ab")
         try:
             return subprocess.Popen(
                 [str(self._bridge_bin()), name, "--dial", f"127.0.0.1:{port}"],
@@ -719,10 +741,10 @@ class CellaEnvironment(BaseEnvironment):
         # the task's reviewable cella.policy; otherwise it enforces the
         # composed appliance border.
         if self._dry_run:
-            port = self._ensure_engine("appliance", self._policy_path(), dry_run=True)
+            port = self._ensure_engine(name, self._policy_path(), dry_run=True)
         else:
             port = self._ensure_engine(
-                "appliance", self._appliance_policy_path(), dry_run=False
+                name, self._appliance_policy_path(), dry_run=False
             )
         self._term_bridge = self._spawn_bridge(name, port)
         self._term = name
@@ -1115,9 +1137,10 @@ class CellaEnvironment(BaseEnvironment):
                 self._cella("gateway", name, "open")
                 # The member border is fixed and always enforced; the
                 # world leg (and any dry-run collection) is the
-                # appliance's, stood up once in start().
+                # appliance's, stood up once in start(). The engine is
+                # this member machine's own -- a fresh one per cycle.
                 port = self._ensure_engine(
-                    "member", self._member_policy_path(), dry_run=False
+                    name, self._member_policy_path(), dry_run=False
                 )
                 bridge = self._spawn_bridge(name, port)
             budget = (timeout_sec or _DEFAULT_EXEC_TIMEOUT_SEC) + _BOOT_MARGIN_SEC
@@ -1140,6 +1163,9 @@ class CellaEnvironment(BaseEnvironment):
                     bridge.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     bridge.kill()
+            # This member machine's engine dies with it (per cycle); the
+            # appliance's, keyed by its own name, is untouched here.
+            self._kill_engine(name)
             self._preserve_chronicle(name)
             self._destroy_quietly(name)
             self._machine = None
