@@ -614,20 +614,17 @@ Use it for a targeted run, not a routine smoke.
   cannot be honored as asked. Memory is enforced (`--mem-mb`).
 * **The exec cycle is expensive** (§4). Do not put chatty
   many-exec flows on this rung; the rung exists for sealed runs.
-* **The `-www` leg is not implemented.** `allow_internet = true`
-  raises `NotImplementedError` in the environment until the judged
-  world nic, the engine wiring, and the `cella.policy` staging land.
 * **`cella.policy` is not compiled from task URLs yet.** The
   allowlist-from-URLs derivation other rungs use has no cella
   translation; dry-run collection is the current authoring path.
 * **The evidence read is cella-unmediated** (§6) until a
   `cella inspect --dump` verb exists.
-* **Airgapped cella tasks are oracle-only, by construction.** On the
-  exec-model rungs the agent process lives host-side and reaches its
-  inference API from there, so airgapped tasks still get real agents.
-  On this rung an agent would have to live inside the sealed guest,
-  and a `--net none` guest can reach no API at all. A real agent on
-  cella needs the `-www` leg and a `cella.policy` granting the
-  inference endpoints.
+* **A pure `--net none` airgap is agentless.** A real agent is baked
+  into the guest and needs its inference line, so an agented task
+  always stands the terminated pair -- the appliance's world leg
+  carries only the inference host, so the task workload stays
+  airgapped while the agent resolves its API. Only an *agentless*
+  airgapped trial (an oracle replay) boots `--net none` with no
+  appliance at all.
 * **Windows tasks are unsupported.** The rootfs conversion is a
   Linux systemd story.
