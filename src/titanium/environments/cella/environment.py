@@ -223,10 +223,10 @@ class CellaEnvironment(BaseEnvironment):
         # an agentless airgapped trial (--net none) needs no appliance.
         self._agent = self.agent_install_spec is not None
         self._paired = self._agent or self._topology.judged
-        self._term: str | None = None
-        self._term_bridge: subprocess.Popen | None = None
-        self._term_thaw: threading.Thread | None = None
-        self._term_stop = threading.Event()
+        self._appliance: str | None = None
+        self._appliance_bridge: subprocess.Popen | None = None
+        self._appliance_thaw: threading.Thread | None = None
+        self._appliance_stop = threading.Event()
         # One lifecycle at a time on this environment. A `to_thread`
         # body cannot be cancelled, so when a verifier `wait_for` times
         # out it abandons the *await* while the worker thread keeps
@@ -376,7 +376,7 @@ class CellaEnvironment(BaseEnvironment):
         finally:
             untag_image(tag)
         if self._paired:
-            self._ensure_terminator()
+            self._ensure_appliance()
 
     # ----------------------------------------------------------- uploads
 
@@ -724,7 +724,7 @@ class CellaEnvironment(BaseEnvironment):
             return self._topology.net
         return f"wire:{self._wire_name()}"
 
-    def _ensure_terminator(self) -> None:
+    def _ensure_appliance(self) -> None:
         """Stand the terminator appliance for the trial, once.
 
         The appliance is cella's terminator golden with titanium's
@@ -736,7 +736,7 @@ class CellaEnvironment(BaseEnvironment):
         freeze, and the appliance parks on every DNS and world flow it
         forwards -- standing memory keeps the hot paths live).
         """
-        if self._term is not None:
+        if self._appliance is not None:
             return
         assert self._work is not None
         ca_path = pair_ca_path(Path.home())
@@ -748,7 +748,7 @@ class CellaEnvironment(BaseEnvironment):
         # Titanium's appliance flavor: a copy of the terminator golden
         # with the conf injected. The conf is constant, so this is a
         # per-trial rebuild of one fixed template.
-        name = f"{_flavor_name(self.session_id, 0)[:38].rstrip('-')}-term"
+        name = f"{_flavor_name(self.session_id, 0)[:33].rstrip('-')}-appliance"
         with staging_flavor_dir(home=None) as staging:
             artifact = staging / ROOTFS_ARTIFACT_NAME
             shutil.copyfile(terminator_golden_rootfs(Path.home()), artifact)
@@ -802,19 +802,19 @@ class CellaEnvironment(BaseEnvironment):
             port = self._ensure_engine(
                 name, self._appliance_policy_path(), dry_run=False
             )
-        self._term_bridge = self._spawn_bridge(name, port)
-        self._term = name
-        self._term_stop.clear()
-        self._term_thaw = threading.Thread(
+        self._appliance_bridge = self._spawn_bridge(name, port)
+        self._appliance = name
+        self._appliance_stop.clear()
+        self._appliance_thaw = threading.Thread(
             target=self._thaw_forever, args=(name,), daemon=True
         )
-        self._term_thaw.start()
+        self._appliance_thaw.start()
     def _thaw_forever(self, name: str) -> None:
         """The appliance's side of the freeze dance, for the machine's
         whole life: every park freezes it, every staged decision
         applies at the thaw."""
         state = self._machine_dir(name) / "state"
-        while not self._term_stop.is_set():
+        while not self._appliance_stop.is_set():
             if state.is_file():
                 time.sleep(0.5)
                 try:
@@ -824,30 +824,30 @@ class CellaEnvironment(BaseEnvironment):
             else:
                 time.sleep(0.5)
 
-    def _stop_terminator(self) -> None:
-        if self._term is None:
+    def _stop_appliance(self) -> None:
+        if self._appliance is None:
             return
-        self._term_stop.set()
-        if self._term_thaw is not None:
-            self._term_thaw.join(timeout=10)
-            self._term_thaw = None
-        if self._term_bridge is not None:
-            self._term_bridge.terminate()
+        self._appliance_stop.set()
+        if self._appliance_thaw is not None:
+            self._appliance_thaw.join(timeout=10)
+            self._appliance_thaw = None
+        if self._appliance_bridge is not None:
+            self._appliance_bridge.terminate()
             try:
-                self._term_bridge.wait(timeout=10)
+                self._appliance_bridge.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self._term_bridge.kill()
-            self._term_bridge = None
+                self._appliance_bridge.kill()
+            self._appliance_bridge = None
         # The appliance's border is judged too; its chronicle is part of
         # the run's record -- the world leg of every crossing the member
         # made, granted and refused, judged by name.
-        self._preserve_chronicle(self._term)
-        self._preserve_edge_log(self._term)
-        self._retire_machine(self._term)
-        flavor_dir = rootfs_flavor_dir(self._term)
+        self._preserve_chronicle(self._appliance)
+        self._preserve_edge_log(self._appliance)
+        self._retire_machine(self._appliance)
+        flavor_dir = rootfs_flavor_dir(self._appliance)
         if flavor_dir.exists():
             shutil.rmtree(flavor_dir, ignore_errors=True)
-        self._term = None
+        self._appliance = None
 
     def _publish_cycle_flavor(self, boot_layer: BootLayer) -> str:
         assert self._work is not None
@@ -1463,7 +1463,7 @@ class CellaEnvironment(BaseEnvironment):
         # Wait for any abandoned exec thread to finish before teardown,
         # so destroy does not race a cycle still writing its evidence.
         with self._lifecycle:
-            self._stop_terminator()
+            self._stop_appliance()
             self._stop_engines()
             if self._machine is not None:
                 self._retire_machine(self._machine)
