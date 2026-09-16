@@ -119,16 +119,18 @@ The one policy file travels in two directions:
 * **Dry run** (`--dry-run`): release every crossing and *write* each
   distinct one to `cella.policy` as a grant. Review the collected
   file and check it in beside the Dockerfile, like a lockfile. The
-  next run enforces it. `make smoke-cella-policy-engine DRY_RUN=true`
+  next run enforces it. `make smoke-cella-integration DRY_RUN=true`
   will regenerate a task's policy this way (the `-www` leg).
 
-There are no unconditional releases in enforce mode. Cella's own
-motor fixture lets ARP ride free; this engine does not. ARP, NDP,
-and every finer exception belong to `cella.policy`, not to hardcoded
-carve-outs. Every refusal lands in the chronicle, so a task that
-needed a crossing shows exactly what it asked for. That record —
-every crossing the workload attempted, including the refused ones —
-is a property no other rung has.
+There are no unconditional releases in enforce mode: ARP, NDP, and
+every finer exception belong to `cella.policy`, not to a hardcoded
+carve-out. (This differs from cella's `motor` fixture, which lets ARP
+ride free — titanium requires the grant. Once granted, though, its
+membrane memory is pre-planted just as `motor` does, §3.2: the grant
+requirement and the standing memory are separate things.) Every
+refusal lands in the chronicle, so a task that needed a crossing shows
+exactly what it asked for — every crossing the workload attempted,
+including the refused ones, a property no other rung has.
 
 ### 3.1 How to collect a policy with --dry-run
 
@@ -136,7 +138,7 @@ Do not write a `cella.policy` from guesswork. Observe once, review,
 then enforce forever:
 
 1. **Run the task in collection mode.** For the smoke task:
-   `make smoke-cella-policy-engine-www DRY_RUN=true`. For any task:
+   `make smoke-cella-integration DRY_RUN=true`. For any task:
    `titanium run --env cella --ek dry_run=true --path <task> ...`.
    `--ek key=value` is `titanium run`'s generic environment-kwarg
    flag — the pairs are passed into the environment class's
@@ -275,23 +277,33 @@ rebuilds N filesystems. The oracle-plus-verifier flow of the smoke
 task is 3–4 cycles. This is the price of the sealed model, paid where
 the model says to pay it.
 
-## 5. The smoke: `make smoke-cella-policy-engine`
+## 5. The smoke: `make smoke-cella-integration`
 
-Two legs, one at a time. Both run through `titanium run --env cella`
-with the oracle agent, and both gate exactly like
+The cella-*unique* probes — the policy engine and the terminated pair,
+which no other rung has — run together through one `titanium run --env
+cella` with the oracle agent, and each gates exactly like
 `examples/smoke/fix-git-offline`: the task's own offline verifier
-writes `/logs/verifier/reward.txt`, read from evidence.
+writes `/logs/verifier/reward.txt`, read from evidence. Four tasks, two
+topologies:
 
-* **`smoke-cella-policy-engine-airgapped`** (landed):
-  `examples/smoke/cella-policy-engine-airgapped` declares
-  `allow_internet = false`. The in-guest probe records that no nic
-  exists (`lo` alone — a topology, not a firewall), egress fails,
-  PID 1 is systemd, one vCPU, the declared memory. The proof is the
-  sealed loop end to end under `titanium run`.
-* **`smoke-cella-policy-engine-www`** (not yet implemented; the
-  sub-target says so and exits 2): `allow_internet = true`, the
-  judged world nic, the engine enforcing the task's checked-in
-  `cella.policy`, and the chronicle carrying the refusals.
+* **airgapped** (`cella-policy-engine-airgapped`,
+  `verify-cella-env-airgapped`): `allow_internet = false`, agentless —
+  `--net none`. The in-guest probe records that no nic exists (`lo`
+  alone — a topology, not a firewall), egress fails, PID 1 is systemd,
+  one vCPU, the declared memory.
+* **www** (`cella-policy-engine-www`, `verify-cella-env-www`):
+  `allow_internet = true` — the terminated pair (§9). The probe
+  reaches a granted name (`example.com`) through the appliance, its TLS
+  terminated on a pair-CA leaf and the world leg judged by the resolved
+  name, and confirms an ungranted name is refused. It times three
+  sequential calls, so the membrane-memory warming (§3.2) shows as a
+  cold call then two live ones.
+
+`make smoke-cella-all` runs the rootfs proof (§8) and this suite
+together. `DRY_RUN=true` flips the appliance engine to collection and
+copies each www task's collected `cella.policy` back for review (§3.1).
+The rung-parity `smoke-cella` (the shared bench tasks under a real
+agent, like `smoke-krun-podman`) is separate future work.
 
 ## 6. Evidence collection, and the one judgment call
 
@@ -367,7 +379,7 @@ it — not an optimization.
 | `make .krun-podman` | Provisions krun (§7). |
 | `make unit-cella` | The offline unit suite for the whole package, with coverage under `reports/unit/unit-cella/`. No podman, no cella, no network. |
 | `make smoke-cella-rootfs` | The conversion acceptance proof: a stock Debian with no init becomes a systemd-bootable ext4 and survives boot → freeze → thaw → stop → archive → destroy, driven by cella's own verbs. |
-| `make smoke-cella-policy-engine` | §5. |
+| `make smoke-cella-integration` | §5. |
 
 The field flavor is blind by design: no console exists. Completion is
 the VMM's exit; diagnosis is `vmm.log` and the evidence tree;
