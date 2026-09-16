@@ -17,6 +17,10 @@ TITANIUM_LOG_RUN := $(shell date +%Y%m%d-%H%M%S)
 endif
 export TITANIUM_LOG_RUN
 LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TITANIUM_LOG_RUN)/$(subst /,_,$@).log"; exec > >(tee -a "$$TITANIUM_LOG_FILE") 2>&1; echo "=== make $@ -- $$(date -Is) ==="
+# The log tees a pipe, not a tty, so a child that block-buffers stdout
+# (python -- titanium, pytest) would not stream into it until it exits.
+# Unbuffered keeps the log and the terminal live as a run progresses.
+export PYTHONUNBUFFERED := 1
 .PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella-policy-engine smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www smoke-cella smoke-cella-all smoke-cella-integration
 
 -include .secrets
