@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from titanium.environments.cella import config
 from titanium.environments.cella.boot_layer import BootEntry, GuestFile
 
 # The wire's pair-0 convention: the appliance is the member's gateway.
@@ -131,7 +132,8 @@ def member_trust_entries(ca_pem: bytes) -> list[BootEntry]:
             # delivered -- the member never reaches the world at all.
             contents=(
                 f"nameserver {APPLIANCE_WIRE_ADDRESS}\n"
-                "options timeout:30 attempts:3 single-request\n"
+                f"options timeout:{config.RESOLVER_TIMEOUT_SEC} "
+                f"attempts:{config.RESOLVER_ATTEMPTS} single-request\n"
             ).encode(),
             mode=0o644,
             uid=0,
@@ -210,11 +212,11 @@ def member_policy_text() -> str:
         "# The member border (appended by titanium): the wire plane's\n"
         "# ARP and the appliance. The member's only peer is its\n"
         "# terminator; the world names are judged at the appliance.\n"
-        "release outgoing arp (keep_open=24h) (skip_freeze=true)\n"
+        f"release outgoing arp (keep_open={config.ARP_KEEP_OPEN}) (skip_freeze=true)\n"
         "release incoming arp\n"
-        + _round_trip(f"{gw}:443", "tcp", "24h")
-        + _round_trip(f"{gw}:80", "tcp", "24h")
-        + _round_trip(f"{gw}:53", "udp", "24h")
+        + _round_trip(f"{gw}:443", "tcp", config.MEMBER_KEEP_OPEN)
+        + _round_trip(f"{gw}:80", "tcp", config.MEMBER_KEEP_OPEN)
+        + _round_trip(f"{gw}:53", "udp", config.MEMBER_KEEP_OPEN)
     )
 
 
@@ -231,9 +233,9 @@ def appliance_border_policy_text(world_hosts: list[str]) -> str:
             "# judged by the resolved name. ARP, the upstream resolver,\n"
             "# the member's reply window, and each allowed world host.\n"
         ),
-        "release outgoing arp (keep_open=24h) (skip_freeze=true)\n",
+        f"release outgoing arp (keep_open={config.ARP_KEEP_OPEN}) (skip_freeze=true)\n",
         "release incoming arp\n",
-        _round_trip(f"{UPSTREAM_DNS}:53", "udp", "24h"),
+        _round_trip(f"{UPSTREAM_DNS}:53", "udp", config.UPSTREAM_DNS_KEEP_OPEN),
         (
             "# The member's reply window (the consistent reply port): the\n"
             "# member pins its ephemeral ports to this range, so a crossing\n"
@@ -246,12 +248,12 @@ def appliance_border_policy_text(world_hosts: list[str]) -> str:
         for proto in ("tcp", "udp"):
             lines.append(
                 f"release outgoing {MEMBER_WIRE_ADDRESS}:{port}/{proto} "
-                "(keep_open=1h) (skip_freeze=true)\n"
+                f"(keep_open={config.REPLY_WINDOW_KEEP_OPEN}) (skip_freeze=true)\n"
             )
             lines.append(f"release incoming {MEMBER_WIRE_ADDRESS}:{port}/{proto}\n")
     if world_hosts:
         lines.append("# The allowed world hosts, by name.\n")
         for host in world_hosts:
-            lines.append(_round_trip(f"{host}:443", "tcp", "60m"))
-            lines.append(_round_trip(f"{host}:80", "tcp", "60m"))
+            lines.append(_round_trip(f"{host}:443", "tcp", config.APPLIANCE_HOST_KEEP_OPEN))
+            lines.append(_round_trip(f"{host}:80", "tcp", config.APPLIANCE_HOST_KEEP_OPEN))
     return "".join(lines)

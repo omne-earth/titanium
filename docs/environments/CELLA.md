@@ -633,7 +633,9 @@ Use it for a targeted run, not a routine smoke.
 
 Opinionated defaults, with the reason each was chosen. A default here
 is a deliberate ruling, not an accident; change one only against the
-reason recorded with it.
+reason recorded with it. The values themselves live in one checked-in
+place -- `src/titanium/environments/cella/config.py` -- so the knobs are
+visible and greppable, each with its reason inline.
 
 ### The member border holds every hop live for 24h
 

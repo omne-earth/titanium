@@ -98,6 +98,7 @@ from titanium.environments.capabilities import (
     EnvironmentCapabilities,
     EnvironmentResourceCapabilities,
 )
+from titanium.environments.cella import config
 from titanium.environments.cella.boot_layer import (
     BootEntry,
     BootLayer,
@@ -154,9 +155,9 @@ from titanium.environments.cella.terminator import (
 _RUNNER_DIR = "/titanium"
 
 # How long past the exec timeout the guest gets to boot and halt.
-_BOOT_MARGIN_SEC = 180.0
+_BOOT_MARGIN_SEC = config.BOOT_MARGIN_SEC
 
-_DEFAULT_EXEC_TIMEOUT_SEC = 600.0
+_DEFAULT_EXEC_TIMEOUT_SEC = config.EXEC_TIMEOUT_SEC
 
 
 class CellaError(RuntimeError):
@@ -291,7 +292,7 @@ class CellaEnvironment(BaseEnvironment):
 
     # ------------------------------------------------------------- verbs
 
-    def _cella(self, *args: str, timeout_sec: float | None = 120.0) -> str:
+    def _cella(self, *args: str, timeout_sec: float | None = config.CELLA_VERB_TIMEOUT_SEC) -> str:
         # Inherit cella's own environment untouched -- in particular
         # never set CELLA_THAW_PREFAULT. Its default (deep) re-warms all
         # guest memory on a thaw, which is what keeps frozen time truly
@@ -914,8 +915,8 @@ class CellaEnvironment(BaseEnvironment):
 
     # How often the live disk is probed for the result, and the grace
     # the guest gets to finish its poweroff after the result appears.
-    _RESULT_POLL_SEC = 5.0
-    _POWEROFF_GRACE_SEC = 3.0
+    _RESULT_POLL_SEC = config.RESULT_POLL_SEC
+    _POWEROFF_GRACE_SEC = config.POWEROFF_GRACE_SEC
 
     def _result_landed(self, name: str) -> bool:
         """Whether ``/titanium/result/rc`` exists on the machine's disk.
