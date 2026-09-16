@@ -201,10 +201,12 @@ class CellaEnvironment(BaseEnvironment):
         # is enforce mode.
         self._dry_run = str(dry_run).lower() in ("true", "1", "yes")
         # What to do with a machine when its life ends. `teardown` (the
-        # absent default) destroys it. `archive` keeps it as a cella
-        # artifact (`cella archive`), resumable and inspectable later --
-        # the forensic path for a run you want to hold. Anything but an
-        # explicit `archive` is teardown.
+        # absent default) destroys it. `archive` latches it as a cella
+        # artifact (`cella archive`) -- a rock: inspectable with `cella
+        # inspect`, and forkable back to a runnable machine with `cella
+        # branch`, but never thawed (thaw resumes a live frozen machine;
+        # archive closes that door). The forensic path for a run you
+        # want to hold. Anything but an explicit `archive` is teardown.
         self._on_completion = (
             "archive" if str(on_completion).lower() == "archive" else "teardown"
         )
@@ -1316,10 +1318,12 @@ class CellaEnvironment(BaseEnvironment):
 
     def _retire_machine(self, name: str) -> None:
         """End a machine's life at teardown. `teardown` (the default)
-        destroys it. `archive` stops it and keeps it as a cella artifact
-        (`cella archive`), so it can be thawed or inspected later. The
-        evidence is already copied out either way (the chronicle); this
-        only decides whether the machine itself survives."""
+        destroys it. `archive` stops it and latches it as a cella
+        artifact (`cella archive`) -- a rock, inspected with `cella
+        inspect` and forked back to a runnable machine with `cella
+        branch`, never thawed. The evidence is already copied out either
+        way (the chronicle); this only decides whether the machine
+        itself survives."""
         if self._on_completion != "archive":
             self._destroy_quietly(name)
             return

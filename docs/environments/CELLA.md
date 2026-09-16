@@ -586,14 +586,22 @@ To keep a machine instead, pass `on_completion=archive`.
 ```bash
 titanium run --env cella --ek on_completion=archive --path <task> ...
 ```
-`archive` stops each machine and keeps it as a cella artifact, not a
-deleted machine. You can thaw it or inspect it later.
+`archive` stops each machine and latches it as a cella artifact, not a
+deleted machine. The archive verb sets the machine `state=archived`: a
+*rock*. A rock is frozen for keeps. You do not thaw a rock — thaw
+resumes a live frozen machine (the `freeze`/`thaw` pair), and archive
+closes that door. You read a rock, and you fork a runnable machine off
+it (the `archive`/`inspect` pair, with `branch`/`extract`):
 ```bash
-cella list                    # find the archived machine
-cella thaw <machine>          # resume the frozen instant
+cella list                    # find the archived machine (state=archived)
+cella inspect <machine>       # read the rock read-only (lab flavor: console at /rock)
+cella branch  <machine> <new> # fork a fresh, runnable machine off the rock
+cella extract <machine> <path># copy a file out of the rock
 ```
 Use this to hold a run for a human to inspect — for example, an agent
-that reached an ungranted name. The default, `teardown`, deletes the
+that reached an ungranted name. `inspect` opens the rock without
+altering it; `branch` is the only way back to a running machine, and it
+leaves the rock itself untouched. The default, `teardown`, deletes the
 machine.
 
 `archive` keeps `disk.img` and `ram.img` per machine (gigabytes each).
