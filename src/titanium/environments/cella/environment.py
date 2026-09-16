@@ -673,16 +673,27 @@ class CellaEnvironment(BaseEnvironment):
             self._engine_loop_thread = None
 
     def _spawn_bridge(self, name: str, port: int) -> subprocess.Popen:
-        log = (self._engine_dir(name) / "bridge.log").open("ab")
-        try:
-            return subprocess.Popen(
-                [str(self._bridge_bin()), name, "--dial", f"127.0.0.1:{port}"],
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=log,
-            )
-        finally:
-            log.close()
+        # The bridge is silent on stdout: it writes its real record to the
+        # machine's own edge.log (cella-network events, the park/kick
+        # cycle), preserved at teardown by _preserve_edge_log. So capture
+        # nothing here -- a stdout file would only ever be empty.
+        return subprocess.Popen(
+            [str(self._bridge_bin()), name, "--dial", f"127.0.0.1:{port}"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _preserve_edge_log(self, name: str) -> None:
+        """Copy a machine's edge.log -- the bridge/gateway's real record --
+        into cella-engine/<vm-id>/ before the machine is destroyed. It is
+        evidence of the edge, and destroy takes it with the machine."""
+        source = self._machine_dir(name) / "edge.log"
+        if source.is_file():
+            try:
+                shutil.copyfile(source, self._engine_dir(name) / "edge.log")
+            except OSError as exc:
+                self.logger.debug("cella: could not preserve edge.log: %s", exc)
 
     def _wire_name(self) -> str:
         return f"{_flavor_name(self.session_id, 0)[:40].rstrip('-')}-line"
@@ -815,6 +826,7 @@ class CellaEnvironment(BaseEnvironment):
         # the run's record -- the world leg of every crossing the member
         # made, granted and refused, judged by name.
         self._preserve_chronicle(self._term)
+        self._preserve_edge_log(self._term)
         self._destroy_quietly(self._term)
         flavor_dir = rootfs_flavor_dir(self._term)
         if flavor_dir.exists():
@@ -1196,6 +1208,7 @@ class CellaEnvironment(BaseEnvironment):
             # appliance's, keyed by its own name, is untouched here.
             self._kill_engine(name)
             self._preserve_chronicle(name)
+            self._preserve_edge_log(name)
             self._destroy_quietly(name)
             self._machine = None
             flavor_dir = rootfs_flavor_dir(flavor)
