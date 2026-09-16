@@ -30,6 +30,11 @@ class _EnvEntry(NamedTuple):
 # vendor SDKs are only loaded when that environment is requested. Titanium only ships
 # Docker and Modal; other Titanium environment implementations are not included.
 _ENVIRONMENT_REGISTRY: dict[EnvironmentType, _EnvEntry] = {
+    EnvironmentType.CELLA: _EnvEntry(
+        "titanium.environments.cella.environment",
+        "CellaEnvironment",
+        None,
+    ),
     EnvironmentType.DOCKER: _EnvEntry(
         "titanium.environments.docker.docker",
         "DockerEnvironment",

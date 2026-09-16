@@ -1,0 +1,11 @@
+# cella.policy — the world domains this task is granted.
+# <release|refuse> <incoming|outgoing> <destination> (key=value)*
+#
+# Under the terminated pair (allow_internet=true), titanium routes these
+# host grants to the appliance's world-leg border, judged by the name
+# the terminator resolves and stamps on each crossing (never a rotating
+# ip). The member border (the wire to the appliance) is titanium's own
+# fixed grant; only the world names belong here. Everything not granted
+# is refused, on the record.
+release outgoing example.com:443/tcp (keep_open=5m) (skip_freeze=true)
+release incoming example.com:443/tcp (keep_open=5m)
