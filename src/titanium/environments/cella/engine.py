@@ -1,21 +1,23 @@
 """The ``cella.policy`` judge: titanium's cella policy engine.
 
-A cella machine with a world nic decides nothing for itself: every
-border crossing parks, cella's bridge (``cella-engine <machine> --dial
-<addr>``) streams each park to a gRPC engine as an ``Event``, and each
-returned ``Decision`` -- a release or a refusal, by operation id -- is
-what actually moves or stops the frame (cella docs/WORLD-ENGINE.md).
-This module is the engine on the other end of that dial.
+A cella machine decides nothing for itself: every border crossing
+parks, cella's bridge (``cella-engine <machine> --dial <addr>``)
+streams each park to a gRPC engine as an ``Event``, and each returned
+``Decision`` -- a release, a refusal, or a membrane memory -- is what
+actually moves, stops, or remembers the frame (cella
+docs/WORLD-ENGINE.md). This module is the engine on the other end of
+that dial.
 
 The engine knows nothing of ``allow_internet``, on purpose. The two
 knobs are orthogonal: harbor's flag defines the network *topology*
-(:mod:`titanium.environments.cella.environment` -- ``false`` is
-``--net none``, where no border, no ledger, and no engine exist at
-all), and ``cella.policy`` defines the crossing rules at a border
+(:mod:`titanium.environments.cella.environment` -- ``false`` for an
+agentless trial is ``--net none``, where no border, no ledger, and no
+engine exist at all; otherwise the terminated pair), and
+``cella.policy`` defines the crossing rules at a border
 (:mod:`titanium.environments.cella.policy` -- ``outgoing`` grants are
 the egress rules, ``incoming`` grants the ingress rules). An engine
 only ever runs where a border exists, so the flag's whole meaning was
-spent at ``cella create`` before this process started.
+spent at ``cella create`` before this judge ever saw a crossing.
 
 The one policy file travels in one of two directions:
 
@@ -28,16 +30,25 @@ The one policy file travels in one of two directions:
   collected file is reviewed and checked in beside the task's build
   file, and the next run enforces it.
 
-There are no unconditional releases in enforce mode. cella's motor
-fixture lets ARP ride free; this engine deliberately does not -- ARP,
-NDP, per-destination allows, all of it is ``cella.policy``'s to say,
-not a hardcoded carve-out's. Every refusal lands in the chronicle, so
-a task that needed a crossing shows exactly what it asked for.
+There are no unconditional releases in enforce mode: ARP, NDP, and
+every finer exception is ``cella.policy``'s to say, not a hardcoded
+carve-out's, and every refusal lands in the chronicle. But a *granted*
+crossing need not freeze: like cella's reference engine
+(``cella-engine motor``), this judge plants a **membrane memory** for a
+windowed grant, so a remembered destination waits live instead of
+freezing. That lifecycle is an explicit per-destination state machine
+(:class:`MembraneMemoryTable`) -- pre-planted at stream open for a
+concrete destination so the first ARP never freezes, reset per machine,
+and lapsed when ``keep_open`` clears (docs/environments/CELLA.md, "The
+membrane-memory state machine").
 
-Run standalone with ``python -m titanium.environments.cella.engine
---listen 127.0.0.1:50051 --policy cella.policy [--dry-run]``, or embed
-via :func:`serve`. The transport is grpclib -- pure-Python asyncio, no
-protoc codegen -- speaking the hand-carried vocabulary in
+Titanium runs the engine **in-process** -- :func:`serve` on a
+background asyncio loop, one server per machine -- so nothing is spawned
+and no process boundary is crossed per exec cycle. The standalone
+``python -m titanium.environments.cella.engine --listen HOST:PORT
+--policy cella.policy [--dry-run]`` entry point remains for debugging.
+The transport is grpclib -- pure-Python asyncio, no protoc codegen --
+speaking the hand-carried vocabulary in
 :mod:`titanium.environments.cella.wire`.
 """
 
