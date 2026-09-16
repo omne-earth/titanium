@@ -257,7 +257,7 @@ class EngineService:
             for decision in self._policy.standing_decisions():
                 memory = decision.membrane_memory
                 self._logger.info(
-                    "cella engine: pre-plant ip=%s port=%d ethertype=0x%04x keep_open=%d",
+                    "cella_engine: pre-plant ip=%s port=%d ethertype=0x%04x keep_open=%d",
                     ".".join(str(b) for b in memory.destination.ip),
                     memory.destination.port,
                     memory.destination.ethertype,
@@ -268,7 +268,7 @@ class EngineService:
                 operation = event.parked
                 if operation is None:
                     # Completions and looks are evidence, not questions.
-                    self._logger.debug("cella engine: event (not a park)")
+                    self._logger.debug("cella_engine: event (not a park)")
                     continue
                 destination = operation.destination
                 started_ns = time.perf_counter_ns()
@@ -280,7 +280,7 @@ class EngineService:
                 for decision in decisions:
                     if decision.membrane_memory is not None:
                         self._logger.info(
-                            "cella engine: remember ip=%s port=%d skip_freeze=%s keep_open=%d",
+                            "cella_engine: remember ip=%s port=%d skip_freeze=%s keep_open=%d",
                             ".".join(
                                 str(b) for b in (destination.ip if destination else b"")
                             ),
@@ -290,7 +290,7 @@ class EngineService:
                         )
                     else:
                         self._logger.info(
-                            "cella engine: %s id=%s host=%r ip=%s port=%d direction=%d",
+                            "cella_engine: %s id=%s host=%r ip=%s port=%d direction=%d",
                             "release" if decision.release is not None else "refuse",
                             operation.id.hex(),
                             destination.host if destination else "",
@@ -309,7 +309,7 @@ class EngineService:
             # instead of grpclib's bare "Request was cancelled: Connection
             # lost" (its own logger is quieted in main()).
             self._logger.info(
-                "cella engine: bridge closed (%s) -- cycle ended, awaiting reconnect",
+                "cella_engine: bridge closed (%s) -- cycle ended, awaiting reconnect",
                 type(exc).__name__,
             )
             if isinstance(exc, asyncio.CancelledError):
@@ -320,7 +320,7 @@ class EngineService:
             # were not tiny. Reported per stream (cumulative for the engine).
             if self._verdict_count:
                 self._logger.info(
-                    "cella engine: %d verdicts, avg %d ns, max %d ns",
+                    "cella_engine: %d verdicts, avg %d ns, max %d ns",
                     self._verdict_count,
                     self._verdict_total_ns // self._verdict_count,
                     self._verdict_max_ns,
@@ -388,7 +388,7 @@ async def _run(host: str, port: int, policy: PolicyJudge) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, server.close)
     logger.info(
-        "cella engine: listening on %s:%d (mode=%s)",
+        "cella_engine: listening on %s:%d (mode=%s)",
         host,
         bound_port(server),
         "dry-run" if policy.recorder is not None else "enforce",
@@ -440,7 +440,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.policy is not None and args.policy.exists():
             policy = Policy.load(args.policy)
             logger.info(
-                "cella engine: enforcing %s (%d grants)",
+                "cella_engine: enforcing %s (%d grants)",
                 args.policy,
                 len(policy.grants),
             )
@@ -448,7 +448,7 @@ def main(argv: list[str] | None = None) -> None:
             # Fail closed, out loud: an absent file grants nothing, and
             # the operator should hear that before the first refusal.
             logger.warning(
-                "cella engine: %s does not exist; every crossing will be "
+                "cella_engine: %s does not exist; every crossing will be "
                 "refused (collect one with --dry-run)",
                 args.policy,
             )
