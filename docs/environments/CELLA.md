@@ -88,12 +88,27 @@ streams each park as an `Event` over gRPC (`cella.Engine/Decide`,
 from `proto/cella.proto`), lands each returned `Decision` in the
 verdict file, witnesses it in the audit book, and kicks the VMM.
 
-Titanium's engine is the judge on the far end of that dial:
-`python -m titanium.environments.cella.engine --listen HOST:PORT
---policy cella.policy [--dry-run]`. It is pure gRPC. It opens no
-files in `CELLA_HOME`, invokes no cella verb, and touches no book.
-The message codec (`wire.py`) is hand-written and byte-verified
-against `protoc` output from cella's own proto file.
+Titanium's engine is the judge on the far end of that dial: the
+policy engine (`titanium.environments.cella.engine`), a grpclib
+server titanium runs **in-process** — no subprocess, no spawn, no
+readiness poll — one per machine, each dialed by that machine's own
+bridge and logging under `cella-engine/<vm-id>/` (so a cycle's
+crossings stay separate from the next cycle's). It opens no files in
+`CELLA_HOME`, invokes no cella verb, and touches no book. The codec
+(`wire.py`) is hand-written and byte-verified against `protoc`, so the
+transport carries no protoc codegen and no C runtime.
+
+That is a deliberate stack. The judge itself is a dict lookup, so the
+cost that matters is the park→decide→verdict→thaw round trip, not the
+message encode. Staying **in-process Python** removes the process
+boundary — the spawn, the handshake, the readiness wait, and the
+"Connection lost" at every teardown — that a separate engine pays per
+cycle. A faster transport would not help: `grpcio` (C core) or a Rust
+rewrite would only speed the encode while *reintroducing* the process
+boundary in-process removes, and both undo the no-protoc lightness
+`wire.py` exists to keep. `grpclib` — pure asyncio — is what embeds
+cleanly in-process. If profiling ever shows the transport itself
+dominating, revisit then, with data.
 
 The one policy file travels in two directions:
 
@@ -151,6 +166,57 @@ then enforce forever:
 
 A dry run only observes; it proves nothing about enforcement. Step 4
 is the proof.
+
+### 3.2 The membrane-memory state machine (the circuit)
+
+Latency is answered by cella's membrane memory (N.F.7), never by a
+weaker thaw. A grant with a `keep_open` window plants a standing
+memory, and while it stands the machine waits *live* on that
+destination instead of freezing — the park is the freeze, so without
+the memory the *first* crossing to every destination freezes once.
+Titanium's engine models this as an explicit state machine: one small
+automaton per destination, per machine.
+
+```
+  unplanted ──(plant: emit verdict + memory)──▶ remembered
+      ▲                                             │
+      └──────────(keep_open elapses: lapse)─────────┘
+```
+
+* **unplanted** — the first crossing emits the verdict *and* a
+  membrane memory, moving the destination to *remembered*.
+* **remembered** — further crossings emit the verdict only; the
+  machine does not freeze on that destination.
+* **lapse** — when `written + keep_open` passes, the memory clears by
+  cella's own arithmetic and the destination returns to *unplanted*;
+  the next crossing re-plants it. (A short-lived exec-cycle machine
+  usually dies before any window clears, but the edge is real and the
+  automaton owns it.)
+
+Two rules make the circuit correct, and each was a bug before it was
+a rule:
+
+* **Pre-plant at stream open.** For a *concrete* destination — ARP (an
+  ethertype) or an exact `ip:port/proto` — the memory is planted the
+  moment the bridge stream opens, *before any crossing*, exactly as
+  cella's reference engine (`cella-engine motor`) does. So the first
+  ARP never freezes and the wire comes up at once, instead of wedging
+  on a first-crossing freeze under load. A *host* or wildcard grant
+  names no concrete destination until the appliance resolves it
+  (§9, the terminated pair), so it plants reactively on its first
+  crossing and freezes exactly once — unavoidably.
+* **Per machine, not global.** The circuit resets when each bridge
+  stream opens, because every exec cycle is a fresh machine with an
+  empty membrane memory (§4). A single global memory would plant only
+  the first machine's and leave every later cycle — the solution run,
+  the verifier — to freeze on its own first ARP again.
+
+And one transition is forbidden: an **incoming** grant never plants.
+An incoming park never freezes (`skip_freeze` is outgoing-only), so
+its memory would be inert — and worse, cella keys a memory by its
+destination alone, so an incoming memory (`skip_freeze=false`) would
+collide with and suppress the outgoing leg's live one for the same
+destination.
 
 ## 4. The exec cycle: one exec, one machine
 
