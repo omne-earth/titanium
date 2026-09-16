@@ -386,6 +386,197 @@ the VMM's exit; diagnosis is `vmm.log` and the evidence tree;
 liveness on the judged path is the chronicle. Smokes that must watch
 a boot use the lab flavor through `CELLA_BIN`.
 
+## Integration Guide
+
+This guide is for you if you add a task to the cella smoke. It walks
+through one task, `build-pmars`, from an empty policy to a green run.
+The task builds pMARS from Debian source packages. It needs the network
+at solve time, so it uses the terminated pair — a good example.
+
+Read sections 1 to 8 first. This guide uses those terms: *member*,
+*appliance*, *crossing*, *grant*, *chronicle*.
+
+### G.1 Before you start
+
+Do these steps once on the host.
+
+1. Confirm KVM is present.
+```bash
+test -c /dev/kvm && echo "kvm ok"
+```
+2. Provision cella at the pinned revision.
+```bash
+make .cella
+```
+`make .cella` clones the revision in `runtime.env`, builds the field
+binaries, builds the kernel golden, and builds the terminator golden.
+The terminator golden holds this host's pair CA.
+
+3. Confirm the goldens are present.
+```bash
+ls ~/.cella/rootfs/terminator/   # rootfs.ext4  golden.json  ca.pem
+```
+
+### G.2 Know the two knobs
+
+Two knobs control the network. They are independent.
+
+* `allow_internet` in `task.toml` sets the topology. `false` with no
+  agent gives `--net none`; the member has no nic. `true`, or any
+  agent, gives the terminated pair; the member is a wire-only guest,
+  and a terminator appliance holds the world nic.
+* `cella.policy` beside the Dockerfile sets the crossing rules, one
+  grant per line.
+
+Under the terminated pair, the member reaches the world only through
+the appliance. The appliance judges the world leg by the resolved
+**name**, not by the ip. So you grant names, not addresses.
+
+### G.3 Add your task
+
+A cella task has this shape.
+```text
+examples/smoke/build-pmars/
+  task.toml
+  instruction.md
+  environment/
+    Dockerfile
+    cella.policy       <- you write this (G.4, G.5)
+  solution/solve.sh
+  tests/test.sh
+  tests/test_outputs.py
+```
+
+Set `allow_internet = true` in `task.toml`. `build-pmars` fetches apt
+packages at solve time, so it needs the world.
+```toml
+[environment]
+allow_internet = true
+```
+
+### G.4 Write the network policy
+
+`build-pmars` reaches Debian's apt mirror over plain HTTP. Grant that
+name. Write `environment/cella.policy`.
+```text
+# The world names this task reaches, judged at the appliance.
+release outgoing deb.debian.org:80/tcp (keep_open=5m) (skip_freeze=true)
+release incoming deb.debian.org:80/tcp
+```
+
+Follow these rules.
+
+* Grant the name (`deb.debian.org`), not an ip. CDN ips rotate; the
+  name does not.
+* An outgoing grant needs its incoming reply twin.
+* `keep_open` plants a membrane memory, so the flow waits live.
+* `skip_freeze=true` is outgoing only. An incoming park never freezes,
+  so an incoming grant carries no window.
+
+Do not grant the wire to the appliance. Titanium adds the member's
+fixed grants for you.
+
+### G.5 Collect the policy with a dry run
+
+Do not guess the names. Observe them once, then enforce.
+
+1. Run the task in collection mode.
+```bash
+make smoke-cella-integration DRY_RUN=true
+```
+In dry-run, the appliance releases every world crossing and writes each
+resolved name to `cella.policy`.
+
+2. Review the collected file. Keep the names the task needs. Delete
+background noise, such as a stray resolver or a time-sync attempt. A
+collected file looks like this.
+```text
+release outgoing deb.debian.org:80/tcp (keep_open=5m) (skip_freeze=true)
+release incoming deb.debian.org:80/tcp
+release outgoing security.debian.org:80/tcp (keep_open=5m) (skip_freeze=true)
+release incoming security.debian.org:80/tcp
+```
+
+3. Check the file in beside the Dockerfile. It is a lockfile for the
+task's network. Its diff is the task's network story.
+
+4. Enforce. Run the smoke again without the flag (G.6). A dry run
+proves nothing about enforcement.
+
+### G.6 Run the smoke
+
+Run the suite.
+```bash
+make smoke-cella-integration
+```
+The default is one trial at a time (`TITANIUM_N=1`), like the other
+rungs. To run trials together, override N.
+```bash
+make smoke-cella-integration TITANIUM_N=4
+```
+A pass prints this line.
+```text
+4/4  Mean: 1.000
+```
+
+### G.7 Read the result
+
+Read the reward first. `1` is a pass.
+```bash
+find .run/jobs/openrouter/smoke-cella-integration -name reward.txt -exec cat {} \;
+```
+
+Read the task's report. It carries the warming curve.
+```bash
+cat .run/jobs/openrouter/smoke-cella-integration/*/build-pmars__*/artifacts/report.json
+```
+
+Read the chronicle. Each machine has one directory. `verdict` and
+`ledger` are binary; titanium renders each to a `.txt`.
+```bash
+cat .run/jobs/.../build-pmars__*/cella-chronicle/*/verdict.txt
+```
+
+Read the per-machine engine log. Each machine writes its own, so the
+solution's crossings stay separate from the verifier's.
+```bash
+cat .run/jobs/.../cella-engine/<vm-id>/engine.log
+```
+
+### G.8 When a crossing is refused
+
+A refused crossing means a name is not granted. Find it in the
+appliance engine log.
+```bash
+grep refuse .run/jobs/.../cella-engine/*-term/engine.log
+```
+A refusal line looks like this.
+```text
+cella engine: refuse id=… host='files.pythonhosted.org' ip=… port=443 direction=0
+```
+Read the `host=` field. That is the name the task reached. Add its
+grant to `cella.policy`.
+```text
+release outgoing files.pythonhosted.org:443/tcp (keep_open=5m) (skip_freeze=true)
+release incoming files.pythonhosted.org:443/tcp
+```
+Run the smoke again (G.6).
+
+### G.9 When it is slow
+
+The first call to a name is slow. Later calls are fast. This is normal.
+The first crossing to each new destination freezes once. A membrane
+memory then makes the destination live. You see the curve in
+`report.json`.
+```json
+"calls": [{"secs": 16.0}, {"secs": 4.6}, {"secs": 4.6}]
+```
+The cold call pays the freeze. The two warm calls do not.
+
+The wire itself does not wait. Titanium pre-plants the memory for ARP
+and the appliance ports before the first crossing (§3.2). So the wire
+comes up at once. You do not tune this.
+
 ## 9. Limitations and future work
 
 * **One vCPU.** Every cella machine runs a single vCPU. The
