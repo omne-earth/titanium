@@ -684,6 +684,23 @@ def test_concrete_grants_pre_plant_at_stream_open_but_names_do_not():
     assert len(again) == 1 and again[0].release is not None
 
 
+def test_the_memory_lapses_and_re_plants_when_keep_open_elapses():
+    from titanium.environments.cella.engine import MembraneMemoryTable
+
+    table = MembraneMemoryTable()
+    key = ("ip", bytes([1, 1, 1, 1]), 443, 6)
+    # First crossing at t=0 plants (300s window); a later crossing while
+    # remembered does not.
+    assert table.plant(key, keep_open=300, now=0.0) is True
+    assert table.plant(key, keep_open=300, now=100.0) is False
+    # After the window lapses, the destination is unplanted again and the
+    # next crossing re-plants -- the remembered -> unplanted edge.
+    assert table.plant(key, keep_open=300, now=301.0) is True
+    # reset() empties the whole circuit (a fresh machine).
+    table.reset()
+    assert table.plant(key, keep_open=300, now=302.0) is True
+
+
 def test_an_incoming_grant_never_plants_a_memory():
     # An incoming park never freezes, so an incoming memory is
     # meaningless -- and cella keys a memory by destination alone, so an

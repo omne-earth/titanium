@@ -47,6 +47,7 @@ import argparse
 import asyncio
 import logging
 import signal
+import time
 from pathlib import Path
 
 from grpclib.const import Cardinality, Handler
@@ -80,6 +81,39 @@ def _memory_key(destination: Destination) -> tuple:
     return ("l2", destination.ethertype)
 
 
+class MembraneMemoryTable:
+    """The membrane-memory lifecycle as an explicit state machine: one
+    small automaton per destination, scoped to a single machine's bridge
+    stream (docs/environments/CELLA.md, "The membrane-memory state
+    machine").
+
+        unplanted --(plant)--> remembered --(keep_open lapses)--> unplanted
+
+    A destination is *remembered* while its ``keep_open`` window is live;
+    cella clears its memory file when the window expires, so the
+    destination lapses back to *unplanted* by the same arithmetic and the
+    next crossing re-plants it. State is per machine: :meth:`reset` at
+    each new stream, because every exec cycle is a fresh machine with an
+    empty membrane memory."""
+
+    def __init__(self) -> None:
+        self._until: dict[tuple, float] = {}
+
+    def reset(self) -> None:
+        self._until.clear()
+
+    def plant(self, key: tuple, keep_open: int, now: float) -> bool:
+        """Move a destination to *remembered* when it is *unplanted* or
+        its window has lapsed; return ``True`` when this call planted (so
+        a memory must be emitted), ``False`` when it was already
+        remembered (the verdict rides alone)."""
+        deadline = self._until.get(key)
+        if deadline is not None and now < deadline:
+            return False
+        self._until[key] = now + keep_open
+        return True
+
+
 class PolicyJudge:
     """The task's ``cella.policy`` grants as a per-crossing judge.
 
@@ -103,36 +137,35 @@ class PolicyJudge:
     ) -> None:
         self.policy = policy
         self.recorder = recorder
-        self._planted: set[tuple] = set()
+        self._memory = MembraneMemoryTable()
 
     def reset(self) -> None:
-        """Forget which memories are planted -- called when a new bridge
-        stream opens. Each stream serves a fresh machine with an empty
-        membrane memory, so every machine must be planted from scratch:
-        pre-planted at open and reactively as it crosses. A global
-        memory would plant only the first machine's, leaving every later
-        exec cycle to freeze on its first ARP again."""
-        self._planted = set()
+        """Reset the memory circuit -- called when a new bridge stream
+        opens. Each stream serves a fresh machine with an empty membrane
+        memory, so every machine is planted from scratch: pre-planted at
+        open and reactively as it crosses. A global memory would plant
+        only the first machine's, leaving every later exec cycle to
+        freeze on its first ARP again."""
+        self._memory.reset()
 
     def standing_decisions(self) -> list[Decision]:
         """The memories to pre-plant when a bridge stream opens, before
         any Event -- the reference engine (cella-engine motor) does this
-        so the first crossing to a granted concrete destination never
-        freezes. Without it, every destination's first crossing freezes
-        once (ARP included), which under load wedges the wire at ARP.
-        Each is marked planted so :meth:`decide` does not repeat it."""
+        so the first crossing to a granted *concrete* destination (ARP,
+        an exact ip:port/proto) never freezes. Without it, every
+        destination's first crossing freezes once (ARP included), which
+        under load wedges the wire at ARP."""
         if self.policy is None or self.recorder is not None:
             return []
+        now = time.monotonic()
         decisions = []
         for grant in self.policy.grants:
             memory = grant.standing_memory()
             if memory is None:
                 continue
             key = _memory_key(memory.destination)
-            if key in self._planted:
-                continue
-            self._planted.add(key)
-            decisions.append(Decision(id=b"", membrane_memory=memory))
+            if self._memory.plant(key, memory.keep_open, now):
+                decisions.append(Decision(id=b"", membrane_memory=memory))
         return decisions
 
     def decide(self, operation: Operation) -> list[Decision]:
@@ -153,13 +186,13 @@ class PolicyJudge:
             verdict = Decision(id=operation.id, refusal=Refusal(why=why))
 
         decisions = [verdict]
-        # Plant the standing memory once per exact destination: the
-        # bridge stamps and appends it, and the membrane stops freezing
-        # on that crossing. id empty -- a memory names a destination.
+        # Plant the standing memory when the destination is unplanted or
+        # its window has lapsed: the bridge stamps and appends it, and
+        # the membrane stops freezing on that crossing. id empty -- a
+        # memory names a destination, not an operation.
         if match.memory is not None and operation.destination is not None:
             key = _memory_key(operation.destination)
-            if key not in self._planted:
-                self._planted.add(key)
+            if self._memory.plant(key, match.memory.keep_open, time.monotonic()):
                 decisions.append(Decision(id=b"", membrane_memory=match.memory))
         return decisions
 
