@@ -1,6 +1,6 @@
 .ONESHELL:
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella-policy-engine smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www smoke-cella smoke-cella-all
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella-policy-engine smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www smoke-cella smoke-cella-all smoke-cella-integration
 
 -include .secrets
 
@@ -274,14 +274,17 @@ smoke-on-agent-timeout: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-on-agent
 # Cella's own verbs drive it through boot -> freeze -> thaw -> stop -> archive
 # -> destroy with the guest's network disabled.
 #
-# Every cella probe task, one oracle `titanium run`, one jobs dir. The
-# tasks stay separate -- each is its own topology (airgapped is --net
-# none; www is the judged world nic and cella.policy) -- but they run
-# together and land under .run/jobs/<backend>/smoke-cella, one signal.
-# Oracle-only, no runner user (cella's jail owns separation), gating on
-# each task's own offline verifier like fix-git-offline. The shared
-# SMOKE_TASKS are excluded: they need agents and egress the sealed rung
-# does not carry yet (docs/environments/CELLA.md §9).
+# smoke-cella-integration: the cella-*unique* probes -- the policy
+# engine and the terminated pair, which no other rung has. Each is its
+# own topology (airgapped is --net none; www is the terminated pair,
+# name-judged by cella.policy), but they run together under one oracle
+# `titanium run` and land under .run/jobs/<backend>/smoke-cella-integration,
+# one signal. Oracle-only, no runner user (cella's jail owns separation),
+# gating on each task's own offline verifier.
+#
+# The rung-parity smoke (a plain `smoke-cella` running the shared bench
+# tasks with a real agent, like smoke-krun-podman) is a separate target
+# on its own branch; this branch is the policy engine.
 CELLA_SMOKE_TASKS := \
 	examples/smoke/cella-policy-engine-airgapped \
 	examples/smoke/cella-policy-engine-www \
@@ -292,7 +295,7 @@ CELLA_SMOKE_TASKS := \
 # and each www task's cella.policy is collected, then copied back to
 # the example for review -- observe once, enforce forever.
 DRY_RUN ?= false
-smoke-cella: sync .podman .cella
+smoke-cella-integration: sync .podman .cella
 	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
 	cp -r $(CELLA_SMOKE_TASKS) $(RUN_TASKS)/$(BACKEND)/$@/
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
@@ -307,7 +310,7 @@ smoke-cella: sync .podman .cella
 		cp $(RUN_TASKS)/$(BACKEND)/$@/$$t/environment/cella.policy examples/smoke/$$t/environment/cella.policy \
 		&& echo "collected $$t/cella.policy copied back -- review and commit it"; done)
 
-smoke-cella-all: smoke-cella-rootfs smoke-cella
+smoke-cella-all: smoke-cella-rootfs smoke-cella-integration
 
 # The smoke needs the lab flavor -- the field flavor writes no console.log,
 # so the guest cannot be observed. .cella-debug builds it from the rev pinned
