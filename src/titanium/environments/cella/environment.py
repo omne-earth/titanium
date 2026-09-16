@@ -157,6 +157,57 @@ _RUNNER_DIR = "/titanium"
 # How long past the exec timeout the guest gets to boot and halt.
 _BOOT_MARGIN_SEC = config.BOOT_MARGIN_SEC
 
+# How often the engine-log drainer writes its batch to disk.
+_ENGINE_LOG_DRAIN_SEC = 1.0
+
+
+class _BufferedEngineLog(logging.Handler):
+    """The engine's per-machine log sink, kept off the decide hot path.
+
+    Now that cella delivers a park to the judge in ~1ms, a synchronous
+    file write per crossing (a plain FileHandler flushes every record)
+    would be the throughput ceiling. So ``emit`` only appends the record
+    to an in-memory buffer -- microseconds, no I/O -- and a background
+    drainer (:meth:`CellaEnvironment._drain_engine_logs`) formats and
+    writes the batch once a second, off the engine loop. The buffer is
+    FIFO, so the log reads in the exact order the engine judged; the
+    verdicts themselves are never batched (the decide loop still answers
+    each park in order). ``close`` drains the remainder, so the record is
+    complete."""
+
+    def __init__(self, path: Path):
+        super().__init__()
+        self._file = open(path, "a", encoding="utf-8")
+        self._buf: list[logging.LogRecord] = []
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        with self._lock:
+            if not self._closed:
+                self._buf.append(record)
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._closed or not self._buf:
+                return
+            pending, self._buf = self._buf, []
+            self._file.write("".join(self.format(r) + "\n" for r in pending))
+            self._file.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            if not self._closed:
+                if self._buf:
+                    self._file.write(
+                        "".join(self.format(r) + "\n" for r in self._buf)
+                    )
+                    self._file.flush()
+                self._buf = []
+                self._file.close()
+                self._closed = True
+        super().close()
+
 
 class CellaError(RuntimeError):
     """A cella verb or an evidence read failed."""
@@ -215,6 +266,11 @@ class CellaEnvironment(BaseEnvironment):
         self._engines: dict[str, tuple] = {}
         self._engine_loop: asyncio.AbstractEventLoop | None = None
         self._engine_loop_thread: threading.Thread | None = None
+        # Per-machine engine-log sinks and the one drainer that writes their
+        # batches to disk every second, off the decide hot path.
+        self._engine_log_sinks: dict[str, _BufferedEngineLog] = {}
+        self._log_drain_thread: threading.Thread | None = None
+        self._log_drain_stop = threading.Event()
         self._work: Path | None = None
         # The terminated pair (terminator.py) stands when the workload
         # needs the world at all: an agent always needs its inference
@@ -627,10 +683,31 @@ class CellaEnvironment(BaseEnvironment):
         engine_logger.setLevel(logging.INFO)
         engine_logger.propagate = False
         if not engine_logger.handlers:
-            handler = logging.FileHandler(self._engine_dir(key) / "engine.log")
+            handler = _BufferedEngineLog(self._engine_dir(key) / "engine.log")
             handler.setFormatter(logging.Formatter("%(message)s"))
             engine_logger.addHandler(handler)
+            self._engine_log_sinks[key] = handler
+            self._ensure_log_drain()
         return engine_logger
+
+    def _ensure_log_drain(self) -> None:
+        """Start the one background thread that writes every machine's
+        engine-log batch to disk each second, if it is not running."""
+        if self._log_drain_thread is None:
+            self._log_drain_stop.clear()
+            self._log_drain_thread = threading.Thread(
+                target=self._drain_engine_logs, name="cella-log-drain", daemon=True
+            )
+            self._log_drain_thread.start()
+
+    def _drain_engine_logs(self) -> None:
+        """Flush each machine's buffered engine log once a second. The file
+        writes happen here, never on the decide hot path. `wait` returns
+        True only when stop is set, so teardown ends the loop at once; the
+        final flush is each sink's own close()."""
+        while not self._log_drain_stop.wait(_ENGINE_LOG_DRAIN_SEC):
+            for sink in list(self._engine_log_sinks.values()):
+                sink.flush()
 
     def _ensure_engine(self, key: str, policy_path: Path, dry_run: bool) -> int:
         """Start one in-process policy engine for the machine named
@@ -675,6 +752,9 @@ class CellaEnvironment(BaseEnvironment):
         if running is None:
             return
         self._close_server(running[0])
+        # Drop the sink from the drainer's view first, then close it (close
+        # flushes the last batch), so the drainer never races the close.
+        self._engine_log_sinks.pop(key, None)
         engine_logger = logging.getLogger(f"titanium.cella.engine.{key}")
         for handler in list(engine_logger.handlers):
             handler.close()
@@ -684,6 +764,12 @@ class CellaEnvironment(BaseEnvironment):
         for key in list(self._engines):
             self._kill_engine(key)
         self._engines = {}
+        # Each sink was flushed and closed by its _kill_engine; stop the
+        # drainer now that there is nothing left to write.
+        if self._log_drain_thread is not None:
+            self._log_drain_stop.set()
+            self._log_drain_thread.join(timeout=5)
+            self._log_drain_thread = None
         if self._engine_loop is not None:
             self._engine_loop.call_soon_threadsafe(self._engine_loop.stop)
             if self._engine_loop_thread is not None:

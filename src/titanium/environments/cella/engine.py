@@ -218,6 +218,14 @@ class EngineService:
         # A per-machine logger when run in-process (one log file per vm),
         # the module logger when run standalone.
         self._logger = engine_logger or logger
+        # Per-verdict latency: with cella's event-driven ledger tail a park
+        # reaches the judge in ~1ms, so the engine's own decision cost is
+        # the new throughput ceiling. Track it (the judge is a dict lookup,
+        # so this should stay well under a millisecond) and report the
+        # summary when the stream ends.
+        self._verdict_count = 0
+        self._verdict_total_ns = 0
+        self._verdict_max_ns = 0
 
     def __mapping__(self) -> dict[str, Handler]:
         return {
@@ -263,7 +271,13 @@ class EngineService:
                     self._logger.debug("cella engine: event (not a park)")
                     continue
                 destination = operation.destination
-                for decision in self._policy.decide(operation):
+                started_ns = time.perf_counter_ns()
+                decisions = self._policy.decide(operation)
+                elapsed_ns = time.perf_counter_ns() - started_ns
+                self._verdict_count += 1
+                self._verdict_total_ns += elapsed_ns
+                self._verdict_max_ns = max(self._verdict_max_ns, elapsed_ns)
+                for decision in decisions:
                     if decision.membrane_memory is not None:
                         self._logger.info(
                             "cella engine: remember ip=%s port=%d skip_freeze=%s keep_open=%d",
@@ -300,6 +314,17 @@ class EngineService:
             )
             if isinstance(exc, asyncio.CancelledError):
                 raise  # cancellation must propagate
+        finally:
+            # The engine's own decision cost, now that cella delivers each
+            # park in ~1ms: this is what would re-throttle throughput if it
+            # were not tiny. Reported per stream (cumulative for the engine).
+            if self._verdict_count:
+                self._logger.info(
+                    "cella engine: %d verdicts, avg %d ns, max %d ns",
+                    self._verdict_count,
+                    self._verdict_total_ns // self._verdict_count,
+                    self._verdict_max_ns,
+                )
 
 
 async def serve(
