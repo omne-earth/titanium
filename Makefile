@@ -312,6 +312,29 @@ smoke-cella-integration: sync .podman .cella
 
 smoke-cella-all: smoke-cella-rootfs smoke-cella-integration
 
+# smoke-cella: the rung-parity smoke -- the real bench tasks under cella,
+# the way smoke-krun-podman runs them under krun. fix-git-offline is
+# airgapped (--net none); build-pmars is the terminated pair, because it
+# fetches Debian packages over apt. build-pmars is vendored (cloned from
+# terminal-bench-2), so it carries no cella.policy of its own; titanium
+# owns one at examples/smoke/policies/build-pmars/ and copies it into the
+# staged task. Oracle agent, each task's own offline verifier. DRY_RUN=true
+# re-collects build-pmars's policy and copies it back for review (§3.1).
+CELLA_BENCH_TASKS := examples/smoke/fix-git-offline $(TASKS_PATH_TB2)/build-pmars
+
+smoke-cella: sync .podman .cella | .sentinel/tasks
+	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
+	cp -r $(CELLA_BENCH_TASKS) $(RUN_TASKS)/$(BACKEND)/$@/
+	mkdir -p $(RUN_TASKS)/$(BACKEND)/$@/build-pmars/environment
+	$(if $(filter true,$(DRY_RUN)),,cp examples/smoke/policies/build-pmars/cella.policy \
+		$(RUN_TASKS)/$(BACKEND)/$@/build-pmars/environment/cella.policy)
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ \
+		$(if $(filter true,$(DRY_RUN)),TITANIUM_EXTRA_ARGS="--ek dry_run=true",)
+	$(if $(filter true,$(DRY_RUN)),cp $(RUN_TASKS)/$(BACKEND)/$@/build-pmars/environment/cella.policy \
+		examples/smoke/policies/build-pmars/cella.policy \
+		&& echo "collected build-pmars/cella.policy copied back -- review and commit it")
+
 # The smoke needs the lab flavor -- the field flavor writes no console.log,
 # so the guest cannot be observed. .cella-debug builds it from the rev pinned
 # in runtime.env and CELLA_BIN defaults to that build; export CELLA_BIN to

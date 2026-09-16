@@ -1,0 +1,8 @@
+# cella.policy for build-pmars (titanium-owned: the task is vendored).
+# The task builds pMARS from Debian source packages, so it fetches from
+# the apt mirror over plain HTTP. Collected once with DRY_RUN=true, then
+# reviewed: only the world name is kept -- the appliance's own infra
+# (upstream DNS, the reply window, ARP) is composed by titanium, not
+# declared here. The window keeps the flow live instead of freezing.
+release outgoing deb.debian.org:80/tcp (keep_open=5m) (skip_freeze=true)
+release incoming deb.debian.org:80/tcp
