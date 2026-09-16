@@ -277,25 +277,27 @@ rebuilds N filesystems. This is the price of the sealed model, paid
 where the model says to pay it.
 
 Each boot is one harness command, so the machines of a trial read as
-its phases in order. A real-agent trial boots roughly six; the
-verifier's machines carry a `-verifier` suffix (from the
-`begin_verification` hook), so its crossings read apart from the
-agent's:
+its phases in order. Every machine is named with the phase it serves --
+`titanium-<task>-c<NNNN>-<phase>` -- from the trial's `set_phase` calls
+(a no-op on every other rung), so a `cella list` or a chronicle reads
+setup -> agent -> collect -> verify at a glance. A real-agent trial
+boots roughly six:
 
-| Boot               | Command               | Reason                              |
-|--------------------|-----------------------|-------------------------------------|
-| cycle 0            | `pwd`                 | resolve the agent's working directory |
-| cycle 1            | the setup script      | agent install and environment prep  |
-| cycle 2            | the agent run         | the agent attempts the task         |
-| cycle 3            | `pre_artifacts.sh`    | collect state before grading        |
-| cycle 4 (verifier) | `chmod +x` the tests  | verifier prep                       |
-| cycle 5 (verifier) | the test script       | grade against evidence              |
+| Machine suffix | Command              | Reason                              |
+|----------------|----------------------|-------------------------------------|
+| `-setup`       | `pwd`                | resolve the agent's working directory |
+| `-setup`       | the setup script     | agent install and environment prep  |
+| `-agent`       | the agent run        | the agent attempts the task         |
+| `-collect`     | `pre_artifacts.sh`   | collect state before grading        |
+| `-verify`      | `chmod +x` the tests | verifier prep                       |
+| `-verify`      | the test script      | grade against evidence              |
 
-The exact count varies with the task -- an agentless oracle trial is
-shorter (no agent run; the solution replay stands in), and a task with
-no setup or pre-artifacts step drops those boots -- but the shape holds:
-setup, run, collect, verify, each a boot, because nothing may exec into
-a live machine.
+Boots in the same phase share the suffix (the cycle number keeps their
+names distinct). The exact count varies with the task -- an agentless
+oracle trial has no agent run (the solution replay stands in), and a
+task with no setup or pre-artifacts step drops those boots -- but the
+shape holds: setup, agent, collect, verify, each a boot, because nothing
+may exec into a live machine.
 
 ## 5. The smoke: `make smoke-cella-integration`
 

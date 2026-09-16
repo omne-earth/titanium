@@ -242,9 +242,11 @@ class CellaEnvironment(BaseEnvironment):
         self._pending: list[BootEntry] = []
         self._pending_paths: set[str] = set()
         self._cycle = 0
-        # Set once the verifier phase begins (begin_verification), so the
-        # verifier's per-command machines are named apart from the agent's.
-        self._verifying = False
+        # The trial phase the current machines serve (set_phase). Each
+        # cycle's machine is named with its phase, so a chronicle reads as
+        # setup -> agent -> collect -> verify. Defaults to setup: the boots
+        # before the agent runs are the harness preparing the guest.
+        self._phase = "setup"
         self._image_config: dict = {}
         self._machine: str | None = None
 
@@ -851,17 +853,17 @@ class CellaEnvironment(BaseEnvironment):
             shutil.rmtree(flavor_dir, ignore_errors=True)
         self._appliance = None
 
-    async def begin_verification(self) -> None:
-        """The verifier phase is starting: name every machine from here on
-        with a ``-verifier`` suffix, so its cycles (and their chronicle and
-        engine logs) read apart from the agent's."""
-        self._verifying = True
+    async def set_phase(self, phase: str) -> None:
+        """Name every machine from here on with the phase it serves, so its
+        cycles (and their chronicle and engine logs) read apart: setup ->
+        agent -> collect -> verify."""
+        self._phase = phase
 
     def _publish_cycle_flavor(self, boot_layer: BootLayer) -> str:
         assert self._work is not None
         flavor = _flavor_name(self.session_id, self._cycle)
-        if self._verifying:
-            flavor = f"{flavor}-verifier"
+        if self._phase:
+            flavor = f"{flavor}-{self._phase}"
         size_bytes = (self._effective_storage_mb or 5120) * (1 << 20)
         with staging_flavor_dir(home=None) as staging:
             artifact = staging / ROOTFS_ARTIFACT_NAME
@@ -1211,11 +1213,13 @@ class CellaEnvironment(BaseEnvironment):
                 )
                 bridge = self._spawn_bridge(name, port)
             # Canonical budget: the task's own declared timeout for this
-            # phase (verifier once begin_verification has fired, else the
+            # phase (verifier once set_phase("verify") has fired, else the
             # agent). A caller-supplied timeout wins; the config ceiling is
             # only the last resort when the task declared neither.
             phase_timeout = (
-                self.verifier_timeout_sec if self._verifying else self.agent_timeout_sec
+                self.verifier_timeout_sec
+                if self._phase == "verify"
+                else self.agent_timeout_sec
             )
             budget = (
                 timeout_sec or phase_timeout or config.CELLA_EXEC_TIMEOUT

@@ -569,14 +569,15 @@ class BaseEnvironment(ABC):
         written by the in-container agent user; other environments are no-ops.
         """
 
-    async def begin_verification(self) -> None:
-        """Signal that the verification phase is starting.
+    async def set_phase(self, phase: str) -> None:
+        """Announce the trial phase now beginning: ``setup``, ``agent``,
+        ``collect``, or ``verify``.
 
-        Called once by the verifier before it uploads tests or runs a
-        command, so an environment that spawns a fresh instance per command
-        (cella) can name and account the verifier's instances apart from the
-        agent's. Most environments run the verifier in the same instance as
-        the agent and need no action, so the default is a no-op.
+        The trial flow calls this at each phase boundary so an environment
+        that spawns a fresh instance per command (cella) can name and
+        account each instance by the phase it served. Most environments run
+        the whole trial in one instance and need no action, so the default
+        is a no-op.
         """
 
     @abstractmethod

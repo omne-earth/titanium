@@ -304,6 +304,7 @@ class Trial:
             self.result.agent_setup.finished_at = datetime.now(timezone.utc)
 
     async def _execute_agent(self) -> None:
+        await self._environment.set_phase("agent")
         await self._invoke_hooks(TrialEvent.AGENT_START)
 
         self.result.agent_execution = TimingInfo(started_at=datetime.now(timezone.utc))
@@ -824,6 +825,7 @@ class Trial:
         script = self._task.paths.pre_artifacts_path
         if not script.exists():
             return
+        await self._environment.set_phase("collect")
         target = "/tmp/.titanium-pre-artifacts.sh"
         try:
             await self._environment.upload_file(
