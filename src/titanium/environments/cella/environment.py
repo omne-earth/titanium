@@ -183,6 +183,10 @@ class _BufferedEngineLog(logging.Handler):
         self._closed = False
 
     def emit(self, record: logging.LogRecord) -> None:
+        # Stamp the wall-clock now, at the crossing, not at the drain a
+        # second later. host_ns (nanoseconds since the epoch) matches
+        # cella's audit book, so the two logs read on one clock.
+        record.host_ns = time.time_ns()
         with self._lock:
             if not self._closed:
                 self._buf.append(record)
@@ -684,7 +688,8 @@ class CellaEnvironment(BaseEnvironment):
         engine_logger.propagate = False
         if not engine_logger.handlers:
             handler = _BufferedEngineLog(self._engine_dir(key) / "engine.log")
-            handler.setFormatter(logging.Formatter("%(message)s"))
+            # host_ns first, then the message -- uniform with the audit book.
+            handler.setFormatter(logging.Formatter("host_ns=%(host_ns)d %(message)s"))
             engine_logger.addHandler(handler)
             self._engine_log_sinks[key] = handler
             self._ensure_log_drain()
