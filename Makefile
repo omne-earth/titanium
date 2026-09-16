@@ -329,7 +329,7 @@ smoke-cella: sync .podman .cella | .sentinel/tasks
 	$(if $(filter true,$(DRY_RUN)),,cp examples/smoke/policies/build-pmars/cella.policy \
 		$(RUN_TASKS)/$(BACKEND)/$@/build-pmars/environment/cella.policy)
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
-	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ \
+	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ \
 		$(if $(filter true,$(DRY_RUN)),TITANIUM_EXTRA_ARGS="--ek dry_run=true",)
 	$(if $(filter true,$(DRY_RUN)),cp $(RUN_TASKS)/$(BACKEND)/$@/build-pmars/environment/cella.policy \
 		examples/smoke/policies/build-pmars/cella.policy \
