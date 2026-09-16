@@ -105,6 +105,15 @@ class PolicyJudge:
         self.recorder = recorder
         self._planted: set[tuple] = set()
 
+    def reset(self) -> None:
+        """Forget which memories are planted -- called when a new bridge
+        stream opens. Each stream serves a fresh machine with an empty
+        membrane memory, so every machine must be planted from scratch:
+        pre-planted at open and reactively as it crosses. A global
+        memory would plant only the first machine's, leaving every later
+        exec cycle to freeze on its first ARP again."""
+        self._planted = set()
+
     def standing_decisions(self) -> list[Decision]:
         """The memories to pre-plant when a bridge stream opens, before
         any Event -- the reference engine (cella-engine motor) does this
@@ -179,6 +188,9 @@ class EngineService:
         # message by default, which deadlocks the two -- each side
         # waiting for the other, measured against the real bridge.
         await stream.send_initial_metadata()
+        # A new stream is a new machine with an empty membrane memory:
+        # plant it from scratch.
+        self._policy.reset()
         # Pre-plant the standing memories before the first Event (as
         # cella-engine motor does): the first crossing to each granted
         # concrete destination -- ARP, the appliance's ports, the reply
