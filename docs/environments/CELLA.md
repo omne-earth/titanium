@@ -273,9 +273,29 @@ disk after) and never touch a machine.
 nothing persists but trial evidence.
 
 The cost is stated plainly: a trial with N execs boots N machines and
-rebuilds N filesystems. The oracle-plus-verifier flow of the smoke
-task is 3–4 cycles. This is the price of the sealed model, paid where
-the model says to pay it.
+rebuilds N filesystems. This is the price of the sealed model, paid
+where the model says to pay it.
+
+Each boot is one harness command, so the machines of a trial read as
+its phases in order. A real-agent trial boots roughly six; the
+verifier's machines carry a `-verifier` suffix (from the
+`begin_verification` hook), so its crossings read apart from the
+agent's:
+
+| Boot               | Command               | Reason                              |
+|--------------------|-----------------------|-------------------------------------|
+| cycle 0            | `pwd`                 | resolve the agent's working directory |
+| cycle 1            | the setup script      | agent install and environment prep  |
+| cycle 2            | the agent run         | the agent attempts the task         |
+| cycle 3            | `pre_artifacts.sh`    | collect state before grading        |
+| cycle 4 (verifier) | `chmod +x` the tests  | verifier prep                       |
+| cycle 5 (verifier) | the test script       | grade against evidence              |
+
+The exact count varies with the task -- an agentless oracle trial is
+shorter (no agent run; the solution replay stands in), and a task with
+no setup or pre-artifacts step drops those boots -- but the shape holds:
+setup, run, collect, verify, each a boot, because nothing may exec into
+a live machine.
 
 ## 5. The smoke: `make smoke-cella-integration`
 
