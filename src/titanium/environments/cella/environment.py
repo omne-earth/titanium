@@ -1227,18 +1227,26 @@ class CellaEnvironment(BaseEnvironment):
         return result
 
     # The per-machine files that make the run auditable: the Event
-    # chronicle, the Decision record, the witnessed verb book, and the
-    # standing memories the engine planted. Destroy takes them with the
-    # machine, so they are copied out first -- the rung's whole point is
-    # the record of every crossing the workload attempted, granted and
-    # refused. Plain files cella documents as readable; the disk, ram,
-    # and transient sockets are deliberately not audit evidence.
+    # chronicle, the Decision record, the witnessed verb book, the
+    # standing memories the engine planted, the names the ratchet
+    # learned, the VMM's own execution log (boot and the freeze/thaw
+    # timings -- the cryogenic record), and the small state markers.
+    # Destroy takes them with the machine, so they are copied out first
+    # -- the rung's whole point is the record of every crossing the
+    # workload attempted, granted and refused. What is deliberately left
+    # behind: disk.img and ram.img (gigabytes, and a run-to-completion
+    # machine has nothing to resume -- see the guide's note on forensic
+    # archival), and the transient sockets and pid files.
     _CHRONICLE_FILES = (
         "network/ledger",
+        "network/names",
         "verdict",
         "audit",
         "membrane-memory",
         "manifest.json",
+        "vmm.log",
+        "valve",
+        "uid",
     )
 
     # The framed-protobuf books cella's ``--dump`` renders to text. The
