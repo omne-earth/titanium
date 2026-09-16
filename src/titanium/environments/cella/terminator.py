@@ -152,13 +152,23 @@ def wire_up_commands(interface: str, address: str) -> str:
 
 def member_prelude(interface: str) -> str:
     """The member's boot prelude: address the wire, fold the pair CA
-    into the system trust bundle (so every https client -- the agent's
-    SDK, git, curl, PyPI -- verifies the appliance's minted leaf), and
+    into the system trust bundle, point Python's TLS at that bundle, and
     pin the ephemeral port range to the reply window the appliance
-    grants. Each step tolerates a re-run and a minimal image."""
+    grants. Each step tolerates a re-run and a minimal image.
+
+    Folding the CA into the system bundle covers the clients that read
+    it -- curl, git, apt, and openssl. It does NOT cover a Python client
+    (the agent's inference SDK, PyPI's pip): those verify against
+    certifi's own bundle, not the system store, so the minted leaf reads
+    as a self-signed chain and the inference call fails on TLS. So the
+    prelude also exports SSL_CERT_FILE and REQUESTS_CA_BUNDLE at the
+    system bundle: runuser preserves this environment into the agent
+    (see the exec job), which is where the inference client runs."""
     return (
         wire_up_commands(interface, MEMBER_WIRE_ADDRESS)
         + f"cat {MEMBER_CA_PATH} >> {SYSTEM_CA_BUNDLE} 2>/dev/null || true\n"
+        + f"export SSL_CERT_FILE={SYSTEM_CA_BUNDLE}\n"
+        + f"export REQUESTS_CA_BUNDLE={SYSTEM_CA_BUNDLE}\n"
         + f"echo '{REPLY_PORT_LOW} {REPLY_PORT_HIGH}' "
         "> /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || true\n"
     )

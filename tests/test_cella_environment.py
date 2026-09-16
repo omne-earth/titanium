@@ -382,8 +382,12 @@ def test_member_trust_bakes_the_ca_and_points_the_resolver():
 def test_member_prelude_trusts_the_pair_and_pins_the_reply_window():
     prelude = term.member_prelude("eth0")
     assert f"ip addr replace {term.MEMBER_WIRE_ADDRESS}/24 dev eth0" in prelude
-    # The pair CA is folded into the system bundle every https client reads.
+    # The pair CA is folded into the system bundle the native clients read.
     assert f"cat {term.MEMBER_CA_PATH} >> {term.SYSTEM_CA_BUNDLE}" in prelude
+    # And Python's TLS is pointed at that bundle, so the agent's certifi-based
+    # inference client trusts the appliance's minted leaf, not just curl/git.
+    assert f"export SSL_CERT_FILE={term.SYSTEM_CA_BUNDLE}" in prelude
+    assert f"export REQUESTS_CA_BUNDLE={term.SYSTEM_CA_BUNDLE}" in prelude
     # The ephemeral range is pinned to the appliance's granted reply window.
     assert (
         f"echo '{term.REPLY_PORT_LOW} {term.REPLY_PORT_HIGH}' "
