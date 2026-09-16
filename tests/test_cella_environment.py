@@ -399,9 +399,11 @@ def test_member_policy_reaches_only_the_appliance():
     policy = Policy.parse(term.member_policy_text())
     lines = {g.line() for g in policy.grants}
     gw = term.APPLIANCE_WIRE_ADDRESS
-    assert f"release outgoing {gw}:443/tcp (keep_open=5m) (skip_freeze=true)" in lines
-    assert f"release outgoing {gw}:80/tcp (keep_open=5m) (skip_freeze=true)" in lines
-    assert f"release outgoing {gw}:53/udp (keep_open=90s) (skip_freeze=true)" in lines
+    # Every member hop is 24h: the plumbing to the appliance should never
+    # re-freeze mid-run (the window governs freeze frequency, not reach).
+    assert f"release outgoing {gw}:443/tcp (keep_open=24h) (skip_freeze=true)" in lines
+    assert f"release outgoing {gw}:80/tcp (keep_open=24h) (skip_freeze=true)" in lines
+    assert f"release outgoing {gw}:53/udp (keep_open=24h) (skip_freeze=true)" in lines
     # No world name ever appears on the member border.
     assert all(g.host == "" for g in policy.grants)
 

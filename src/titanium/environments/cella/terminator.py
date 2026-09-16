@@ -192,7 +192,19 @@ def member_policy_text() -> str:
     the appliance itself. The member reaches only its appliance -- 443
     (https + inference), 80 (apt), 53 (the interceptor's DNS) -- so its
     grants are three exact destinations, all to the gateway ip. Every
-    world name is judged on the *appliance's* border, never here."""
+    world name is judged on the *appliance's* border, never here.
+
+    Every window is 24h, like ARP. The reason is that each of these is
+    the member-to-appliance plumbing hop, not a world crossing: the
+    engine pre-plants the memory at stream open (so the first crossing
+    waits live, never freezes), and a 24h window keeps it from lapsing
+    for the machine's whole life. The member should freeze only when it
+    is genuinely blocked on an upstream decision, never on its own
+    plumbing -- a shorter window re-freezes the hot path each time it
+    lapses, and every re-freeze pays a full cryogenic thaw. Long is
+    safe here because these hops carry no world authorization: the
+    world name is resolved and judged at the appliance, so the window
+    governs freeze frequency, not what the member may reach."""
     gw = APPLIANCE_WIRE_ADDRESS
     return (
         "# The member border (appended by titanium): the wire plane's\n"
@@ -200,9 +212,9 @@ def member_policy_text() -> str:
         "# terminator; the world names are judged at the appliance.\n"
         "release outgoing arp (keep_open=24h) (skip_freeze=true)\n"
         "release incoming arp\n"
-        + _round_trip(f"{gw}:443", "tcp", "5m")
-        + _round_trip(f"{gw}:80", "tcp", "5m")
-        + _round_trip(f"{gw}:53", "udp", "90s")
+        + _round_trip(f"{gw}:443", "tcp", "24h")
+        + _round_trip(f"{gw}:80", "tcp", "24h")
+        + _round_trip(f"{gw}:53", "udp", "24h")
     )
 
 

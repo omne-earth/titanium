@@ -628,3 +628,39 @@ Use it for a targeted run, not a routine smoke.
   appliance at all.
 * **Windows tasks are unsupported.** The rootfs conversion is a
   Linux systemd story.
+
+## Decisions
+
+Opinionated defaults, with the reason each was chosen. A default here
+is a deliberate ruling, not an accident; change one only against the
+reason recorded with it.
+
+### The member border holds every hop live for 24h
+
+The member's grants to its appliance -- ARP, `443` (https and the
+agent's inference line), `80` (apt), `53` (the interceptor's DNS) --
+all carry `keep_open=24h` with `skip_freeze=true`.
+
+The window governs *freeze frequency*, not reach. Each of these is the
+member-to-appliance plumbing hop, not a world crossing: the world name
+is resolved and judged on the *appliance's* border, so a long window on
+the member authorizes nothing new. What it buys is the absence of a
+re-freeze. The engine pre-plants the memory for each concrete
+destination at stream open, so the first crossing already waits live
+and never freezes; a finite window then lapses mid-run, and the next
+crossing to that hop parks with no live memory and freezes -- and every
+freeze pays a full cryogenic thaw (a 2 GB guest re-warms in ~20-28 s).
+A real agent run makes DNS and inference crossings for minutes, so a
+short window (the earlier `90s` DNS, `5m` https) lapsed repeatedly and
+the hot path re-froze again and again; one build-pmars run froze ten
+times, about four minutes of pure re-warming, and exceeded its exec
+budget.
+
+24h -- effectively the machine's whole life, and the same window ARP
+already used -- keeps the pre-planted memory from ever lapsing, so the
+member freezes only when it is genuinely blocked on an upstream
+decision, never on its own plumbing. This applies to every cella task.
+
+The rule does **not** extend to the appliance's *world-host* windows.
+Those gate real world egress and real re-judgment, so they stay a
+deliberate, shorter knob -- a different border, a different rule.
