@@ -34,7 +34,7 @@ Every environment installs agents, honors per-task network allowlists, and runs 
 | **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel | KVM microVM (libkrun) | KVM micro-VM + a judged network membrane |
 | **Engine** | Docker daemon | rootless Podman, no socket | Docker daemon | rootless Podman, no socket | rootless Podman, no socket | cella — no daemon, no host network object |
 | **Runtime** | runc | crun | runsc | runsc | krun | the cella VMM, direct on KVM |
-| **Kernel isolation** | none — workload syscalls hit the host kernel, seccomp-filtered | none — workload syscalls hit the host kernel, seccomp-filtered | Sentry, a userspace application kernel, absorbs the workload's syscalls | Sentry, a userspace application kernel, absorbs the workload's syscalls | a dedicated guest kernel (libkrunfw) inside a KVM VM | a dedicated guest kernel inside a KVM VM; one boot per command, disk to disk |
+| **Kernel isolation** | none — workload syscalls hit the host kernel, seccomp-filtered | none — workload syscalls hit the host kernel, seccomp-filtered | Sentry, a userspace application kernel, absorbs the workload's syscalls | Sentry, a userspace application kernel, absorbs the workload's syscalls | a dedicated guest kernel (libkrunfw) inside a KVM VM | a dedicated guest kernel inside a KVM VM; one boot per command, with no live guest to exec into |
 | **A container escape lands as** | root | unprivileged user | host-side runsc processes, behind Sentry | unprivileged user, behind Sentry | unprivileged user, outside the VM | a process inside the sealed guest; the membrane still judges every frame out |
 | **Root daemon in the trust chain** | yes | no | yes | no | no | no |
 | **Runner separation** (run as a throwaway user) | — | the `titanium` user, via `make titanium-run` | — | the `titanium` user, via `make titanium-run` | the `titanium` user, via `make titanium-run` | intrinsic — cella is rootless and daemonless |
@@ -59,7 +59,7 @@ The validated alternative with a different boundary: each container runs in a KV
 
 ### cella
 
-The sealed-VM rung, on cella — hardware-isolated micro-VMs written directly on KVM, with no daemon, no capability, and no host network object. Each machine boots a dedicated guest kernel. A command is one boot, disk to disk: there is no channel into a live guest, and no exec-into.
+The sealed-VM rung, on cella — hardware-isolated micro-VMs written directly on KVM, with no daemon, no capability, and no host network object. Each machine boots a dedicated guest kernel. A command is one boot: the machine boots, runs the command, and powers off. There is no channel into a live guest, and no exec-into.
 
 The border is total. Every network frame parks at a membrane for an external decision, and titanium's in-process engine judges it by resolved name. The trajectory gains what no other rung records: the chronicle of every crossing the agent attempted, the refused ones included. A task with egress uses a terminated pair, so even TLS to the world is terminated on a consented pair CA and judged by name.
 
