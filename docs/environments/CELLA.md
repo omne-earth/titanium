@@ -157,9 +157,18 @@ then enforce forever:
    ARP needs both directions (the guest asks, the translator
    answers). Delete what the task does not need: background noise
    such as a resolver or time-sync attempt is a crossing the guest
-   *made*, not one the task *requires*. Widen to `*` by hand only
-   where a destination genuinely varies; collection always records
-   exact addresses.
+   *made*, not one the task *requires*. Under the terminated pair,
+   also strip the appliance's own plumbing — the reply-window ports,
+   the upstream resolver, ARP — titanium composes those grants
+   itself; the task file declares only the world names. Widen to `*`
+   by hand only where a destination genuinely varies; collection
+   always records exact addresses.
+   Then **add the windows**: give each kept `outgoing` world grant
+   `(keep_open=...) (skip_freeze=true)` — a bare grant freezes the
+   machine on *every* crossing to that host in enforce mode, not just
+   the first (§3.2). Size the window from the flow's real span with
+   headroom; `60m` is the working default (`build-pmars`'s policy is
+   the worked example).
 3. **Check it in beside the Dockerfile**, like a lockfile. The policy
    is a reviewable artifact; its diff is the task's network story.
 4. **Re-run without the flag** and confirm the reward: enforce mode
