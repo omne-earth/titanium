@@ -147,6 +147,17 @@ smoke targets copy it back to the example for review (see CELLA.md
 Do not write a `cella.policy` from guesswork. Observe once, review,
 then enforce.
 
+A dry run collects the policy a normative run requires, and that
+collection is the baseline. The baseline serves two purposes past the
+first green run. First, detection: in enforce mode every crossing
+outside the baseline is refused and lands in the chronicle, so a
+later benchmark run that behaves non-normatively shows itself in the
+refusal record — the membrane is an anomaly detector, not only a
+gate. Second, ablation: a committed policy pins the task's network
+contract, so runs that compare models, agents, or prompts differ only
+in the variable under study. The egress cannot drift between runs and
+confound the comparison.
+
 **Run it.** This applies to any task you bring to the rung — a new
 bench task, a future dataset, anything with world egress. Write the
 task first (Dockerfile, `task.toml`, `solution/`, `tests/`) and leave
