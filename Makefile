@@ -365,7 +365,7 @@ smoke-cella: sync .podman .cella | .sentinel/tasks
 	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ \
 		$(if $(filter true,$(DRY_RUN)),TITANIUM_EXTRA_ARGS="--ek dry_run=true",)
 	$(if $(filter true,$(DRY_RUN)),for t in $(notdir $(CELLA_BENCH_TASKS)); do \
-		test -f examples/smoke/cella/$$t/environment/cella.policy || continue; \
+		test -f $(RUN_TASKS)/$(BACKEND)/$@/$$t/environment/cella.policy || continue; \
 		cp $(RUN_TASKS)/$(BACKEND)/$@/$$t/environment/cella.policy examples/smoke/cella/$$t/environment/cella.policy \
 		&& echo "collected $$t/cella.policy copied back -- review and commit it"; done)
 
