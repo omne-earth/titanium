@@ -81,6 +81,8 @@ class BaseEnvironment(ABC):
         agent_install_spec: AgentInstallSpec | None = None,
         network_allowlist: NetworkAllowlist | None = None,
         default_user: str | int | None = None,
+        agent_timeout_sec: float | None = None,
+        verifier_timeout_sec: float | None = None,
         *args,
         **kwargs,
     ):
@@ -115,6 +117,14 @@ class BaseEnvironment(ABC):
         self._persistent_env: dict[str, str] = persistent_env or {}
         self.agent_install_spec = agent_install_spec
         self.network_allowlist = network_allowlist or NetworkAllowlist()
+        # The task's declared timeouts for the agent and verifier phases (from
+        # task.toml, resolved with any multiplier). Most environments enforce
+        # these at the trial layer's outer wait_for and ignore them here; a
+        # rung whose exec cannot be cancelled from outside (cella runs each
+        # command as an uncancellable VM boot) uses them as its own per-exec
+        # budget, so its safety bound matches what the task declared.
+        self.agent_timeout_sec = agent_timeout_sec
+        self.verifier_timeout_sec = verifier_timeout_sec
 
         self.logger = (logger or global_logger).getChild(__name__)
 
@@ -557,6 +567,17 @@ class BaseEnvironment(ABC):
         Called before agent logs are read on the host side (e.g. for trajectory
         conversion). Mounted environments (Docker on Linux) need to chown files
         written by the in-container agent user; other environments are no-ops.
+        """
+
+    async def set_phase(self, phase: str) -> None:
+        """Announce the trial phase now beginning: ``setup``, ``agent``,
+        ``collect``, or ``verify``.
+
+        The trial flow calls this at each phase boundary so an environment
+        that spawns a fresh instance per command (cella) can name and
+        account each instance by the phase it served. Most environments run
+        the whole trial in one instance and need no action, so the default
+        is a no-op.
         """
 
     @abstractmethod

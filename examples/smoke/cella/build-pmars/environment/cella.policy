@@ -1,0 +1,21 @@
+# cella.policy for build-pmars (titanium-owned: the task is vendored).
+# The task builds pMARS from Debian source packages (apt over plain
+# HTTP); the verifier bootstraps uv from astral.sh and GitHub releases,
+# then pulls pytest from PyPI. Collected once with DRY_RUN=true, then
+# reviewed: only the world names are kept -- the appliance's own infra
+# (upstream DNS, the reply window, ARP) is composed by titanium, not
+# declared here. The window keeps each flow live instead of freezing.
+release outgoing deb.debian.org:80/tcp (keep_open=60m) (skip_freeze=true)
+release incoming deb.debian.org:80/tcp
+release outgoing astral.sh:443/tcp (keep_open=60m) (skip_freeze=true)
+release incoming astral.sh:443/tcp
+release outgoing releases.astral.sh:443/tcp (keep_open=60m) (skip_freeze=true)
+release incoming releases.astral.sh:443/tcp
+release outgoing github.com:443/tcp (keep_open=60m) (skip_freeze=true)
+release incoming github.com:443/tcp
+release outgoing release-assets.githubusercontent.com:443/tcp (keep_open=60m) (skip_freeze=true)
+release incoming release-assets.githubusercontent.com:443/tcp
+release outgoing pypi.org:443/tcp (keep_open=60m) (skip_freeze=true)
+release incoming pypi.org:443/tcp
+release outgoing files.pythonhosted.org:443/tcp (keep_open=60m) (skip_freeze=true)
+release incoming files.pythonhosted.org:443/tcp

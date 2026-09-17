@@ -24,27 +24,31 @@ Every environment installs agents, honors per-task network allowlists, and runs 
 - **`gvisor`** — gVisor (runsc) on the Docker daemon ([docs/environments/GVISOR.md](docs/environments/GVISOR.md)).
 - **`gvisor-podman`** — gVisor on rootless Podman; the default ([docs/environments/GVISOR-PODMAN.md](docs/environments/GVISOR-PODMAN.md)).
 - **`krun-podman`** — KVM microVMs (krun) on rootless Podman ([docs/environments/KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md)).
+- **`cella`** — sealed KVM micro-VMs on cella, with a judged network membrane and no host daemon ([docs/environments/CELLA.md](docs/environments/CELLA.md)).
 - **`modal`** — the same task off-host on [Modal](https://modal.com), for cloud fan-out or GPUs.
 
 ### Birds-Eye View
 
-| | `docker` | `podman` | `gvisor` | `gvisor-podman` | `krun-podman` |
-|---|---|---|---|---|---|
-| **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel | KVM microVM (libkrun) |
-| **Engine** | Docker daemon | rootless Podman, no socket | Docker daemon | rootless Podman, no socket | rootless Podman, no socket |
-| **Runtime** | runc | crun | runsc | runsc | krun |
-| **Kernel isolation** | none — workload syscalls hit the host kernel, seccomp-filtered | none — workload syscalls hit the host kernel, seccomp-filtered | Sentry, a userspace application kernel, absorbs the workload's syscalls | Sentry, a userspace application kernel, absorbs the workload's syscalls | a dedicated guest kernel (libkrunfw) inside a KVM VM |
-| **A container escape lands as** | root | unprivileged user | host-side runsc processes, behind Sentry | unprivileged user, behind Sentry | unprivileged user, outside the VM |
-| **Root daemon in the trust chain** | yes | no | yes | no | no |
-| **Runner separation** (run as a throwaway user) | — | the `titanium` user, via `make titanium-run` | — | the `titanium` user, via `make titanium-run` | the `titanium` user, via `make titanium-run` |
-| **Overhead** | near-native | near-native; rootless image builds cost more — pre-load images | syscall interposition tax — syscall- and I/O-heavy workloads pay most | gvisor's tax, plus a user-mode network hop (pasta) at the host edge; pre-load images | VM boot per container, virtiofs I/O, and each guest kernel's memory footprint; pre-load images |
-| **Pre-load images** | — | `images-vendor` / `images-restore` | — | `images-vendor` / `images-restore` | `images-vendor` / `images-restore` |
+| | `docker` | `podman` | `gvisor` | `gvisor-podman` | `krun-podman` | `cella` |
+|---|---|---|---|---|---|---|
+| **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel | KVM microVM (libkrun) | KVM micro-VM + a judged network membrane |
+| **Engine** | Docker daemon | rootless Podman, no socket | Docker daemon | rootless Podman, no socket | rootless Podman, no socket | cella — no daemon, no host network object |
+| **Runtime** | runc | crun | runsc | runsc | krun | the cella VMM, direct on KVM |
+| **Kernel isolation** | none — workload syscalls hit the host kernel, seccomp-filtered | none — workload syscalls hit the host kernel, seccomp-filtered | Sentry, a userspace application kernel, absorbs the workload's syscalls | Sentry, a userspace application kernel, absorbs the workload's syscalls | a dedicated guest kernel (libkrunfw) inside a KVM VM | a dedicated guest kernel inside a KVM VM; one boot per command, with no live guest to exec into |
+| **File system isolation** | shared — the root daemon's store; the image cache and volumes persist across runs | rootless overlay in the runner's private store; bind mounts relabeled (`:z`); cleared by `make reset` | sandbox-private rootfs — the Sentry's gofer owns it; the host cannot `cp` into or out of it, so transfers run from inside | the same sandbox-private rootfs, on the runner's rootless store | the rootfs crosses virtiofs from host storage into the guest; `podman cp` stays coherent against the running guest | a private ext4 block device the guest boots; nothing from the host is mounted in, and evidence is copied out of a still machine, never a live one |
+| **A container escape lands as** | root | unprivileged user | host-side runsc processes, behind Sentry | unprivileged user, behind Sentry | unprivileged user, outside the VM | a process inside the sealed guest; the membrane still judges every frame out |
+| **Root daemon in the trust chain** | yes | no | yes | no | no | no |
+| **Runner separation** (run as a throwaway user) | — | the `titanium` user, via `make titanium-run` | — | the `titanium` user, via `make titanium-run` | the `titanium` user, via `make titanium-run` | intrinsic — cella is rootless and daemonless |
+| **Overhead** | near-native | near-native; rootless image builds cost more — pre-load images | syscall interposition tax — syscall- and I/O-heavy workloads pay most | gvisor's tax, plus a user-mode network hop (pasta) at the host edge; pre-load images | VM boot per container, virtiofs I/O, and each guest kernel's memory footprint; pre-load images | a VM boot per command and the judge round-trip; the highest of the rungs |
+| **Pre-load images** | — | `images-vendor` / `images-restore` | — | `images-vendor` / `images-restore` | `images-vendor` / `images-restore` | — the task image becomes a rootfs golden |
 
 ### Network
 
 Network policy is enforced by a **per-trial egress proxy**, not by trust: an allowlist task puts the sandbox on an `internal` network whose only route out is a Squid proxy built fresh for that trial (Alpine-based, per-trial auth token, the task's domain allowlist compiled in). The sandbox reaches it by literal IP and never needs DNS; the proxy is health-gated before the agent starts, runs outside the sandbox runtime, and is verified there by the same host-side checks that verify the sandbox. Air-gapped tasks get `network_mode: none` outright — the proxy exists only when an allowlist grants egress.
 
 > **Note:** the proxy exists for one situation: an air-gapped task (`allow_internet = false`) run by an agent that needs the network to install itself and call its model. The agent's allowlist becomes the proxy's domain list — the task sees no internet, the agent reaches only its own endpoints. Tasks with `allow_internet = true` get direct egress and no proxy. The trial directory records which happened: proxied trials contain a `compose-egress-proxy.json`, unrestricted trials do not.
+
+> **`cella` does not use the proxy.** On the `cella` rung the border is total: every network frame, in and out, parks at a membrane for an external decision, judged by resolved name and written to a tamper-evident chronicle. An air-gapped task runs on `--net none` — no membrane and no crossings. A task with egress runs behind a terminated pair: an appliance holds the world leg and terminates TLS on a consented pair CA, and titanium's engine judges each world crossing by name. See [docs/environments/CELLA.md](docs/environments/CELLA.md).
 
 ### gvisor-podman — the default
 
@@ -53,6 +57,14 @@ The most battle-tested option: a gVisor kernel over rootless Podman with no engi
 ### krun-podman
 
 The validated alternative with a different boundary: each container runs in a KVM microVM with a real guest kernel, a confined SELinux domain, a tightened seccomp profile on the VMM, and no host command channel into the running guest (the runtime has no exec; commands ride a measured file protocol, so the flavor is batch-only). The trade is explicit — stronger against kernel-syscall escapes, in exchange for the host's KVM subsystem in the trust chain. Choose by threat model; the probe record is [docs/environments/KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md).
+
+### cella
+
+The sealed-VM rung, on cella — hardware-isolated micro-VMs written directly on KVM, with no daemon, no capability, and no host network object. Each machine boots a dedicated guest kernel. A command is one boot: the machine boots, runs the command, and powers off. There is no channel into a live guest, and no exec-into.
+
+The border is total. Every network frame parks at a membrane for an external decision, and titanium's in-process engine judges it by resolved name. The trajectory gains what no other rung records: the chronicle of every crossing the agent attempted, the refused ones included. A task with egress uses a terminated pair, so even TLS to the world is terminated on a consented pair CA and judged by name.
+
+Time is cryogenic: a machine freezes in one instant and thaws with no gap the guest can measure, and a machine is files — it can be archived to a rock or branched into twins. The costs are explicit: one vCPU per machine, a VM boot per command, and no live exec. Choose by threat model; the full account is [docs/environments/CELLA.md](docs/environments/CELLA.md).
 
 ### docker and gvisor
 
@@ -183,6 +195,7 @@ A task declares its resources in `task.toml` (`[environment] cpus`, `memory_mb`)
 | `gvisor` | Engine-side cgroups, the same as `docker`. | All host cores. The cgroup throttles usage. | Always. | The Sentry takes no part in sizing. |
 | `gvisor-podman` | Engine cgroups only. The `-ignore-cgroups` wrapper registers rootless runsc. runsc creates no cgroups itself. | All host cores. The cgroup throttles usage. | Conditional, the same as `podman`. | The post-start read-back detects the dropped limits. See [GVISOR-PODMAN.md](docs/environments/GVISOR-PODMAN.md) §2.6. |
 | `krun-podman` | Engine cgroups, plus guest sizing. The compose override emits `krun.cpus` and `krun.ram_mib` from the declared values. | Exactly the declared cores and RAM. The guest agrees with the cgroup. | Conditional for the cgroup, the same as `podman`. The guest size always applies. | The microVM is sized, not only throttled. See below, and [KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md) §2.8. |
+| `cella` | Guest sizing at create (`--mem-mb`). One vCPU per machine. | Exactly the RAM it was created with, and a single vCPU. | Memory always — the guest is sized, not throttled. CPU is not offered: a requested ceiling cannot be honored as asked. | `cpu_limit = false`. See [CELLA.md](docs/environments/CELLA.md) §9. |
 
 Why krun needs the extra step: vCPU count and RAM are properties of the guest, visible to everything inside it, and a cgroup quota alone gets this wrong — left to itself, the handler gives the guest the host's cores and sizes RAM from the OCI memory limit as a side effect, so a task declaring one CPU gets a guest that *reports* sixteen while the cgroup lets it *use* one, and every thread pool sized by core count oversubscribes. The annotations make the guest agree with the declaration. One shared envelope remains: guest RAM, VMM overhead, and the virtiofs DAX window all count against the same cgroup `memory.max`.
 

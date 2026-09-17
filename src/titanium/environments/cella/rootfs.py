@@ -53,13 +53,19 @@ ROOTFS_BUILDER_BASE_IMAGE = "docker.io/library/alpine:3.22"
 # The cached builder. The tag's trailing integer is the recipe version: change
 # ROOTFS_BUILDER_CONTAINERFILE and bump it, so a host never keeps serving a
 # builder made from an older recipe under the same name.
-ROOTFS_BUILDER_IMAGE = "localhost/titanium-cella-rootfs-builder:1"
+ROOTFS_BUILDER_IMAGE = "localhost/titanium-cella-rootfs-builder:3"
 
 # GNU tar explicitly: Alpine's default tar is busybox's, which has no
 # --numeric-owner, and silently losing numeric ownership is exactly the
-# failure this pipeline exists to prevent.
+# failure this pipeline exists to prevent. fuse2fs rides along for the
+# evidence-extraction container the cella environment runs (see
+# environment._harvest): the same pinned image serves both directions,
+# writing filesystems and reading them.
 ROOTFS_BUILDER_CONTAINERFILE = (
-    f"FROM {ROOTFS_BUILDER_BASE_IMAGE}\nRUN apk add --no-cache e2fsprogs tar\n"
+    f"FROM {ROOTFS_BUILDER_BASE_IMAGE}\n"
+    # e2fsprogs-extra carries debugfs, which the harvest uses for
+    # targeted single-file reads without mounting anything.
+    "RUN apk add --no-cache e2fsprogs e2fsprogs-extra tar fuse2fs\n"
 )
 
 # Where the tree being populated lives inside the builder container. Every
@@ -171,7 +177,7 @@ def _staged_entry_name(index: int) -> str:
 # `mkdir -p` is specifically not used. It succeeds through a symlinked
 # component, so an exported image shipping `/etc -> /` would silently redirect
 # a boot entry out of the tree being built and into the builder container.
-_PLACEMENT_HELPERS = f"""root={_BUILD_ROOT}
+_PLACEMENT_HELPERS = """root={root}
 place_parents() {{
     dir=$root
     saved_ifs=$IFS
@@ -201,7 +207,9 @@ clear_leaf() {{
 }}"""
 
 
-def _place_entry(index: int, entry: GuestFile | GuestSymlink) -> list[str]:
+def _place_entry(
+    index: int, entry: GuestFile | GuestSymlink, root: str = _BUILD_ROOT
+) -> list[str]:
     """The shell lines that put one boot entry in place.
 
     Every value that came from the boot layer is quoted with
@@ -209,7 +217,7 @@ def _place_entry(index: int, entry: GuestFile | GuestSymlink) -> list[str]:
     script that pasted either in raw would be running it instead.
     """
     guest_path = shlex.quote(entry.path)
-    built_path = shlex.quote(f"{_BUILD_ROOT}{entry.path}")
+    built_path = shlex.quote(f"{root}{entry.path}")
     lines = [
         f"place_parents {guest_path}",
         f"clear_leaf {guest_path}",
@@ -249,9 +257,9 @@ def _mkfs_script(*, size_bytes: int, boot_layer: BootLayer | None) -> str:
         f"tar -xpf /in/{_IN_TAR_NAME} -C {_BUILD_ROOT} --numeric-owner",
     ]
     if boot_layer is not None and boot_layer.entries:
-        lines.append(_PLACEMENT_HELPERS)
+        lines.append(_PLACEMENT_HELPERS.format(root=_BUILD_ROOT))
         for index, entry in enumerate(boot_layer.entries):
-            lines += _place_entry(index, entry)
+            lines += _place_entry(index, entry, _BUILD_ROOT)
     lines += [
         # Sparse backing at the declared capacity: the guest sees the size the
         # task asked for, and the host stores only what mkfs actually wrote.
@@ -269,6 +277,7 @@ def build_ext4(
     dest: Path,
     builder_image: str | None = None,
     timeout_sec: float | None = None,
+    runtime: str | None = None,
 ) -> None:
     """Build an ext4 image at *dest* from an exported root filesystem tar.
 
@@ -290,6 +299,11 @@ def build_ext4(
         builder_image: The builder to run, by id. Callers that record which
             builder produced an artifact pass the id they recorded, so the two
             cannot drift. ``None`` resolves the cached builder here.
+        runtime: A podman ``--runtime`` override, or ``None`` for podman's
+            default. The cella environment passes ``"krun"`` so the tar this
+            builder extracts -- guest-produced bytes on the exec-cycle path --
+            is parsed inside a KVM microVM rather than by a host-side
+            container runtime alone.
 
     Raises:
         RootfsBuildError: on any bad input.
@@ -334,10 +348,12 @@ def build_ext4(
                     staged = staging_dir / _staged_entry_name(index)
                     staged.write_bytes(entry.contents)
 
+        runtime_args = [] if runtime is None else ["--runtime", runtime]
         run_podman(
             [
                 "run",
                 "--rm",
+                *runtime_args,
                 # The builder resolves nothing and fetches nothing.
                 "--network=none",
                 "-v",
@@ -366,6 +382,105 @@ def build_ext4(
         )
 
 
+# Where a live-edited image mounts inside the placement container.
+_PLACE_ROOT = "/work/mnt"
+
+
+def place_into_ext4(
+    *,
+    image: Path,
+    boot_layer: BootLayer,
+    purge: tuple[str, ...] = (),
+    builder_image: str | None = None,
+    timeout_sec: float | None = None,
+    runtime: str | None = "krun",
+) -> None:
+    """Place a boot layer into an existing ext4 image, in place.
+
+    The disk-to-disk path of the cella environment's exec cycle: the
+    previous cycle's evidence copy *is* the next machine's filesystem,
+    and only the new boot-layer entries change. The image is mounted
+    with ``fuse2fs`` inside the builder container -- under krun by
+    default, because from the second cycle on the image's contents are
+    guest-produced and ext4 metadata is parser input (see
+    docs/environments/CELLA.md, "Why krun was needed") -- and the same
+    placement helpers as :func:`build_ext4` write the entries, with the
+    same refusals: no ``mkdir -p`` through symlinks, every layer value
+    quoted.
+
+    Args:
+        image: The ext4 image to edit. The caller owns it; this is
+            never a machine's live ``disk.img``, only titanium's copy.
+        boot_layer: The entries to place. Revalidated here.
+        purge: Absolute guest paths removed before placement. The
+            cella environment purges the previous cycle's result
+            directory here: the image carries the whole prior state,
+            and a stale result file would answer the host's completion
+            poll before the new guest ever ran.
+        builder_image: As in :func:`build_ext4`.
+        timeout_sec: Applied to the podman invocation.
+        runtime: Podman ``--runtime``; ``None`` for podman's default.
+
+    Raises:
+        RootfsBuildError, TypeError, BootLayerError, PodmanError.
+    """
+    if not image.is_file():
+        raise RootfsBuildError(f"No ext4 image at {image}.")
+    validate_boot_layer(boot_layer)
+    if not boot_layer.entries:
+        return
+
+    builder = builder_image or ensure_rootfs_builder_image(timeout_sec=timeout_sec)
+
+    import tempfile
+
+    lines = [
+        "set -euf",
+        f"mkdir -p {_PLACE_ROOT}",
+        # Replay any dirty journal before editing: entries placed on a
+        # dirty image are silently undone when the next guest kernel
+        # replays the stale journal over them (measured).
+        "e2fsck -fy /img >/dev/null 2>&1 || true",
+        # fakeroot for full access; rw is the point. fuse2fs cannot
+        # write the journal and says so on stderr; harmless here.
+        f"fuse2fs -o fakeroot /img {_PLACE_ROOT}",
+        _PLACEMENT_HELPERS.format(root=_PLACE_ROOT),
+    ]
+    for path in purge:
+        if not path.startswith("/") or ".." in path:
+            raise RootfsBuildError(f"purge path {path!r} is not guest-absolute.")
+        lines.append(f"rm -rf {shlex.quote(_PLACE_ROOT + path)}")
+    for index, entry in enumerate(boot_layer.entries):
+        lines += _place_entry(index, entry, _PLACE_ROOT)
+    lines += [f"umount {_PLACE_ROOT}"]
+
+    with tempfile.TemporaryDirectory(prefix="titanium-cella-place-") as staging:
+        staging_dir = Path(staging)
+        for index, entry in enumerate(boot_layer.entries):
+            if isinstance(entry, GuestFile):
+                (staging_dir / _staged_entry_name(index)).write_bytes(entry.contents)
+        runtime_args = [] if runtime is None else ["--runtime", runtime]
+        run_podman(
+            [
+                "run",
+                "--rm",
+                *runtime_args,
+                "--network=none",
+                "--device",
+                "/dev/fuse",
+                "-v",
+                f"{staging_dir}:/in:ro,z",
+                "-v",
+                f"{image}:/img:z",
+                builder,
+                "sh",
+                "-c",
+                "\n".join(lines),
+            ],
+            timeout_sec=timeout_sec,
+        )
+
+
 __all__ = [
     "ROOTFS_BUILDER_BASE_IMAGE",
     "ROOTFS_BUILDER_CONTAINERFILE",
@@ -374,6 +489,7 @@ __all__ = [
     "RootfsBuildError",
     "build_ext4",
     "ensure_rootfs_builder_image",
+    "place_into_ext4",
     "require_podman",
     "rootfs_builder_image_id",
     "sha3_256_file",

@@ -1,6 +1,27 @@
 .ONESHELL:
+SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap
+
+# Per-target run logs. $(LOG) as a target's first recipe line tees the
+# whole target's output to .logs/<run>/<target>.log while still printing
+# to the terminal -- so a backgrounded `make smoke-*` keeps a durable,
+# greppable record instead of a scrollback that buffers and is lost. One
+# run id per top-level invocation (:= mints it once; a lazy ?= would
+# re-run date at every expansion), exported so a sub-make -- a smoke
+# calling titanium-run -- logs into the same run directory. .logs/ is
+# gitignored. TITANIUM_RUN is already the run *command*, so the id is
+# TITANIUM_LOG_RUN.
+LOGDIR := .logs
+ifndef TITANIUM_LOG_RUN
+TITANIUM_LOG_RUN := $(shell date +%Y%m%d-%H%M%S)
+endif
+export TITANIUM_LOG_RUN
+LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TITANIUM_LOG_RUN)/$(subst /,_,$@).log"; exec > >(tee -a "$$TITANIUM_LOG_FILE") 2>&1; echo "=== make $@ -- $$(date -Is) ==="
+# The log tees a pipe, not a tty, so a child that block-buffers stdout
+# (python -- titanium, pytest) would not stream into it until it exits.
+# Unbuffered keeps the log and the terminal live as a run progresses.
+export PYTHONUNBUFFERED := 1
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella-policy-engine smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www smoke-cella smoke-cella-all smoke-cella-integration
 
 -include .secrets
 
@@ -44,7 +65,7 @@ RUNNER ?= $(shell test -f /usr/local/share/titanium/titanium.provisioned && echo
 # group is root-equivalent and would nullify the separation.
 RUNNER_ENVS := podman gvisor-podman krun-podman
 TITANIUM_WRAP := $(if $(and $(RUNNER),$(filter $(TITANIUM_ENV),$(RUNNER_ENVS))),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )
-TITANIUM_RUN ?= $(TITANIUM_WRAP)$(TITANIUM) run --agent=$(TITANIUM_AGENT) --model $(TITANIUM_MODEL) --env $(TITANIUM_ENV) --path=$(TITANIUM_TASK) --jobs-dir=$(TITANIUM_JOBS_DIR) -n $(TITANIUM_N)
+TITANIUM_RUN ?= $(TITANIUM_WRAP)$(TITANIUM) run --agent=$(TITANIUM_AGENT) --model $(TITANIUM_MODEL) --env $(TITANIUM_ENV) --path=$(TITANIUM_TASK) --jobs-dir=$(TITANIUM_JOBS_DIR) -n $(TITANIUM_N) $(TITANIUM_EXTRA_ARGS)
 
 RUN_DIR ?= ./.run
 RUN_TASKS := $(RUN_DIR)/tasks
@@ -117,6 +138,24 @@ _probe-krun-podman: .krun-podman
 		&& test -f /etc/containers/containers.conf.d/titanium-krun.conf; } >/dev/null 2>&1 \
 		|| bash scripts/init/krun-podman.sh
 
+# cella (the sealed-VM rung): built from a git rev pinned in runtime.env,
+# installed by cella's own field installer into ~/.cella/bin, kernel golden
+# built once, digest-pinned like krun/runsc. Field flavor only — smokes that
+# need the guest console point CELLA_BIN at a lab build instead.
+.cella:
+	@{ test -x "$$HOME/.cella/bin/cella" \
+		&& test -f /usr/local/share/titanium/cella.sha3-512 \
+		&& test -f "$$HOME/.cella/kernel/canonical/bzImage"; } >/dev/null 2>&1 \
+		|| bash scripts/init/cella.sh
+
+# the lab flavor (console on), built in the same pinned clone for smokes
+# that observe a guest console. Always runs: the script is a no-op when the
+# checkout is at the pin and cargo has nothing to rebuild.
+CELLA_SRC := $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/titanium/cella-src
+CELLA_LAB_BIN := $(CELLA_SRC)/target/lab/cella
+.cella-debug:
+	@bash scripts/init/cella-debug.sh
+
 # toolchain for building wheels that ship no binary for this platform/python.
 .deps:
 	@{ command -v gcc && command -v make && command -v python3 && \
@@ -150,7 +189,7 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 bootstrap:
 	bash scripts/init/bootstrap.sh
 
-init: sync .tmux .podman .runsc .runsc-podman .krun-podman .titanium | .sentinel/tasks
+init: sync .tmux .podman .runsc .runsc-podman .krun-podman .cella .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
 
 # utility: run any podman command in the runner's context — trial containers
@@ -162,24 +201,53 @@ init: sync .tmux .podman .runsc .runsc-podman .krun-podman .titanium | .sentinel
 podman-%:
 	@$(if $(RUNNER),RUNNER=$(RUNNER) bash scripts/titanium-run.sh )podman $* $(ARGS)
 
+# Each unit-* target reports coverage for the package it exercises, and
+# the union of the unit-* suites is the whole of tests/ by construction:
+# unit-core runs tests/ ignoring exactly the files the scoped targets
+# claim, so a new test file lands in unit-core until a target claims it.
+UNIT_PODMAN_TESTS := tests/test_podman_environment.py
+UNIT_KRUN_TESTS := tests/test_krun_podman_environment.py tests/test_environment_factory.py \
+	tests/test_gvisor_podman_environment.py tests/test_gvisor_environment.py
+UNIT_CELLA_TESTS := tests/test_cella_rootfs_conversion.py tests/test_cella_policy_engine.py \
+	tests/test_cella_environment.py
+UNIT_CLAIMED_TESTS := $(UNIT_PODMAN_TESTS) $(UNIT_KRUN_TESTS) $(UNIT_CELLA_TESTS)
+# Terminal summary plus a browsable HTML report under reports/unit/<target>
+# (gitignored). $@ expands per recipe, so each target keeps its own report
+# and its own .coverage data file.
+UNIT_REPORTS := reports/unit
+UNIT_COV = mkdir -p $(UNIT_REPORTS)/$@ && COVERAGE_FILE=$(UNIT_REPORTS)/$@/.coverage $(PYTEST)
+COV_REPORT = --cov-report=term-missing:skip-covered \
+	--cov-report=html:$(UNIT_REPORTS)/$@/coverage
+
 unit-podman-env: .podman
-	$(PYTEST) tests/test_podman_environment.py
+	$(UNIT_COV) $(UNIT_PODMAN_TESTS) --cov=titanium.environments.podman $(COV_REPORT)
 
 # The parent suites ride along: the krun seams live in the gvisor files,
 # and those suites pin the runsc-flavor defaults the seams must not move.
 unit-krun-podman-env: .krun-podman
-	$(PYTEST) tests/test_krun_podman_environment.py tests/test_environment_factory.py \
-		tests/test_gvisor_podman_environment.py tests/test_gvisor_environment.py
+	$(UNIT_COV) $(UNIT_KRUN_TESTS) --cov=titanium.environments.krun \
+		--cov=titanium.environments.gvisor $(COV_REPORT)
 
 unit-podman: unit-podman-env
 
-unit-all: unit-podman unit-krun-podman-env
+# Fully offline: no podman, no cella, no network — safe on any host.
+unit-cella:
+	$(UNIT_COV) $(UNIT_CELLA_TESTS) --cov=titanium.environments.cella $(COV_REPORT)
+
+# The remainder: everything no scoped target claims.
+unit-core:
+	$(UNIT_COV) tests $(addprefix --ignore=,$(UNIT_CLAIMED_TESTS)) \
+		--cov=titanium $(COV_REPORT)
+
+unit-all: unit-podman unit-krun-podman-env unit-cella unit-core
 
 titanium-run: | .sentinel/tasks
+	$(LOG)
 	mkdir -p "$(TITANIUM_JOBS_DIR)"
 	$(TITANIUM_RUN)
 
 smoke-podman: sync .podman $(RUN_TASKS)/$(BACKEND)/smoke-podman
+	$(LOG)
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
 		tests/test_podman_environment.py \
@@ -189,6 +257,7 @@ smoke-podman: sync .podman $(RUN_TASKS)/$(BACKEND)/smoke-podman
 	$(MAKE) titanium-run TITANIUM_ENV=podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 smoke-gvisor: sync .runsc $(RUN_TASKS)/$(BACKEND)/smoke-gvisor
+	$(LOG)
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
 		tests/test_gvisor_environment.py tests/test_gvisor_network_policy.py \
@@ -198,6 +267,7 @@ smoke-gvisor: sync .runsc $(RUN_TASKS)/$(BACKEND)/smoke-gvisor
 	$(MAKE) titanium-run TITANIUM_ENV=gvisor TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 smoke-gvisor-podman: sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-podman
+	$(LOG)
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
 		tests/test_gvisor_podman_environment.py tests/test_environment_factory.py \
@@ -207,6 +277,7 @@ smoke-gvisor-podman: sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-pod
 	$(MAKE) titanium-run TITANIUM_ENV=gvisor-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 smoke-krun-podman: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
+	$(LOG)
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
 		tests/test_krun_podman_environment.py tests/test_environment_factory.py \
@@ -222,6 +293,7 @@ AGENT_TIMEOUT_TASKS ?= examples/tasks/agent-timeout-wedge examples/tasks/agent-t
 
 smoke-on-agent-timeout: SMOKE_TASKS = $(AGENT_TIMEOUT_TASKS)
 smoke-on-agent-timeout: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-on-agent-timeout
+	$(LOG)
 	$(MAKE) titanium-run TITANIUM_ENV=krun-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 # The Cella rootfs acceptance proof. No runner, no agent, no `titanium run`:
@@ -229,19 +301,91 @@ smoke-on-agent-timeout: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-on-agent
 # Cella's own verbs drive it through boot -> freeze -> thaw -> stop -> archive
 # -> destroy with the guest's network disabled.
 #
-# Cella is found, never built: set CELLA_BIN, or put `cella` on PATH. It must
-# be the lab flavor -- the field flavor writes no console.log, so the guest
-# cannot be observed. Exit 2 means a precondition was missing and nothing was
-# proven; exit 1 is a real failure.
-smoke-cella-rootfs: sync .podman
-	bash scripts/smoke/cella-rootfs.sh
+# smoke-cella-integration: the cella-*unique* probes -- the policy
+# engine and the terminated pair, which no other rung has. Each is its
+# own topology (airgapped is --net none; www is the terminated pair,
+# name-judged by cella.policy), but they run together under one oracle
+# `titanium run` and land under .run/jobs/<backend>/smoke-cella-integration,
+# one signal. Oracle-only, no runner user (cella's jail owns separation),
+# gating on each task's own offline verifier.
+#
+# The rung-parity smoke (a plain `smoke-cella` running the shared bench
+# tasks with a real agent, like smoke-krun-podman) is a separate target
+# on its own branch; this branch is the policy engine.
+CELLA_SMOKE_TASKS := \
+	examples/smoke/cella-policy-engine-airgapped \
+	examples/smoke/cella-policy-engine-www \
+	examples/smoke/verify-cella-env-airgapped \
+	examples/smoke/verify-cella-env-www
+
+# DRY_RUN=true flips the engine to collection: every crossing releases
+# and each www task's cella.policy is collected, then copied back to
+# the example for review -- observe once, enforce forever.
+DRY_RUN ?= false
+smoke-cella-integration: sync .podman .cella
+	$(LOG)
+	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
+	cp -r $(CELLA_SMOKE_TASKS) $(RUN_TASKS)/$(BACKEND)/$@/
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		$(UNIT_CELLA_TESTS) \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=titanium.environments.cella \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ \
+		$(if $(filter true,$(DRY_RUN)),TITANIUM_EXTRA_ARGS="--ek dry_run=true",)
+	$(if $(filter true,$(DRY_RUN)),for t in cella-policy-engine-www verify-cella-env-www; do \
+		cp $(RUN_TASKS)/$(BACKEND)/$@/$$t/environment/cella.policy examples/smoke/$$t/environment/cella.policy \
+		&& echo "collected $$t/cella.policy copied back -- review and commit it"; done)
+
+smoke-cella-all: smoke-cella-rootfs smoke-cella-integration
+
+# smoke-cella: the rung-parity smoke -- the real bench tasks under cella,
+# the way smoke-krun-podman runs them under krun. fix-git-offline is
+# airgapped (--net none); build-pmars is the terminated pair, because it
+# fetches Debian packages over apt. Both are self-contained cella snapshots
+# under examples/smoke/cella/: each carries its own task.toml (timeouts
+# baked -- build-pmars gets 1.5h for the compile on a boot-per-command rung)
+# and, where it has world egress, its own environment/cella.policy beside
+# the Dockerfile, as cella's contract expects. No staging-time overrides.
+# Oracle agent, each task's own offline verifier. DRY_RUN=true re-collects
+# build-pmars's policy into the snapshot for review (§3.1).
+CELLA_BENCH_TASKS := examples/smoke/cella/fix-git-offline examples/smoke/cella/build-pmars
+
+smoke-cella: sync .podman .cella | .sentinel/tasks
+	$(LOG)
+	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
+	cp -r $(CELLA_BENCH_TASKS) $(RUN_TASKS)/$(BACKEND)/$@/
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
+		$(UNIT_CELLA_TESTS) \
+		--html=$(REPORTS_DIR)/$(BACKEND)/$@/unit.html \
+		--self-contained-html --cov=titanium.environments.cella \
+		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
+	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ \
+		$(if $(filter true,$(DRY_RUN)),TITANIUM_EXTRA_ARGS="--ek dry_run=true",)
+	$(if $(filter true,$(DRY_RUN)),for t in $(notdir $(CELLA_BENCH_TASKS)); do \
+		test -f $(RUN_TASKS)/$(BACKEND)/$@/$$t/environment/cella.policy || continue; \
+		cp $(RUN_TASKS)/$(BACKEND)/$@/$$t/environment/cella.policy examples/smoke/cella/$$t/environment/cella.policy \
+		&& echo "collected $$t/cella.policy copied back -- review and commit it"; done)
+
+# The smoke needs the lab flavor -- the field flavor writes no console.log,
+# so the guest cannot be observed. .cella-debug builds it from the rev pinned
+# in runtime.env and CELLA_BIN defaults to that build; export CELLA_BIN to
+# observe through a different lab binary instead. Exit 2 means a precondition
+# was missing and nothing was proven; exit 1 is a real failure.
+smoke-cella-rootfs: sync .podman .cella .cella-debug
+	$(LOG)
+	CELLA_BIN="$${CELLA_BIN:-$(CELLA_LAB_BIN)}" bash scripts/smoke/cella-rootfs.sh
 
 # full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
 # BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.
 bench-ds: sync | .sentinel/tasks
+	$(LOG)
 	$(MAKE) titanium-run TITANIUM_TASK=$(TASKS_PATH_DS)/tasks TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ TITANIUM_N=$(BENCH_N)
 
 bench-tb2: sync | .sentinel/tasks
+	$(LOG)
 	$(MAKE) titanium-run TITANIUM_TASK=$(TASKS_PATH_TB2) TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ TITANIUM_N=$(BENCH_N)
 
 # fan out $(SESSION_TARGETS), one tmux window each, in the RUN_DIR-scoped session

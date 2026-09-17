@@ -80,6 +80,7 @@ class TrialExecution:
             trial_paths=trial_paths,
             logger=logger,
             agent=agent,
+            agent_timeout_sec=agent_timeout_sec,
         )
         return cls(
             task=task,
@@ -189,6 +190,7 @@ class TrialExecution:
         trial_paths: TrialPaths,
         logger: Logger,
         agent,
+        agent_timeout_sec: float | None,
     ) -> BaseEnvironment:
         return EnvironmentFactory.create_environment_from_config(
             config=environment_config,
@@ -201,6 +203,8 @@ class TrialExecution:
             agent_install_spec=agent.install_spec(),
             network_allowlist=agent.network_allowlist(),
             default_user=task.config.agent.user,
+            agent_timeout_sec=agent_timeout_sec,
+            verifier_timeout_sec=task.config.verifier.timeout_sec,
         )
 
     @retry(
