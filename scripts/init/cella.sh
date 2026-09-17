@@ -93,6 +93,28 @@ fi
   exit 1
 }
 
+# --- $HOME traversal for the machine sub-uids -------------------------------
+
+# Each machine runs jailed as its own sub-uid, and bwrap resolves the
+# VMM binary under ~/.cella as that sub-uid. Cella's spawn grants the
+# traversal ACLs on ~/.cella and ~/.cella/machines, but it declares the
+# ancestors above them a host prerequisite it cannot satisfy (see
+# machine.rs: "a mode-0700 $HOME ... refuses the sub-user before it
+# ever reaches this ACL"), and neither its installer nor its doctor
+# covers $HOME. Satisfy the prerequisite here: grant execute-only
+# traversal of $HOME to the first machine sub-uids of the range the
+# installer delegated. Execute-only opens no read on $HOME, and the
+# grants are idempotent.
+SUBUID_START=$(awk -F: -v u="$USER" '$1==u {print $2; exit}' /etc/subuid)
+[[ -n "$SUBUID_START" ]] || {
+  echo "no sub-uid range delegated to $USER in /etc/subuid" >&2
+  exit 1
+}
+for ((uid = SUBUID_START; uid < SUBUID_START + 16; uid++)); do
+  setfacl -m "u:$uid:x" "$HOME"
+done
+echo "granted $HOME traversal to sub-uids $SUBUID_START-$((SUBUID_START + 15))"
+
 # --- the bridge ------------------------------------------------------------
 
 # cella's field installer stops at the machine personas: cella-engine
