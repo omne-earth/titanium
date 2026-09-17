@@ -2,7 +2,7 @@
 
 Titanium runs coding agents against benchmark tasks inside real sandboxes. It records the full trajectory of every run.
 
-For each task, Titanium builds the environment, installs the agent, runs it at the isolation level you select, verifies the result, and writes everything to `jobs/<name>/<trial>/`. The difference from other runners is the sandbox: you select the isolation level, from a plain container to a gVisor kernel with the whole run privilege-separated from your account.
+For each task, Titanium builds the environment, installs the agent, runs it at the isolation level you select, verifies the result, and writes everything to `jobs/<name>/<trial>/`. The difference from other runners is the sandbox: you select the isolation level, from a plain container to a sealed KVM micro-VM whose every network frame is judged outside the machine, with the whole run privilege-separated from your account.
 
 ## Install
 
@@ -19,19 +19,19 @@ uv run titanium --help     # or: uv tool install .   to put it on your PATH
 
 Every environment installs agents, honors per-task network allowlists, and runs air-gapped (`allow_internet = false`) tasks. They differ in *how strongly the workload is isolated from the host*. Select by threat model, not preference.
 
+- **`cella`** — sealed KVM micro-VMs on cella, with a judged network membrane and no host daemon ([docs/environments/CELLA.md](docs/environments/CELLA.md)).
 - **`docker`** — the Docker daemon with runc; the compatibility baseline.
 - **`podman`** — rootless Podman, no socket ([docs/environments/PODMAN.md](docs/environments/PODMAN.md)).
 - **`gvisor`** — gVisor (runsc) on the Docker daemon ([docs/environments/GVISOR.md](docs/environments/GVISOR.md)).
 - **`gvisor-podman`** — gVisor on rootless Podman; the default ([docs/environments/GVISOR-PODMAN.md](docs/environments/GVISOR-PODMAN.md)).
 - **`krun-podman`** — KVM microVMs (krun) on rootless Podman ([docs/environments/KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md)).
-- **`cella`** — sealed KVM micro-VMs on cella, with a judged network membrane and no host daemon ([docs/environments/CELLA.md](docs/environments/CELLA.md)).
 - **`modal`** — the same task off-host on [Modal](https://modal.com), for cloud fan-out or GPUs.
 
 ### Birds-Eye View
 
 | | `docker` | `podman` | `gvisor` | `gvisor-podman` | `krun-podman` | `cella` |
 |---|---|---|---|---|---|---|
-| **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel | KVM microVM (libkrun) | KVM micro-VM + a judged network membrane |
+| **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel | KVM microVM (libkrun) | KVM micro-VM, its VMM seccomp-allowlisted and jailed by bwrap under a per-machine sub-uid + a judged network membrane |
 | **Engine** | Docker daemon | rootless Podman, no socket | Docker daemon | rootless Podman, no socket | rootless Podman, no socket | cella — no daemon, no host network object |
 | **Runtime** | runc | crun | runsc | runsc | krun | the cella VMM, direct on KVM |
 | **Kernel isolation** | none — workload syscalls hit the host kernel, seccomp-filtered | none — workload syscalls hit the host kernel, seccomp-filtered | Sentry, a userspace application kernel, absorbs the workload's syscalls | Sentry, a userspace application kernel, absorbs the workload's syscalls | a dedicated guest kernel (libkrunfw) inside a KVM VM | a dedicated guest kernel inside a KVM VM; one boot per command, with no live guest to exec into |
@@ -50,6 +50,14 @@ Network policy is enforced by a **per-trial egress proxy**, not by trust: an all
 
 > **`cella` does not use the proxy.** On the `cella` rung the border is total: every network frame, in and out, parks at a membrane for an external decision, judged by resolved name and written to a tamper-evident chronicle. An air-gapped task runs on `--net none` — no membrane and no crossings. A task with egress runs behind a terminated pair: an appliance holds the world leg and terminates TLS on a consented pair CA, and titanium's engine judges each world crossing by name. See [docs/environments/CELLA.md](docs/environments/CELLA.md).
 
+### cella
+
+The sealed-VM rung, on cella — hardware-isolated micro-VMs written directly on KVM, with no daemon, no capability, and no host network object. Each machine boots a dedicated guest kernel. A command is one boot: the machine boots, runs the command, and powers off. There is no channel into a live guest, and no exec-into.
+
+The border is total. Every network frame parks at a membrane for an external decision, and titanium's in-process engine judges it by resolved name. The trajectory gains what no other rung records: the chronicle of every crossing the agent attempted, the refused ones included. A task with egress uses a terminated pair, so even TLS to the world is terminated on a consented pair CA and judged by name.
+
+Time is cryogenic: a machine freezes in one instant and thaws with no gap the guest can measure, and a machine is files — it can be archived to a rock or branched into twins. The costs are explicit: one vCPU per machine, a VM boot per command, and no live exec. Choose by threat model; the full account is [docs/environments/CELLA.md](docs/environments/CELLA.md), and the operator's guide to a cella trial on disk — every folder, file, and machine suffix under `.run/` — is [README-cella.md](README-cella.md).
+
 ### gvisor-podman — the default
 
 The most battle-tested option: a gVisor kernel over rootless Podman with no engine socket. On a provisioned host the entire run executes as the dedicated `titanium` user, so even a full sandbox escape never reaches your keys or source.
@@ -57,14 +65,6 @@ The most battle-tested option: a gVisor kernel over rootless Podman with no engi
 ### krun-podman
 
 The validated alternative with a different boundary: each container runs in a KVM microVM with a real guest kernel, a confined SELinux domain, a tightened seccomp profile on the VMM, and no host command channel into the running guest (the runtime has no exec; commands ride a measured file protocol, so the flavor is batch-only). The trade is explicit — stronger against kernel-syscall escapes, in exchange for the host's KVM subsystem in the trust chain. Choose by threat model; the probe record is [docs/environments/KRUN-PODMAN.md](docs/environments/KRUN-PODMAN.md).
-
-### cella
-
-The sealed-VM rung, on cella — hardware-isolated micro-VMs written directly on KVM, with no daemon, no capability, and no host network object. Each machine boots a dedicated guest kernel. A command is one boot: the machine boots, runs the command, and powers off. There is no channel into a live guest, and no exec-into.
-
-The border is total. Every network frame parks at a membrane for an external decision, and titanium's in-process engine judges it by resolved name. The trajectory gains what no other rung records: the chronicle of every crossing the agent attempted, the refused ones included. A task with egress uses a terminated pair, so even TLS to the world is terminated on a consented pair CA and judged by name.
-
-Time is cryogenic: a machine freezes in one instant and thaws with no gap the guest can measure, and a machine is files — it can be archived to a rock or branched into twins. The costs are explicit: one vCPU per machine, a VM boot per command, and no live exec. Choose by threat model; the full account is [docs/environments/CELLA.md](docs/environments/CELLA.md).
 
 ### docker and gvisor
 
@@ -82,14 +82,15 @@ On a fresh Fedora host:
 make bootstrap    # installs make and podman, then chains into `make init`
 ```
 
-If `make` itself is missing, run `bash scripts/init/bootstrap.sh` instead. Both are idempotent. Re-run them safely after a partial failure. They provision, in order: rootless Podman; a digest-pinned `runsc` registered with both engines; a digest-pinned `krun` (KVM microVM runtime, dnf-installed, rpm-witnessed) for the `krun-podman` environment; the dedicated `titanium` runner user (a nologin account with its own subuid range and container storage); and Docker, needed only for the `docker`/`gvisor` environments.
+If `make` itself is missing, run `bash scripts/init/bootstrap.sh` instead. Both are idempotent. Re-run them safely after a partial failure. They provision, in order: rootless Podman; a digest-pinned `runsc` registered with both engines; a digest-pinned `krun` (KVM microVM runtime, dnf-installed, rpm-witnessed) for the `krun-podman` environment; cella for the `cella` environment (built from the git rev pinned in `runtime.env`, digest-pinned with a git witness, and the machine sub-uids granted `$HOME` traversal); the dedicated `titanium` runner user (a nologin account with its own subuid range and container storage); and Docker, needed only for the `docker`/`gvisor` environments.
 
-Runtime versions come from `runtime.env`, checked in at the repo root. It pins the gVisor release and floors podman-compose and krun, so two hosts provisioned from the same commit get the same runtime.
+Runtime versions come from `runtime.env`, checked in at the repo root. It pins the gVisor release and the cella git rev, and floors podman-compose and krun, so two hosts provisioned from the same commit get the same runtime.
 
 Then prove the whole chain end to end:
 
 ```bash
 cp .secrets.template .secrets   # fill in OPENROUTER_MODEL and OPENROUTER_API_KEY
+make smoke-cella-all            # the whole cella rung: rootfs acceptance, the policy-engine probes, and the bench + verify tasks under a real agent
 make smoke-env                  # runs the podman, gvisor, gvisor-podman, and krun-podman smokes
 ```
 
@@ -108,6 +109,7 @@ make titanium-run TITANIUM_ENV=krun-podman TITANIUM_TASK=path/to/task
 ```
 
 - The docker-family targets never wrap: the runner must never join the root-equivalent `docker` group.
+- The cella targets never wrap either, by design: separation is intrinsic to the rung — each machine runs jailed as its own throwaway sub-uid, so there is no runner user to borrow.
 - Opt out for one invocation: `make titanium-run RUNNER=`.
 - Wrap a hand-built command by prefixing the shim: `bash scripts/titanium-run.sh .venv/bin/titanium run -p path/to/task --env gvisor-podman`.
 - Inspect runner-owned state through make — the runner's containers and images live in *its* storage, so your own `podman ps` shows nothing. `make podman-<verb> [ARGS=…]` proxies any podman subcommand into the runner's context:
@@ -127,10 +129,10 @@ For iterating on trusted tasks. State the environment explicitly: the CLI defaul
 
 ```bash
 # one task
-titanium run -p path/to/task --agent claude-code --env gvisor-podman
+titanium run -p path/to/task --agent claude-code --env cella
 
 # a dataset, sampled
-titanium run -p path/to/dataset --env gvisor-podman --n-tasks 10 --sample-seed 0
+titanium run -p path/to/dataset --env cella --n-tasks 10 --sample-seed 0
 ```
 
 Trials land in `jobs/<timestamp-or-name>/<trial-id>/` (`.run/jobs/…` for make targets). See `titanium run --help`, plus `titanium job`, `titanium view`, and `titanium critique`.
@@ -206,10 +208,13 @@ Why krun needs the extra step: vCPU count and RAM are properties of the guest, v
 The workflow is make targets, end to end:
 
 ```bash
-make unit-all             # unit suites (podman, krun, factory, gvisor)
+make unit-all             # unit suites (cella, podman, krun, factory, gvisor)
 make _probe-krun-podman   # evidence probes for the krun probe record
+make smoke-cella-all      # everything below, plus the rootfs acceptance proof
+make smoke-cella-integration  # the four policy-engine probes, oracle, deterministic
+make smoke-cella          # the bench + verify tasks under cella, with a real agent
 make smoke-podman         # one environment, three trials
-make smoke-env            # all four environments, one tmux session
+make smoke-env            # the four container environments, one tmux session
 make run-attach           # watch a running smoke session
 make reset                # deprovision; verify the clean slate
 ```
@@ -221,8 +226,8 @@ For a runtime change, run the full cycle: `make reset` → `make init` → `make
 The `oracle` agent replays a task's own `solution/` instead of calling a model. An oracle run is deterministic, costs nothing, and finishes in minutes — it validates the environment, the transfers, the verifier, and the artifact collection without an LLM in the loop:
 
 ```bash
-make titanium-run TITANIUM_AGENT=oracle TITANIUM_ENV=krun-podman \
-  TITANIUM_TASK=examples/smoke/verify-krun-podman-env-www
+make titanium-run TITANIUM_AGENT=oracle TITANIUM_ENV=cella \
+  TITANIUM_TASK=examples/smoke/verify-cella-env-www
 ```
 
 A reward of 1.0 proves the wiring; a failure implicates the environment or the task, never the model.
@@ -231,11 +236,17 @@ A reward of 1.0 proves the wiring; a failure implicates the environment or the t
 
 Each environment ships a verification task under `examples/smoke/`:
 
+- `verify-cella-env-www`
+- `verify-cella-env-airgapped`
+- `cella-policy-engine-www`
+- `cella-policy-engine-airgapped`
 - `verify-podman-env`
 - `verify-gvisor-env`
 - `verify-gvisor-podman-env`
 - `verify-krun-podman-env-www`
 - `verify-krun-podman-env-airgapped`
+
+The two `cella-policy-engine-*` tasks go beyond environment verification: they probe the policy engine itself — the www one drives grants and refusals through the terminated pair, the airgapped one proves a nic-less guest.
 
 These tasks exist for one reason: an environment must prove its own claims. Each solution probes the boundary from inside — egress, DNS, engine sockets, write limits, and the runtime's identity signals — and writes a report the verifier re-checks independently. An oracle run of one of these tasks is therefore the cheapest full proof an environment has: deterministic, model-free, and scored against what the sandbox actually did, not what the docs say it does. In-guest evidence corroborates; the host-side runtime gate stays authoritative. When an environment changes, run its oracle first. These oracles are by no means complete nor exhaustive but provide a bootstrap example to begin with.
 
@@ -245,15 +256,15 @@ These tasks exist for one reason: an environment must prove its own claims. Each
 Isolation is only as good as its trust chain, so Titanium verifies rather than assumes:
 
 - **The runtime is proven, not presumed.** The host confirms the sandbox runtime (`{{.OCIRuntime}}` / the daemon registry) before any command may run, records the verified identity in the trial's `runtime-verification.json`, and never accepts in-sandbox evidence — a guest can fake `uname` and `dmesg`, so nothing produced inside the sandbox gates anything.
-- **The runtime binaries are pinned.** `runsc` is version-pinned in `runtime.env` and digest-pinned at install; `krun` is version-floored, rpm-witnessed at first use, and digest-pinned the same way. Both register in root-owned `containers.conf.d`. Preflight fails closed if either binary changed.
+- **The runtime binaries are pinned.** `runsc` is version-pinned in `runtime.env` and digest-pinned at install; `krun` is version-floored, rpm-witnessed at first use, and digest-pinned the same way; cella is built from an exact git rev pinned in `runtime.env` and digest-pinned with that rev as its witness. Preflight fails closed if a binary changed.
 - **Limits are read back.** Declared cpu and memory limits are re-read from the kernel after start. Tasks that require limits fail loudly when the kernel does not enforce them.
 - **Images are pinned to source.** References are fully qualified and built from local Dockerfiles, never pulled from mutable third-party tags; `short-name-mode=enforcing` stays untouched.
 - **Network policy is topology.** Egress rides the per-trial proxy on an `internal` network, or does not exist at all — never a firewall rule the workload could race.
-- **Escapes land in a throwaway.** On a provisioned host the whole run executes as the nologin `titanium` user, and the krun VMM additionally runs under a tightened seccomp profile and a confined SELinux domain.
+- **Escapes land in a throwaway.** On a provisioned host the whole run executes as the nologin `titanium` user; the krun VMM additionally runs under a tightened seccomp profile and a confined SELinux domain; and each cella machine runs jailed as its own sub-uid, so even a VMM escape lands in an account that owns one machine directory.
 - **Teardown is fail-closed.** Cleanup discovers resources by exact project label and refuses to report clean while any remain.
 - **The proof re-runs.** `make smoke-env` and the per-environment oracles re-verify the whole chain on demand; the per-environment documents record every relaxation, its blast radius, and the measurements behind it.
 
-**The boundary** is containment of untrusted agent code plus privilege separation. For the gvisor family it is a *shared kernel* behind a gVisor application kernel — not a VM boundary. For `krun-podman` it is exactly a hypervisor boundary: a KVM microVM per container, at the price of the host's KVM subsystem in the trust chain. Neither is formally verified. The per-environment protections, the relaxations made to run trials, the blast radius of each, and the avenues still open are documented in [`docs/environments/`](docs/environments/).
+**The boundary** is containment of untrusted agent code plus privilege separation. For the gvisor family it is a *shared kernel* behind a gVisor application kernel — not a VM boundary. For `krun-podman` it is exactly a hypervisor boundary: a KVM microVM per container, at the price of the host's KVM subsystem in the trust chain. For `cella` it is the hypervisor boundary plus a total network border: every frame is judged outside the machine, and the chronicle records what was refused. None is formally verified. The per-environment protections, the relaxations made to run trials, the blast radius of each, and the avenues still open are documented in [`docs/environments/`](docs/environments/).
 
 ## License
 

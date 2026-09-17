@@ -8,8 +8,10 @@ in `runtime.env` and installs that revision with `make .cella`.
 
 This document is complete for fresh eyes. It states the model, the
 knobs, the lifecycle, the collection mechanism, the one judgment call,
-and why krun is a hard dependency. This is a running document: the
-`-www` leg (§5) updates when it lands.
+and why krun is a hard dependency. What a finished trial leaves on
+disk — the `.run/` folders, files, and machine-name suffixes — lives
+in one place only: [README-cella.md](../../README-cella.md), the
+operator's guide.
 
 ## 1. The model: bake, run, collect
 
@@ -330,8 +332,8 @@ topologies:
   sequential calls, so the membrane-memory warming (§3.2) shows as a
   cold call then two live ones.
 
-`make smoke-cella-all` runs the rootfs proof (§8) and this suite
-together. `DRY_RUN=true` flips the appliance engine to collection and
+`make smoke-cella-all` runs the rootfs proof (§8), this suite, and
+the bench + verify smoke (`smoke-cella`) together — the whole rung. `DRY_RUN=true` flips the appliance engine to collection and
 copies each www task's collected `cella.policy` back for review (§3.1).
 The rung-parity `smoke-cella` (the shared bench tasks under a real
 agent, like `smoke-krun-podman`) is separate future work.
@@ -562,28 +564,23 @@ Read the task's report. It carries the warming curve.
 cat .run/jobs/openrouter/smoke-cella-integration/*/build-pmars__*/artifacts/report.json
 ```
 
-Read the chronicle. Each machine has one directory. `verdict` and
-`ledger` are binary; titanium renders each to a `.txt`.
-```bash
-cat .run/jobs/.../build-pmars__*/cella-chronicle/*/verdict.txt
-```
-
-Read the per-machine engine log. Each machine writes its own, so the
-solution's crossings stay separate from the verifier's.
-```bash
-cat .run/jobs/.../cella-engine/<vm-id>/engine.log
-```
+For everything else the trial left on disk — every `cella-*` folder,
+every chronicle file, the machine-name suffixes, and which entries
+appear for which kind of run — the single source is
+[README-cella.md](../../README-cella.md), including a
+where-to-look-by-question table (§9) for refusals, throughput, and
+wedges.
 
 ### G.8 When a crossing is refused
 
 A refused crossing means a name is not granted. Find it in the
-appliance engine log.
+appliance's engine log.
 ```bash
-grep refuse .run/jobs/.../cella-engine/*-term/engine.log
+grep refuse .run/jobs/.../cella-engine/*-appliance/engine.log
 ```
 A refusal line looks like this.
 ```text
-cella engine: refuse id=… host='files.pythonhosted.org' ip=… port=443 direction=0
+cella_engine: refuse id=… host='files.pythonhosted.org' ip=… port=443 direction=0
 ```
 Read the `host=` field. That is the name the task reached. Add its
 grant to `cella.policy`.
@@ -714,7 +711,7 @@ that is set is used:
    override and is normally absent, since the harness bounds the agent
    and verifier at the trial layer rather than per command.
 2. The task's declared timeout for the current phase: `[verifier]
-   timeout_sec` once verification has begun (see `begin_verification`),
+   timeout_sec` once verification has begun (see `set_phase`),
    and `[agent] timeout_sec` otherwise. This value is read from
    `task.toml`, resolved with any multiplier, and passed to the
    environment. It is the canonical source.

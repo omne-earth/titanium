@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella-policy-engine smoke-cella-policy-engine-airgapped smoke-cella-policy-engine-www smoke-cella smoke-cella-all smoke-cella-integration
+.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella smoke-cella-all smoke-cella-integration
 
 -include .secrets
 
@@ -338,7 +338,7 @@ smoke-cella-integration: sync .podman .cella
 		cp $(RUN_TASKS)/$(BACKEND)/$@/$$t/environment/cella.policy examples/smoke/$$t/environment/cella.policy \
 		&& echo "collected $$t/cella.policy copied back -- review and commit it"; done)
 
-smoke-cella-all: smoke-cella-rootfs smoke-cella-integration
+smoke-cella-all: smoke-cella-rootfs smoke-cella-integration smoke-cella
 
 # smoke-cella: the rung-parity smoke -- the real bench tasks under cella,
 # the way smoke-krun-podman runs them under krun. fix-git-offline is
@@ -348,14 +348,16 @@ smoke-cella-all: smoke-cella-rootfs smoke-cella-integration
 # baked -- build-pmars gets 1.5h for the compile on a boot-per-command rung)
 # and, where it has world egress, its own environment/cella.policy beside
 # the Dockerfile, as cella's contract expects. No staging-time overrides.
-# Oracle agent, each task's own offline verifier. DRY_RUN=true re-collects
+# Each task's own offline verifier. Like every other smoke-<env>, the
+# rung's verify-* tasks ride along under the same agent (the generic
+# staging does this for the other envs). DRY_RUN=true re-collects
 # build-pmars's policy into the snapshot for review (§3.1).
 CELLA_BENCH_TASKS := examples/smoke/cella/fix-git-offline examples/smoke/cella/build-pmars
 
 smoke-cella: sync .podman .cella | .sentinel/tasks
 	$(LOG)
 	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
-	cp -r $(CELLA_BENCH_TASKS) $(RUN_TASKS)/$(BACKEND)/$@/
+	cp -r $(CELLA_BENCH_TASKS) $(wildcard examples/smoke/verify-cella-env-*) $(RUN_TASKS)/$(BACKEND)/$@/
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
 		$(UNIT_CELLA_TESTS) \
