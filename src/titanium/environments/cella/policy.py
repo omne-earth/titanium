@@ -465,11 +465,35 @@ class Policy:
 class PolicyRecorder:
     """Dry-run collection: every distinct crossing becomes one release
     grant. Rewritten on every new grant, so a run that dies mid-way
-    still leaves what it observed."""
+    still leaves what it observed.
+
+    A recorder seeds from the file it is pointed at, so successive dry
+    runs accumulate one cohesive collection instead of each discarding
+    the last -- an oracle run collects the solution's and the
+    verifier's egress, and an agent run afterwards adds the paths a
+    real model takes. A seeded grant holds its destination even when
+    it carries review annotations (a window, a reason): the new bare
+    observation of the same destination is not a new grant."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
         self._grants: set[Grant] = set()
+        self._named: set[tuple] = set()
+        if path.exists():
+            for grant in Policy.parse(path.read_text()).grants:
+                self._grants.add(grant)
+                self._named.add(self._destination_key(grant))
+
+    @staticmethod
+    def _destination_key(grant: Grant) -> tuple:
+        return (
+            grant.direction,
+            grant.ethertype,
+            grant.host,
+            grant.ip,
+            grant.port,
+            grant.proto,
+        )
 
     @property
     def grants(self) -> frozenset[Grant]:
@@ -477,7 +501,8 @@ class PolicyRecorder:
 
     def record(self, operation: Operation) -> None:
         grant = grant_for(operation)
-        if grant is None or grant in self._grants:
+        if grant is None or self._destination_key(grant) in self._named:
             return
         self._grants.add(grant)
+        self._named.add(self._destination_key(grant))
         self._path.write_text(Policy(grants=tuple(self._grants)).render())

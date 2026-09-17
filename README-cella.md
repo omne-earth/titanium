@@ -149,17 +149,32 @@ then enforce.
 
 **Run it.** This applies to any task you bring to the rung — a new
 bench task, a future dataset, anything with world egress. Write the
-task first (Dockerfile, `task.toml`, `solution/`, `tests/`), leave
-`environment/cella.policy` absent or empty, and run the task once in
-collection mode. Use the oracle: it is deterministic, and the
-verifier phase must run — the verifier has world egress of its own
-(its test harness), and only a full trial collects it:
+task first (Dockerfile, `task.toml`, `solution/`, `tests/`) and leave
+`environment/cella.policy` absent or empty. Then collect in two
+passes. Successive dry runs accumulate into one file: each recorder
+seeds from the collection the last one wrote.
+
+Pass one, the oracle. It is deterministic, and it drives the full
+trial, so it collects the solution's egress and the verifier's (the
+test harness has world egress of its own):
 
 ```bash
 titanium run --env cella --ek dry_run=true --agent oracle --path path/to/your-task
 # the checked-in smokes have a make convenience for the same thing:
 make smoke-cella DRY_RUN=true TITANIUM_AGENT=oracle
 ```
+
+Pass two, the real agent. A model can solve the task by a different
+path than the solution and reach hosts the oracle never touched.
+This pass adds those paths to the same file:
+
+```bash
+titanium run --env cella --ek dry_run=true --path path/to/your-task
+# or: make smoke-cella DRY_RUN=true
+```
+
+One agent run samples one path. Run pass two more than once when you
+want wider coverage; each run adds only what is new.
 
 **What to expect.** The engine releases every crossing and records
 each distinct one as a grant. The engine also plants a `skip_freeze`
@@ -200,21 +215,16 @@ make smoke-cella
 
 Enforce mode is the proof: it must release everything the task and
 the verifier need and refuse the rest, on the record. A dry run only
-observes; it proves nothing about enforcement. Do not run
-`DRY_RUN=true` again for that task unless the task's egress changes —
-each dry run rewrites the collected policy and discards your
-grooming.
+observes; it proves nothing about enforcement. A later dry run keeps
+your windows (a groomed grant holds its destination), but it
+re-collects the infra grants you stripped — after any re-collection,
+groom again before you commit.
 
-**Why the oracle suffices.** `cella.policy` declares the *task's*
+**What the file does not need.** `cella.policy` declares the *task's*
 egress only. The agent's own line — its inference host and install
 endpoints — comes from the agent's allowlist, and titanium composes
 it into the appliance border on every trial, with or without a grant
-in the task file. So an oracle collection misses nothing the policy
-is responsible for. One residual stays: a real agent may solve the
-task by a different path than the solution and reach a host the
-oracle never touched. That crossing is refused, on the record. That
-is the membrane at work, not a collection gap. Widen the policy by
-hand when the alternate path is legitimate.
+in the task file. Do not add it.
 
 ## 9. Where to look, by question
 

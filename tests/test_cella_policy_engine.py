@@ -412,6 +412,31 @@ def test_dry_run_releases_everything_and_collects_the_policy(tmp_path):
     assert _verdict(enforcing, _op(port=80)).refusal is not None
 
 
+def test_dry_run_accumulates_across_recorders(tmp_path):
+    # Successive dry runs collect one cohesive policy: a second
+    # recorder seeds from the file, keeps what the first observed, and
+    # adds only new destinations -- so an oracle run and an agent run
+    # can collect together instead of each discarding the last.
+    path = tmp_path / "cella.policy"
+    first = PolicyRecorder(path)
+    first.record(_op())
+    second = PolicyRecorder(path)
+    second.record(_op(ip=(8, 8, 8, 8), port=53, proto=17))
+    collected = Policy.load(path)
+    assert len(collected.grants) == 2
+
+    # A groomed grant holds its destination: re-observing it bare adds
+    # no duplicate line.
+    path.write_text(
+        "release outgoing 1.2.3.4:443/tcp (keep_open=60m) (skip_freeze=true)\n"
+    )
+    third = PolicyRecorder(path)
+    third.record(_op(ip=(1, 2, 3, 4), port=443, proto=6))
+    groomed = Policy.load(path)
+    assert len(groomed.grants) == 1
+    assert next(iter(groomed.grants)).keep_open > 0
+
+
 def test_dry_run_plants_skip_freeze_memory_once_per_outgoing_destination(tmp_path):
     # Collection must not freeze on every frame: the recorder plants a
     # skip_freeze memory the first time it sees each outgoing destination,

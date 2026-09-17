@@ -150,7 +150,11 @@ then enforce forever:
    The engine releases every crossing and writes each distinct one to
    the task's `environment/cella.policy` as a grant, rewritten on
    every new grant — a run that dies mid-way still leaves what it
-   observed. The make target copies the collected file back to the
+   observed. Successive dry runs accumulate into the same file: each
+   recorder seeds from the last collection, so an oracle pass and a
+   real-agent pass collect together
+   ([README-cella.md](../../README-cella.md) §8 states the two-pass
+   flow). The make target copies the collected file back to the
    example directory; a plain `titanium run` leaves it in the staged
    task copy under `.run/tasks/`.
 2. **Review every line.** The collected file is an observation, not a
