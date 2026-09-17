@@ -412,6 +412,27 @@ def test_dry_run_releases_everything_and_collects_the_policy(tmp_path):
     assert _verdict(enforcing, _op(port=80)).refusal is not None
 
 
+def test_dry_run_plants_skip_freeze_memory_once_per_outgoing_destination(tmp_path):
+    # Collection must not freeze on every frame: the recorder plants a
+    # skip_freeze memory the first time it sees each outgoing destination,
+    # so a repeat waits live. Otherwise a slow-thaw host wedges mid-collect.
+    judge = PolicyJudge(recorder=PolicyRecorder(tmp_path / "cella.policy"))
+
+    first = judge.decide(_op())
+    assert first[0].release is not None
+    memory = first[1].membrane_memory
+    assert memory.skip_freeze is True
+    assert memory.keep_open > 0
+    assert memory.destination == _op().destination
+
+    # The same destination again rides alone -- already remembered.
+    assert len(judge.decide(_op())) == 1
+    # A new destination plants its own memory.
+    assert len(judge.decide(_op(ip=(8, 8, 8, 8), port=53, proto=17))) == 2
+    # An incoming crossing never plants (skip_freeze is outgoing-only).
+    assert len(judge.decide(_op(port=8080, direction=DIRECTION_INCOMING))) == 1
+
+
 # ---------------------------------------------------------------------------
 # The wire's remaining arms and refusals
 # ---------------------------------------------------------------------------

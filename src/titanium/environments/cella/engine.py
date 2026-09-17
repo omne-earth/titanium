@@ -66,9 +66,11 @@ from grpclib.server import Server, Stream
 
 from titanium.environments.cella.policy import Policy, PolicyRecorder
 from titanium.environments.cella.wire import (
+    DIRECTION_OUTGOING,
     Decision,
     Destination,
     Event,
+    MembraneMemory,
     Operation,
     Refusal,
     Release,
@@ -81,6 +83,13 @@ logger = logging.getLogger(__name__)
 DECIDE_METHOD = "/cella.Engine/Decide"
 
 REFUSAL_WHY_NO_GRANT = "no cella.policy grants this crossing"
+
+# Dry-run collection plants each outgoing destination with a long window,
+# 24h like ARP and the member border: collection observes each crossing
+# once, so a remembered destination can wait live instead of freezing. The
+# window only governs freeze frequency here, never authorization -- the
+# recorder releases everything regardless.
+_RECORDER_KEEP_OPEN = 86400
 
 
 def _memory_key(destination: Destination) -> tuple:
@@ -182,7 +191,32 @@ class PolicyJudge:
     def decide(self, operation: Operation) -> list[Decision]:
         if self.recorder is not None:
             self.recorder.record(operation)
-            return [Decision(id=operation.id, release=Release())]
+            decisions = [Decision(id=operation.id, release=Release())]
+            # Plant a skip_freeze memory the first time each outgoing
+            # destination is seen. Without it every frame freezes the
+            # machine one-shot; on a slow-thaw host the collect wedges
+            # (one frame per multi-second thaw) before it ever observes
+            # the later crossings. Outgoing only -- skip_freeze is
+            # outgoing-only, and an incoming memory would collide.
+            dest = operation.destination
+            if (
+                dest is not None
+                and operation.direction == DIRECTION_OUTGOING
+                and self._memory.plant(
+                    _memory_key(dest), _RECORDER_KEEP_OPEN, time.monotonic()
+                )
+            ):
+                decisions.append(
+                    Decision(
+                        id=b"",
+                        membrane_memory=MembraneMemory(
+                            destination=dest,
+                            skip_freeze=True,
+                            keep_open=_RECORDER_KEEP_OPEN,
+                        ),
+                    )
+                )
+            return decisions
 
         if self.policy is None:
             return [
