@@ -189,7 +189,7 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 bootstrap:
 	bash scripts/init/bootstrap.sh
 
-init: sync .tmux .podman .runsc .runsc-podman .krun-podman .titanium | .sentinel/tasks
+init: sync .tmux .podman .runsc .runsc-podman .krun-podman .cella .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
 
 # utility: run any podman command in the runner's context — trial containers
@@ -364,9 +364,10 @@ smoke-cella: sync .podman .cella | .sentinel/tasks
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ \
 		$(if $(filter true,$(DRY_RUN)),TITANIUM_EXTRA_ARGS="--ek dry_run=true",)
-	$(if $(filter true,$(DRY_RUN)),cp $(RUN_TASKS)/$(BACKEND)/$@/build-pmars/environment/cella.policy \
-		examples/smoke/cella/build-pmars/environment/cella.policy \
-		&& echo "collected build-pmars/cella.policy copied back -- review and commit it")
+	$(if $(filter true,$(DRY_RUN)),for t in $(notdir $(CELLA_BENCH_TASKS)); do \
+		test -f examples/smoke/cella/$$t/environment/cella.policy || continue; \
+		cp $(RUN_TASKS)/$(BACKEND)/$@/$$t/environment/cella.policy examples/smoke/cella/$$t/environment/cella.policy \
+		&& echo "collected $$t/cella.policy copied back -- review and commit it"; done)
 
 # The smoke needs the lab flavor -- the field flavor writes no console.log,
 # so the guest cannot be observed. .cella-debug builds it from the rev pinned
