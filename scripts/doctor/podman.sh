@@ -174,6 +174,29 @@ else
 fi
 
 echo
+echo "== systemd user session =="
+# Rootless Podman only uses the systemd cgroup manager -- and delegation
+# (below) only means anything -- when systemd-logind has an active session
+# for this login. Without one, podman silently falls back to cgroupfs with
+# just a runtime WARN on every invocation; nothing here fails outright.
+# Most common cause over ssh: sshd's PAM session stack isn't running
+# pam_systemd, usually because UsePAM no is set somewhere under
+# /etc/ssh/sshd_config.d/ -- Fedora's own sshd_config warns that's
+# unsupported, and this silent cgroupfs fallback is exactly why.
+CG_MANAGER=$(podman info --format '{{.Host.CgroupManager}}' 2>/dev/null)
+if [[ "$CG_MANAGER" == "systemd" ]]; then
+  ok "podman using the systemd cgroup manager"
+elif loginctl show-user "$(id -u)" >/dev/null 2>&1; then
+  warn "podman is using the cgroupfs manager (systemd cgroup manager unavailable) despite an active
+        systemd-logind session for uid $(id -u) -- inspect 'podman info' and 'systemctl status user@$(id -u)'."
+else
+  warn "no systemd-logind session for uid $(id -u) -- podman falls back to the cgroupfs manager, and cgroup
+        delegation below cannot apply even once configured. If this is over ssh, check for 'UsePAM no' under
+        /etc/ssh/sshd_config.d/ (run: sudo sshd -T | grep -i usepam) -- it skips pam_systemd, so no session is
+        ever registered. Fix, reload sshd, and reconnect (an existing session won't pick it up)."
+fi
+
+echo
 echo "== cgroup delegation =="
 # Rootless Podman enforces --cpus/--memory only on cgroups v2 with the cpu and
 # memory controllers delegated to the user; otherwise it warns and silently
