@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella smoke-cella-all smoke-cella-integration
+.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella smoke-cella-all smoke-cella-integration
 
 -include .secrets
 
@@ -235,7 +235,23 @@ titanium-run: | .sentinel/tasks
 	mkdir -p "$(TITANIUM_JOBS_DIR)"
 	$(TITANIUM_RUN)
 
-smoke-podman: sync .podman $(RUN_TASKS)/$(BACKEND)/smoke-podman
+# tmux/screen give every pane/window its own pty, so sudo's per-tty
+# credential cache (tty_tickets, the default) never carries over from the
+# outer session -- the first sudo call inside a fresh pane always needs a
+# password, no matter how recently you authenticated outside it. Every
+# smoke-* target ends up calling sudo somewhere downstream (podman/runsc/
+# krun/cella provisioning, titanium-run.sh's runner switch), so fail fast
+# here with a clear fix instead of a bare "[sudo] password for ..." prompt
+# buried mid-build, or worse: no prompt visible at all if this pane's
+# stdout is also piped/logged, which just hangs.
+.sudo-tty-guard:
+	@if [ -n "$${TMUX:-}$${STY:-}" ] && ! sudo -n true 2>/dev/null; then \
+		echo "no cached sudo credential in this tmux/screen pane (its own tty -- separate from the outer session's sudo cache)."; \
+		echo "run 'sudo -v' in this pane first, then re-run this target."; \
+		exit 1; \
+	fi
+
+smoke-podman: .sudo-tty-guard sync .podman $(RUN_TASKS)/$(BACKEND)/smoke-podman
 	$(LOG)
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
@@ -245,7 +261,7 @@ smoke-podman: sync .podman $(RUN_TASKS)/$(BACKEND)/smoke-podman
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) titanium-run TITANIUM_ENV=podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
-smoke-gvisor: sync .runsc $(RUN_TASKS)/$(BACKEND)/smoke-gvisor
+smoke-gvisor: .sudo-tty-guard sync .runsc $(RUN_TASKS)/$(BACKEND)/smoke-gvisor
 	$(LOG)
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
@@ -255,7 +271,7 @@ smoke-gvisor: sync .runsc $(RUN_TASKS)/$(BACKEND)/smoke-gvisor
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) titanium-run TITANIUM_ENV=gvisor TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
-smoke-gvisor-podman: sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-podman
+smoke-gvisor-podman: .sudo-tty-guard sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-podman
 	$(LOG)
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
@@ -265,7 +281,7 @@ smoke-gvisor-podman: sync .runsc-podman $(RUN_TASKS)/$(BACKEND)/smoke-gvisor-pod
 		--cov-report=html:$(REPORTS_DIR)/$(BACKEND)/$@/coverage
 	$(MAKE) titanium-run TITANIUM_ENV=gvisor-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
-smoke-krun-podman: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
+smoke-krun-podman: .sudo-tty-guard sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
 	$(LOG)
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	COVERAGE_FILE=$(REPORTS_DIR)/$(BACKEND)/$@/.coverage $(PYTEST) \
@@ -281,7 +297,7 @@ smoke-krun-podman: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-krun-podman
 AGENT_TIMEOUT_TASKS ?= examples/tasks/agent-timeout-wedge examples/tasks/agent-timeout-sleep
 
 smoke-on-agent-timeout: SMOKE_TASKS = $(AGENT_TIMEOUT_TASKS)
-smoke-on-agent-timeout: sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-on-agent-timeout
+smoke-on-agent-timeout: .sudo-tty-guard sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-on-agent-timeout
 	$(LOG)
 	$(MAKE) titanium-run TITANIUM_ENV=krun-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
@@ -311,7 +327,7 @@ CELLA_SMOKE_TASKS := \
 # and each www task's cella.policy is collected, then copied back to
 # the example for review -- observe once, enforce forever.
 DRY_RUN ?= false
-smoke-cella-integration: sync .podman .cella
+smoke-cella-integration: .sudo-tty-guard sync .podman .cella
 	$(LOG)
 	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
 	cp -r $(CELLA_SMOKE_TASKS) $(RUN_TASKS)/$(BACKEND)/$@/
@@ -343,7 +359,7 @@ smoke-cella-all: smoke-cella-rootfs smoke-cella-integration smoke-cella
 # build-pmars's policy into the snapshot for review (§3.1).
 CELLA_BENCH_TASKS := examples/smoke/cella/fix-git-offline examples/smoke/cella/build-pmars
 
-smoke-cella: sync .podman .cella | .sentinel/tasks
+smoke-cella: .sudo-tty-guard sync .podman .cella | .sentinel/tasks
 	$(LOG)
 	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
 	cp -r $(CELLA_BENCH_TASKS) $(wildcard examples/smoke/verify-cella-env-*) $(RUN_TASKS)/$(BACKEND)/$@/
@@ -365,7 +381,7 @@ smoke-cella: sync .podman .cella | .sentinel/tasks
 # in runtime.env and CELLA_BIN defaults to that build; export CELLA_BIN to
 # observe through a different lab binary instead. Exit 2 means a precondition
 # was missing and nothing was proven; exit 1 is a real failure.
-smoke-cella-rootfs: sync .podman .cella .cella-debug
+smoke-cella-rootfs: .sudo-tty-guard sync .podman .cella .cella-debug
 	$(LOG)
 	CELLA_BIN="$${CELLA_BIN:-$(CELLA_LAB_BIN)}" bash scripts/smoke/cella-rootfs.sh
 
