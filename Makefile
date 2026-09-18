@@ -418,7 +418,7 @@ run-session: sync .tmux | .sentinel/tasks
 	echo "  windows: Ctrl-b n / Ctrl-b p to cycle, Ctrl-b w to list"
 	echo "  detach:  Ctrl-b d (runs keep going)"
 
-smoke-env: SESSION_TARGETS = smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman
+smoke-env: SESSION_TARGETS = smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella
 smoke-env: run-session
 
 bench-all: SESSION_TARGETS = bench-ds bench-tb2
@@ -457,27 +457,34 @@ clean:
 		-o -type d -name __pycache__ -print0 | xargs -0r rm -rf
 	echo "caches removed"
 
-# collect: sweep every repo-local artifact dot-folder (.run, .tasks, …) into
-# a timestamped archive instead of deleting it — the collection maneuver
-# before a reset, or on its own to shelve a finished campaign. Only
-# *untracked* dot-folders qualify: anything holding tracked files (.vscode,
-# .github, …) is source, not artifact. Also skipped: .git and .archive are
-# structural; .venv is rebuilt byte-equivalent by `make sync` and carries
-# nothing worth keeping (reset removes it).
+# collect: sweep the contents of every repo-local artifact dot-folder
+# (.run, …) into a timestamped archive instead of deleting it — the
+# collection maneuver before a reset, or on its own to shelve a
+# finished campaign. The dot-folder itself is left in place (emptied),
+# only its contents move, mirrored under the same folder structure in
+# the archive, so recipes that expect e.g. .run/jobs to already exist
+# don't need to recreate it. Only *untracked* dot-folders qualify:
+# anything holding tracked files (.vscode, .github, …) is source, not
+# artifact. Also skipped: .git and .archive are structural; .venv is
+# rebuilt byte-equivalent by `make sync` and carries nothing worth
+# keeping (reset removes it); .tasks is the cloned task-source cache,
+# not a run artifact, and is slow to re-clone; .pytest_cache is a tool
+# cache `make clean` already owns, not a run artifact either.
 collect:
 	@stamp=$$(date +%Y-%m-%d__%H-%M-%S)
 	dest="$(ARCHIVE_DIR)/$$stamp"
 	moved=0
 	for d in .*/; do
-		case "$$d" in ./|../|.git/|.archive/|.venv/) continue ;; esac
+		case "$$d" in ./|../|.git/|.archive/|.venv/|.tasks/|.pytest_cache/) continue ;; esac
 		test -d "$$d" || continue
 		if git ls-files --error-unmatch "$$d" >/dev/null 2>&1 || [ -n "$$(git ls-files "$$d" | head -1)" ]; then
 			echo "skipping $$d (tracked)"
 			continue
 		fi
-		mkdir -p "$$dest"
-		mv "$$d" "$$dest/"
-		echo "archived $$d -> $$dest/"
+		test -n "$$(find "$$d" -mindepth 1 -print -quit)" || continue
+		mkdir -p "$$dest/$$d"
+		find "$$d" -mindepth 1 -maxdepth 1 -exec mv -t "$$dest/$$d" {} +
+		echo "archived $$d -> $$dest/$$d"
 		moved=1
 	done
 	test "$$moved" = 1 || echo "nothing to collect"
@@ -501,4 +508,3 @@ sync: .deps .uv
 
 upgrade: .uv
 	$(UV) lock --upgrade
- 
