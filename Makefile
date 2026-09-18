@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .tmux .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs smoke-env bench-ds bench-tb2 bench-all run-session run-attach run-list run-close sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella smoke-cella-all smoke-cella-integration
+.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella smoke-cella-all smoke-cella-integration
 
 -include .secrets
 
@@ -75,22 +75,11 @@ REPORTS_DIR := $(RUN_DIR)/reports
 SMOKE_TASKS ?= examples/smoke/fix-git-offline $(TASKS_DIR)/terminal-bench-2/build-pmars
 BENCH_N ?= 8
 
-# run-session plumbing: one tmux session per RUN_DIR, one window per target
-RUN_SESSION := titanium-$(subst .,,$(notdir $(RUN_DIR)))
-RUN_TMUX := tmux -L titanium
-SESSION_TARGETS ?= smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman
-
 .uv:
 	@command -v uv >/dev/null || { \
 		if command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y uv; \
 		elif command -v dnf >/dev/null; then sudo dnf install -y uv; \
 		else curl -LsSf https://astral.sh/uv/install.sh | sh; fi; }
-
-.tmux:
-	@command -v tmux >/dev/null || { \
-		if command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y tmux; \
-		elif command -v dnf >/dev/null; then sudo dnf install -y tmux; \
-		else echo "no apt-get/dnf found — install tmux manually"; exit 1; fi; }
 
 # needs the venv — keep after `sync` in prerequisite lists
 .podman:
@@ -189,7 +178,7 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 bootstrap:
 	bash scripts/init/bootstrap.sh
 
-init: sync .tmux .podman .runsc .runsc-podman .krun-podman .cella .titanium | .sentinel/tasks
+init: sync .podman .runsc .runsc-podman .krun-podman .cella .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
 
 # utility: run any podman command in the runner's context — trial containers
@@ -381,7 +370,7 @@ smoke-cella-rootfs: sync .podman .cella .cella-debug
 	CELLA_BIN="$${CELLA_BIN:-$(CELLA_LAB_BIN)}" bash scripts/smoke/cella-rootfs.sh
 
 # full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
-# BENCH_N concurrent trials each — bench-all fans out two, so 2*BENCH_N total.
+# BENCH_N concurrent trials each.
 bench-ds: sync | .sentinel/tasks
 	$(LOG)
 	$(MAKE) titanium-run TITANIUM_TASK=$(TASKS_PATH_DS)/tasks TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ TITANIUM_N=$(BENCH_N)
@@ -389,50 +378,6 @@ bench-ds: sync | .sentinel/tasks
 bench-tb2: sync | .sentinel/tasks
 	$(LOG)
 	$(MAKE) titanium-run TITANIUM_TASK=$(TASKS_PATH_TB2) TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ TITANIUM_N=$(BENCH_N)
-
-# fan out $(SESSION_TARGETS), one tmux window each, in the RUN_DIR-scoped session
-run-session: sync .tmux | .sentinel/tasks
-	@if $(RUN_TMUX) has-session -t $(RUN_SESSION) 2>/dev/null; then
-		# a pane's shell has children iff its target is still running
-		if $(RUN_TMUX) list-panes -s -t $(RUN_SESSION) -F '#{pane_pid}' | xargs -I{} ps -o pid= --ppid {} | grep -q .; then
-			echo "run still in progress in tmux session '$(RUN_SESSION)'"
-			echo "  attach: make run-attach RUN_DIR=$(RUN_DIR)"
-			echo "  kill:   $(RUN_TMUX) kill-session -t $(RUN_SESSION)"
-			exit 1
-		fi
-		echo "previous run finished — recycling session '$(RUN_SESSION)'"
-		$(RUN_TMUX) kill-session -t $(RUN_SESSION)
-	fi
-	first=1
-	for t in $(SESSION_TARGETS); do
-		if [ "$$first" = 1 ]; then
-			$(RUN_TMUX) new-session -d -s $(RUN_SESSION) -n "$$t" -e MAKEFLAGS='$(MAKEFLAGS)' "$(MAKE) $$t; exec bash"
-			first=0
-		else
-			$(RUN_TMUX) new-window -t $(RUN_SESSION) -n "$$t" -e MAKEFLAGS='$(MAKEFLAGS)' "$(MAKE) $$t; exec bash"
-		fi
-	done
-	echo ""
-	echo "Started [$(SESSION_TARGETS)] in tmux session '$(RUN_SESSION)':"
-	echo "  attach:  make run-attach RUN_DIR=$(RUN_DIR)"
-	echo "  windows: Ctrl-b n / Ctrl-b p to cycle, Ctrl-b w to list"
-	echo "  detach:  Ctrl-b d (runs keep going)"
-
-smoke-env: SESSION_TARGETS = smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-cella
-smoke-env: run-session
-
-bench-all: SESSION_TARGETS = bench-ds bench-tb2
-bench-all: run-session
-
-run-attach: .tmux
-	@$(RUN_TMUX) has-session -t $(RUN_SESSION) 2>/dev/null || { echo "no session '$(RUN_SESSION)' — run: make smoke-env or make bench-all"; exit 1; }
-	$(RUN_TMUX) attach -t $(RUN_SESSION)
-
-run-list: .tmux
-	@$(RUN_TMUX) list-sessions 2>/dev/null || echo "no runs active"
-
-run-close: .tmux
-	@$(RUN_TMUX) kill-session -t $(RUN_SESSION) 2>/dev/null && echo "closed '$(RUN_SESSION)'" || echo "no session '$(RUN_SESSION)'"
 
 # Vendor every image a task set references into one archive; restore it on an
 # airgapped host so nothing is ever pulled. --prebuilt matches
@@ -494,13 +439,13 @@ collect:
 # first, so artifacts are shelved, not lost). Host side, the inverse of the
 # init chain: runner user + ACLs + linger, delegation drop-in, runsc binaries
 # and both engine registrations, digest pin, provisioned stamp, operator's
-# docker group grant. Distro packages (podman, docker, tmux, uv, gcc) stay —
+# docker group grant. Distro packages (podman, docker, uv, gcc) stay —
 # reset owns titanium's state, not the machine's package set. Tracked-file
 # edits are never touched; only untracked/ignored state is cleaned. Ends by
 # asserting the slate is actually clean.
 reset: collect
 	bash scripts/reset/deprovision.sh
-	git clean -xdf -e .secrets -e .archive
+	git clean -xdf -e .secrets -e .archive -e .tasks
 	bash scripts/reset/assert-clean-slate.sh
 
 sync: .deps .uv

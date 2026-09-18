@@ -32,6 +32,11 @@ for path in \
 done
 grep -qs '"runsc"' /etc/docker/daemon.json \
   && flag "/etc/docker/daemon.json still registers runsc"
+[[ -d "$HOME/.cella" ]] && flag "$HOME/.cella still exists"
+[[ -d "${XDG_CACHE_HOME:-$HOME/.cache}/titanium/cella-src" ]] \
+  && flag "${XDG_CACHE_HOME:-$HOME/.cache}/titanium/cella-src still exists"
+podman container exists cella-build 2>/dev/null \
+  && flag "cella-build toolbox container still exists"
 # The operator's docker-group membership is intentionally left in place by
 # deprovision (reboot-coupled; see deprovision.sh) — not checked here. The
 # operator's kvm-group grant (krun-podman.sh, only on hosts that narrow
@@ -51,14 +56,12 @@ while [[ "$component" != "/" ]]; do
 done
 
 # --- host: nothing titanium-shaped still running -----------------------------
-systemctl list-units --plain --no-legend 'run-p*.service' 2>/dev/null | grep -q . \
+systemctl list-units --plain --no-legend --state=running 'run-p*.service' 2>/dev/null | grep -q . \
   && flag "shim transient units still running (run-p*.service)"
-tmux -L titanium list-sessions >/dev/null 2>&1 \
-  && flag "titanium tmux server still has sessions"
 
 # --- checkout: fresh-clone equivalence ---------------------------------------
 # Untracked/ignored state must be gone except the sanctioned survivors.
-cruft=$(cd "$REPO_ROOT" && git clean -nxd -e .secrets -e .archive)
+cruft=$(cd "$REPO_ROOT" && git clean -nxd -e .secrets -e .archive -e .tasks)
 [[ -n "$cruft" ]] && flag "untracked state survived git clean:" && echo "$cruft" >&2
 # Tracked-file edits are reported but never count as failure: reset must not
 # decide the fate of work in progress.
