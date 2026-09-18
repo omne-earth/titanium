@@ -35,6 +35,7 @@ def test_the_judgment_machinery_exists_exactly_when_a_nic_does():
 # The environment class: pure parts, no cella and no podman
 # ---------------------------------------------------------------------------
 
+import io
 import tarfile
 from pathlib import Path
 
@@ -42,6 +43,7 @@ import pytest
 
 from titanium.environments.cella.environment import (
     CellaEnvironment,
+    CellaError,
     _flavor_name,
 )
 from titanium.environments.cella.flavor import validate_flavor_name
@@ -295,6 +297,72 @@ def test_an_agentless_airgapped_trial_has_no_pair(tmp_path):
     env = _make_env(tmp_path)
     assert not env._paired
     assert env._task_net() == "none"
+
+
+def _result_tar(rc: int, stdout: str = "", stderr: str = "") -> bytes:
+    """A tar shaped exactly like ``cella extract <vm> /titanium/result``
+    -- ``tar -cf - -C /rock ./titanium/result`` -- for standing in for
+    ``_cella_extract`` in tests without a real machine."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:") as archive:
+        for name, content in (
+            ("rc", str(rc)),
+            ("stdout", stdout),
+            ("stderr", stderr),
+        ):
+            data = content.encode()
+            info = tarfile.TarInfo(f"./titanium/result/{name}")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_harvest_reads_the_result_triple_via_extract(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+    env._work = tmp_path / "work"
+    env._work.mkdir()
+    machine = tmp_path / "machines" / "m"
+    machine.mkdir(parents=True)
+    (machine / "disk.img").write_bytes(b"DISK")
+    monkeypatch.setattr(env, "_machine_dir", lambda name: machine)
+
+    captured: dict = {}
+
+    def fake_extract(name, guest_path, timeout_sec):
+        captured["args"] = (name, guest_path)
+        return _result_tar(0, stdout="hi\n", stderr="")
+
+    monkeypatch.setattr(env, "_cella_extract", fake_extract)
+
+    result = env._harvest("m")
+
+    assert captured["args"] == ("m", "/titanium/result")
+    assert result.return_code == 0
+    assert result.stdout == "hi\n"
+    assert result.stderr == ""
+    # The disk copy for the next cycle's filesystem still happens,
+    # unrelated to the read.
+    assert env._state_img is not None
+    assert env._state_img.read_bytes() == b"DISK"
+
+
+def test_harvest_raises_when_the_guest_left_no_result(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+    env._work = tmp_path / "work"
+    env._work.mkdir()
+    machine = tmp_path / "machines" / "m"
+    machine.mkdir(parents=True)
+    (machine / "disk.img").write_bytes(b"DISK")
+    (machine / "vmm.log").write_text("cella: booting\n")
+    monkeypatch.setattr(env, "_machine_dir", lambda name: machine)
+
+    def fake_extract(name, guest_path, timeout_sec):
+        raise CellaError("no such path under /rock: /titanium/result")
+
+    monkeypatch.setattr(env, "_cella_extract", fake_extract)
+
+    with pytest.raises(CellaError, match="halted without a result"):
+        env._harvest("m")
 
 
 @pytest.mark.asyncio

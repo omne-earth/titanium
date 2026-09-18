@@ -348,28 +348,62 @@ agent, like `smoke-krun-podman`) is separate future work.
 the rock disk read-only at `/rock` and attaches the console — which
 only the lab flavor has. It is not a programmatic extraction API.
 
-So collection reads the still `disk.img` directly: copy the file out
-of `machines/<vm>/` after `cella stop`, then read only the asked-for
-paths from the copy (§7). This is the one place titanium touches a machine-directory
-artifact instead of a cella verb. What defends it: cella's own
-documentation blesses the machine directory as plain files that can
-be read; the read happens only on a still machine, only on a copy,
-read-only; and it recovers exactly what `inspect`'s evidence view
-exists to provide. It is a read of evidence, not a channel into
+`cella extract <vm> <guest-path>` is: it works the same way as
+`inspect` but with no console, so it runs in the field flavor. A
+temporary appliance attaches the still machine's disk read-only,
+tars the named path, writes a checked trailer (byte length and
+sha256), and halts; the host verifies the trailer and streams the
+tar. The read is witnessed on cella's own audit record, like every
+verb. `cella --dump <file>` is a third, unrelated verb: a decoder for
+cella's own framed-protobuf books (ledger, verdict, membrane-memory),
+not a disk read. Titanium calls it in `_dump_chronicle` (§5).
+
+`_harvest` -- the per-cycle read of the result triple
+(`/titanium/result/{rc,stdout,stderr}`) that decides an exec's return
+code and output -- calls `extract` directly: `_cella_extract` shells
+out to `cella extract <name> /titanium/result`, and the tar comes
+back as bytes, read with Python's `tarfile`. No disk copy, no krun
+guest; the read is on cella's audit record. `_preserve_chronicle`
+(§5) is not a disk read: `ledger`, `verdict`, `audit`,
+`membrane-memory`, and `manifest.json` are cella's own host-side
+bookkeeping files, sitting in `machines/<vm>/` beside `disk.img`, not
+inside it -- a plain file copy, no ext4 parsing.
+
+Two reads stay direct, and neither can call `extract`:
+
+* **`download_file`/`download_dir`** (task artifacts, e.g.
+  `report.json`) read `self._state_img` -- a bare copy of a *previous*
+  cycle's disk that titanium holds on its own, decoupled from any
+  registered machine (each cycle's machine is destroyed at that
+  cycle's teardown; `cella create` has no flag to attach an existing
+  disk file as a new machine's own). `extract` needs a name under
+  `machines/<vm>/`; a loose file titanium is holding is not one. So
+  these copy the file out of `machines/<vm>/` after `cella stop`,
+  then read only the asked-for paths from the copy (§7): only ever
+  against a still machine, only ever against a copy, read-only,
+  recovering exactly what `extract` would read if it could reach
+  this file.
+* **`_result_landed`**, the completion poll that decides when a cycle
+  finished, reads `disk.img` directly, no copy at all -- the machine
+  can be actively running at that instant, not still, and `extract`
+  refuses a running machine outright. Its defense is different:
+  cella's documentation blesses exactly this, reading the machine
+  directory as plain files while a machine runs and nothing is
+  written; the dump is one field (`result/rc`), read-only, and --
+  like the artifact reads above -- the parse itself runs inside a
+  krun guest with no network (§7), so a hostile filesystem never
+  reaches the host even mid-run.
+
+Every one of these reads is a read of evidence, not a channel into
 anything.
 
-Named honestly, it is a cella-unmediated evidence read. The durable
-fix is cella-side: a programmatic verb such as
-`cella inspect <vm> --dump <guest-path>` emitting a tar stream, where
-`--dump /` is the whole rootfs. That form preserves numeric
-ownership, covers single-file reads and full-tree export with one
-flag, and would put every evidence read on cella's audit record —
-better than today, where the direct read leaves no trace in cella's
-books. The environment's `_harvest` is a one-function swap when it
-lands. Until then, the direct read stays, and mounting *into* a cella
-VM is not an alternative: cella has no host-mount device at all (by
-design), its `--attach-ro` disk mechanism is not reachable from the
-CLI, and a reader VM cannot hand results back without the host
+Named honestly, these two direct reads are cella-unmediated: each
+works, but leaves no trace in cella's own books, where an `extract`
+call would. Mounting *into* a cella VM is not an alternative for
+either: cella has no host-mount device at all (by design), its
+`--attach-ro` disk mechanism is not reachable from the CLI (only
+`inspect` and `extract` set it, each on their own temporary
+appliance), and a reader VM cannot hand results back without the host
 reading a disk in the end anyway.
 
 ## 7. Why krun was needed
@@ -388,11 +422,14 @@ So both directions of untrusted parsing run inside krun microVMs
 (`--runtime krun`, the KVM-isolated OCI runtime `make .krun-podman`
 provisions — see [KRUN-PODMAN.md](KRUN-PODMAN.md)):
 
-* **Reading** (`_harvest`, `download_*`): targeted `debugfs` dumps
-  for single files, and a read-only `fuse2fs` mount for directory
-  reads, both inside a krun guest (`--network=none`,
-  `--device /dev/fuse`, two bind mounts). A hostile filesystem
-  compromises a disposable KVM guest with no network, not the host.
+* **Reading** (`download_*`, and `_result_landed`'s completion poll):
+  targeted `debugfs` dumps for single files, and a read-only
+  `fuse2fs` mount for directory reads, both inside a krun guest
+  (`--network=none`, `--device /dev/fuse`, two bind mounts). A
+  hostile filesystem compromises a disposable KVM guest with no
+  network, not the host. `_harvest`'s read (§6) takes a different
+  path: `cella extract` runs the untrusted parse in cella's own
+  throwaway appliance, not in a titanium-managed krun guest.
 * **Writing** (`place_into_ext4` on the exec-cycle path): from the
   second cycle on, the image the placement edits is guest-produced.
   fuse2fs parses and writes it inside the krun guest; the placement

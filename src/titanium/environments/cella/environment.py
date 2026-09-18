@@ -82,6 +82,7 @@ def network_topology(allow_internet: bool) -> NetworkTopology:
 # a boot, and no channel outlives a cycle.
 
 import asyncio
+import io
 import logging
 import os
 import re
@@ -375,6 +376,29 @@ class CellaEnvironment(BaseEnvironment):
                 f"{completed.stderr.decode(errors='replace').strip() or 'no output'}"
             )
         return completed.stdout.decode(errors="replace")
+
+    def _cella_extract(self, name: str, guest_path: str, timeout_sec: float) -> bytes:
+        """``cella extract`` on a still machine: a tar stream of
+        *guest_path*, read inside a throwaway appliance, never mounted
+        on the host, and witnessed on cella's own audit record (unlike
+        the direct ``disk.img`` reads elsewhere in this file -- see
+        docs/environments/CELLA.md §6). Raw bytes: the stream is a
+        tar, and ``_cella``'s text decode would corrupt it."""
+        command = [cella_bin(), "extract", name, guest_path]
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise CellaError(
+                f"`cella extract {name} {guest_path}` failed "
+                f"({completed.returncode}): "
+                f"{completed.stderr.decode(errors='replace').strip() or 'no output'}"
+            )
+        return completed.stdout
 
     def _machine_dir(self, name: str) -> Path:
         return cella_home() / "machines" / name
@@ -1169,48 +1193,49 @@ class CellaEnvironment(BaseEnvironment):
         )
 
     def _harvest(self, name: str) -> ExecResult:
-        """Copy the still disk, read the result triple, keep the disk.
-
-        The one host-side act is the byte copy. The copy *is* the next
-        cycle's filesystem (state moves disk to disk), so the harvest
-        reads only ``/titanium/result/{rc,stdout,stderr}`` -- three
-        targeted ``debugfs`` dumps inside a krun guest, no mount, no
-        full-tree pass.
+        """Copy the still disk for the next cycle, and read the result
+        triple straight off the machine with ``cella extract`` -- the
+        machine is still (stopped, or frozen and stop refused it) at
+        this exact point, so the audited path is available (see
+        docs/environments/CELLA.md §6). The disk copy is the next
+        cycle's filesystem (state moves disk to disk); it is
+        unrelated to the read and stays even though the read no
+        longer touches it.
         """
         assert self._work is not None
         disk = self._machine_dir(name) / "disk.img"
         evidence = self._work / f"state-{self._cycle + 1:04d}.img"
         shutil.copyfile(disk, evidence)
 
-        out_dir = self._work / f"harvest-{self._cycle:04d}"
-        out_dir.mkdir()
-        script = "\n".join(
-            f'debugfs -R "dump {_RUNNER_DIR}/result/{f} /out/{f}" /img 2>/dev/null'
-            for f in ("rc", "stdout", "stderr")
-        )
         try:
-            self._read_from_image(evidence, script, out_dir, recover=True)
-        except PodmanError as exc:
-            raise CellaError(
-                f"cycle {self._cycle}: evidence extraction failed: {exc}; "
-                f"vmm.log tail:\n" + _tail(self._machine_dir(name) / "vmm.log")
-            ) from exc
-
-        try:
-            return_code = int((out_dir / "rc").read_text().strip())
-        except (OSError, ValueError) as exc:
+            tar_bytes = self._cella_extract(
+                name, f"{_RUNNER_DIR}/result", timeout_sec=60.0
+            )
+        except CellaError as exc:
             raise CellaError(
                 f"cycle {self._cycle}: the guest halted without a result "
                 f"({exc}); vmm.log tail:\n" + _tail(self._machine_dir(name) / "vmm.log")
             ) from exc
-        stdout = _read_or_empty(out_dir / "stdout")
-        stderr = _read_or_empty(out_dir / "stderr")
+
+        prefix = f"./{_RUNNER_DIR.lstrip('/')}/result/"
+        try:
+            with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as archive:
+                rc_handle = archive.extractfile(prefix + "rc")
+                if rc_handle is None:
+                    raise KeyError("rc")
+                return_code = int(rc_handle.read().decode().strip())
+                stdout = _member_text(archive, prefix + "stdout")
+                stderr = _member_text(archive, prefix + "stderr")
+        except (KeyError, ValueError, tarfile.TarError) as exc:
+            raise CellaError(
+                f"cycle {self._cycle}: the guest halted without a result "
+                f"({exc}); vmm.log tail:\n" + _tail(self._machine_dir(name) / "vmm.log")
+            ) from exc
 
         previous = self._state_img
         self._state_img = evidence
         if previous is not None:
             previous.unlink(missing_ok=True)
-        shutil.rmtree(out_dir, ignore_errors=True)
         return ExecResult(stdout=stdout, stderr=stderr, return_code=return_code)
 
     async def exec(
@@ -1614,8 +1639,15 @@ def _tail(path: Path, lines: int = 20) -> str:
         return "(no vmm.log)"
 
 
-def _read_or_empty(path: Path) -> str:
+def _member_text(archive: tarfile.TarFile, member: str) -> str:
+    """One tar member's bytes as text, or empty when absent -- the
+    shell redirection that creates ``stdout``/``stderr`` always
+    precedes ``rc``, so a missing member here is not the guest's
+    doing, but the read stays defensive: empty, not a crash."""
     try:
-        return path.read_text(errors="replace")
-    except OSError:
+        handle = archive.extractfile(member)
+    except KeyError:
         return ""
+    if handle is None:
+        return ""
+    return handle.read().decode(errors="replace")
