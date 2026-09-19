@@ -24,7 +24,7 @@ from titanium.environments.resource_policies import (
 from titanium.models.agent.install import AgentInstallSpec
 from titanium.models.agent.network import NetworkAllowlist
 from titanium.models.task.config import EnvironmentConfig, HealthcheckConfig, TaskOS
-from titanium.models.trial.config import ResourceMode
+from titanium.models.trial.config import OnCompletion, ResourceMode
 from titanium.models.trial.paths import EnvironmentPaths, TrialPaths
 from titanium.utils.env import resolve_env_vars
 from titanium.utils.logger import logger as global_logger
@@ -556,6 +556,40 @@ class BaseEnvironment(ABC):
     @abstractmethod
     async def start(self, force_build: bool) -> None:
         """Starts the environment and optionally forces a build."""
+
+    # Whether this environment can hand the machine back after the trial
+    # (`on_completion=archive`). Declared rather than inferred: an environment
+    # that overrides `archive` only to refuse it still does not support it.
+    SUPPORTS_ARCHIVE: bool = False
+
+    async def complete(
+        self,
+        *,
+        delete: bool,
+        on_completion: OnCompletion = OnCompletion.TEARDOWN,
+    ) -> None:
+        """End the environment's life under the configured policy.
+
+        ``teardown`` stops and reclaims it; ``archive`` hands it back
+        preserved instead, and takes precedence over ``delete``.
+        """
+        if on_completion == OnCompletion.ARCHIVE:
+            await self.archive(delete=delete)
+            return
+
+        await self.stop(delete=delete)
+
+
+    async def archive(self, *, delete: bool) -> None:
+        """Preserve the environment instead of reclaiming it.
+
+        Environments that can do this override both this method and
+        ``SUPPORTS_ARCHIVE``; the default refuses.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support environment archiving"
+        )
+
 
     @abstractmethod
     async def stop(self, delete: bool):

@@ -428,6 +428,17 @@ class GVisorEnvironment(DockerEnvironment):
             await self._teardown_preserving(start_exc)
             raise
 
+    # Docker's archive keeps the stopped container, but stop() also tears
+    # down this family's staging mounts, so what survives cannot be re-entered
+    # or trusted. The family (krun included) opts out rather than inheriting it.
+    SUPPORTS_ARCHIVE: bool = False
+
+    async def archive(self, *, delete: bool) -> None:
+        """Refuse archiving: see ``SUPPORTS_ARCHIVE`` above."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not yet support environment archiving"
+        )
+
     async def stop(self, delete: bool):
         self._stopping = True
         try:

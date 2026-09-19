@@ -95,6 +95,9 @@ class DockerEnvironmentEnvVars(BaseModel):
 
 
 class DockerEnvironment(BaseEnvironment):
+    # Archive is the stopped Compose container itself (see `archive`).
+    SUPPORTS_ARCHIVE: bool = True
+
     _DOCKER_COMPOSE_BASE_PATH = COMPOSE_BASE_PATH
     _DOCKER_COMPOSE_BUILD_PATH = COMPOSE_BUILD_PATH
     _DOCKER_COMPOSE_PREBUILT_PATH = COMPOSE_PREBUILT_PATH
@@ -700,22 +703,39 @@ class DockerEnvironment(BaseEnvironment):
         except Exception as e:
             self.logger.warning(f"Failed to chown logs directory: {e}")
 
+    async def archive(self, *, delete: bool) -> None:
+        """Preserve the stopped Compose containers for later inspection."""
+
+        # Docker's archive representation is the stopped container itself.
+        # Archive wins when archive and delete conflict: the container is
+        # stopped rather than removed, so nothing reclaims it.
+        await self.prepare_logs_for_host()
+
+        try:
+            await self._run_docker_compose_command(["stop"])
+        except Exception as e:
+            self.logger.warning(f"Docker compose stop failed: {e}")
+
+        self._cleanup_resources_compose_file()
+
+
     async def stop(self, delete: bool):
+        # keep_containers is the older spelling of the same request, so it
+        # routes through archive rather than repeating its behavior here.
+        if self._keep_containers:
+            if delete:
+                self.logger.warning(
+                    "Both `keep_containers` and `--delete` option are set. "
+                    "keep_containers takes precedence."
+                )
+            await self.archive(delete=delete)
+            return
+
         # Best-effort: fix ownership of bind-mounted directories so the host
         # user can read/write/delete them after the container is gone.
         await self.prepare_logs_for_host()
 
-        if self._keep_containers and delete:
-            self.logger.warning(
-                "Both `keep_containers` and `--delete` option are set. "
-                "keep_containers takes precedence."
-            )
-        if self._keep_containers:
-            try:
-                await self._run_docker_compose_command(["stop"])
-            except Exception as e:
-                self.logger.warning(f"Docker compose stop failed: {e}")
-        elif delete:
+        if delete:
             try:
                 await self._run_docker_compose_command(
                     ["down", "--rmi", "all", "--volumes", "--remove-orphans"]
@@ -727,7 +747,10 @@ class DockerEnvironment(BaseEnvironment):
                 await self._run_docker_compose_command(["down"])
             except Exception as e:
                 self.logger.warning(f"Docker compose down failed: {e}")
+
         self._cleanup_resources_compose_file()
+
+
 
     async def upload_file(self, source_path: Path | str, target_path: str):
         await self._platform.upload_file(source_path, target_path)

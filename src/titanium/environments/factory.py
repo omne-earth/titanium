@@ -16,7 +16,7 @@ from titanium.models.task.config import EnvironmentConfig
 from titanium.models.trial.config import (
     EnvironmentConfig as TrialEnvironmentConfig,
 )
-from titanium.models.trial.config import ResourceMode
+from titanium.models.trial.config import OnCompletion, ResourceMode
 from titanium.models.trial.paths import TrialPaths
 
 
@@ -84,6 +84,64 @@ _ENVIRONMENT_REGISTRY: dict[EnvironmentType, _EnvEntry] = {
 _OBSOLETE_DOCKER_GVISOR_KWARGS = ("gvisor", "gvisor_runtime")
 
 
+# Read from the environment's own declaration, not from whether it defines
+# `archive`: an environment may define one purely to refuse it.
+def _supports_archive(env_class: type[BaseEnvironment]) -> bool:
+    return bool(getattr(env_class, "SUPPORTS_ARCHIVE", False))
+
+
+def _env_label(env_class: type[BaseEnvironment]) -> str:
+    """The environment's ``--env`` value when it has one, else its class name."""
+    try:
+        label = env_class.type()
+    except (AttributeError, NotImplementedError, TypeError):
+        return env_class.__name__
+    return getattr(label, "value", str(label))
+
+
+def _reject_unsupported_archive(
+    env_class: type[BaseEnvironment],
+    completion_policy: OnCompletion | None,
+) -> None:
+    """Refuse an archive request no environment of this type can honor.
+
+    Checked before the environment is created: the refusal would otherwise
+    surface during cleanup, after the trial had already built and run, and
+    the environment would be left running because teardown never happened.
+    """
+    if completion_policy != OnCompletion.ARCHIVE:
+        return
+    if _supports_archive(env_class):
+        return
+
+    supported = sorted(
+        env_type.value
+        for env_type, entry in _ENVIRONMENT_REGISTRY.items()
+        if _archive_capable_entry(entry)
+    )
+    raise ValueError(
+        f"The '{_env_label(env_class)}' environment "
+        f"does not implement on_completion=archive. Supported: "
+        f"{', '.join(supported)}. Refusing to start rather than building a "
+        "trial that cannot honor the policy at the end -- and that would be "
+        "left running when the refusal lands during cleanup."
+    )
+
+
+def _archive_capable_entry(entry: _EnvEntry) -> bool:
+    """Whether a registered environment supports archiving.
+
+    An environment whose optional dependencies are absent is simply not
+    listed, rather than raising here.
+    """
+    try:
+        module = importlib.import_module(entry.module)
+    except ImportError:
+        return False
+    env_class = getattr(module, entry.class_name, None)
+    return env_class is not None and _supports_archive(env_class)
+
+
 def _reject_obsolete_gvisor_kwargs(
     env_type: EnvironmentType, kwargs: dict[str, object]
 ) -> None:
@@ -146,10 +204,14 @@ class EnvironmentFactory:
         agent_install_spec: AgentInstallSpec | None = None,
         network_allowlist: NetworkAllowlist | None = None,
         default_user: str | int | None = None,
+        # Named `completion_policy`, not `on_completion`: an environment may
+        # take its own `on_completion` kwarg (cella does), which would collide.
+        completion_policy: OnCompletion | None = None,
         **kwargs,
     ) -> BaseEnvironment:
         _reject_obsolete_gvisor_kwargs(type, kwargs)
         environment_class = _load_environment_class(type)
+        _reject_unsupported_archive(environment_class, completion_policy)
 
         return environment_class(
             environment_dir=environment_dir,
@@ -169,8 +231,9 @@ class EnvironmentFactory:
         cls,
         type: EnvironmentType | None,
         import_path: str | None = None,
+        completion_policy: OnCompletion | None = None,
     ) -> None:
-        """Run credential preflight checks for the given environment type."""
+        """Run credential and completion-policy preflight checks."""
         if import_path is not None:
             if ":" not in import_path:
                 return
@@ -178,6 +241,10 @@ class EnvironmentFactory:
             try:
                 module = importlib.import_module(module_path)
                 env_class = getattr(module, class_name)
+            except (ImportError, AttributeError):
+                return
+            _reject_unsupported_archive(env_class, completion_policy)
+            try:
                 if hasattr(env_class, "preflight"):
                     env_class.preflight()
             except (ImportError, AttributeError):
@@ -188,6 +255,7 @@ class EnvironmentFactory:
             return
 
         env_class = _load_environment_class(type)
+        _reject_unsupported_archive(env_class, completion_policy)
         env_class.preflight()
 
     @classmethod
@@ -250,6 +318,7 @@ class EnvironmentFactory:
         agent_install_spec: AgentInstallSpec | None = None,
         network_allowlist: NetworkAllowlist | None = None,
         default_user: str | int | None = None,
+        completion_policy: OnCompletion | None = None,
         **kwargs,
     ) -> BaseEnvironment:
         """
@@ -281,6 +350,8 @@ class EnvironmentFactory:
             raise ValueError(
                 f"Module '{module_path}' has no class '{class_name}'"
             ) from e
+
+        _reject_unsupported_archive(Environment, completion_policy)
 
         return Environment(
             environment_dir=environment_dir,
@@ -343,6 +414,7 @@ class EnvironmentFactory:
         if config.import_path is not None:
             return cls.create_environment_from_import_path(
                 config.import_path,
+                completion_policy=config.on_completion,
                 environment_dir=environment_dir,
                 environment_name=environment_name,
                 session_id=session_id,
@@ -357,6 +429,7 @@ class EnvironmentFactory:
         elif config.type is not None:
             return cls.create_environment(
                 type=config.type,
+                completion_policy=config.on_completion,
                 environment_dir=environment_dir,
                 environment_name=environment_name,
                 session_id=session_id,

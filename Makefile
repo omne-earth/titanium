@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella smoke-cella-all smoke-cella-integration
+.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-environment-completion smoke-environment-completion-podman smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core smoke-cella smoke-cella-all smoke-cella-integration
 
 -include .secrets
 
@@ -300,6 +300,24 @@ smoke-on-agent-timeout: SMOKE_TASKS = $(AGENT_TIMEOUT_TASKS)
 smoke-on-agent-timeout: .sudo-tty-guard sync .krun-podman $(RUN_TASKS)/$(BACKEND)/smoke-on-agent-timeout
 	$(LOG)
 	$(MAKE) titanium-run TITANIUM_ENV=krun-podman TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+
+# The on_completion lifecycle proof. Two real trials through the normal
+# CLI -- the default, then --on-completion archive with delete still
+# enabled -- and after each one the container engine itself is asked what
+# survived, filtered on that trial's exact Compose project label. Titanium's
+# logs and config are not evidence. The agent is `nop` and verification is
+# off, so nothing here depends on a model.
+#
+# Container rungs only: archive is implemented for the Docker family, while
+# gvisor, krun and cella refuse it rather than inheriting it. Exit 2 means a
+# precondition was missing and nothing was proven; exit 1 is a real failure.
+# Another engine is a parameter:
+# TITANIUM_SMOKE_ENGINE=podman TITANIUM_SMOKE_ENV=podman.
+smoke-environment-completion: .sudo-tty-guard sync .docker
+	bash scripts/smoke/environment-completion.sh
+
+smoke-environment-completion-podman: .sudo-tty-guard sync .podman
+	TITANIUM_SMOKE_ENGINE=podman TITANIUM_SMOKE_ENV=podman bash scripts/smoke/environment-completion.sh
 
 # The Cella rootfs acceptance proof. No runner, no agent, no `titanium run`:
 # Titanium converts a container build file into a systemd-bootable ext4, and

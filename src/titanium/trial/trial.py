@@ -489,8 +489,9 @@ class Trial:
 
         try:
             await asyncio.shield(
-                self._environment.stop(
-                    delete=self.config.environment.delete and not keep_images
+                self._environment.complete(
+                    delete=self.config.environment.delete and not keep_images,
+                    on_completion=self.config.environment.on_completion
                 )
             )
             self._is_agent_environment_stopped = True
