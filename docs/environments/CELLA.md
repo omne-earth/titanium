@@ -7,8 +7,7 @@ package is `src/titanium/environments/cella/`. Cella itself lives at
 in `runtime.env` and installs that revision with `make .cella`.
 
 This document is complete for fresh eyes. It states the model, the
-knobs, the lifecycle, the collection mechanism, the one judgment call,
-and why krun is a hard dependency. What a finished trial leaves on
+knobs, the lifecycle, and the collection mechanism. What a finished trial leaves on
 disk — the `.run/` folders, files, and machine-name suffixes — lives
 in one place only: [README-cella.md](../../README-cella.md), the
 operator's guide.
@@ -42,8 +41,8 @@ own separation: each machine runs as its own sub-uid in a bwrap jail
 with ACL-granted directories. A second separation scheme on top would
 fight the first. Titanium invokes cella as the plain operator.
 
-`titanium run` is unmodified. `CellaEnvironment` maps the exec-model
-contract onto bake/run/collect (§4). The map is honest: no call lies
+`titanium run` is unmodified. `CellaEnvironment` maps the whole trial
+onto one baked experiment (§4). The map is honest: no call lies
 about what happened, and no call opens a channel into a machine.
 
 ## 2. The two knobs, orthogonal
@@ -206,9 +205,7 @@ automaton per destination, per machine.
   machine does not freeze on that destination.
 * **lapse** — when `written + keep_open` passes, the memory clears by
   cella's own arithmetic and the destination returns to *unplanted*;
-  the next crossing re-plants it. (A short-lived exec-cycle machine
-  usually dies before any window clears, but the edge is real and the
-  automaton owns it.)
+  the next crossing re-plants it.
 
 Two rules make the circuit correct, and each was a bug before it was
 a rule:
@@ -220,13 +217,13 @@ a rule:
   ARP never freezes and the wire comes up at once, instead of wedging
   on a first-crossing freeze under load. A *host* or wildcard grant
   names no concrete destination until the appliance resolves it
-  (§9, the terminated pair), so it plants reactively on its first
+  (the terminated pair), so it plants reactively on its first
   crossing and freezes exactly once — unavoidably.
 * **Per machine, not global.** The circuit resets when each bridge
-  stream opens, because every exec cycle is a fresh machine with an
-  empty membrane memory (§4). A single global memory would plant only
-  the first machine's and leave every later cycle — the solution run,
-  the verifier — to freeze on its own first ARP again.
+  stream opens, because each machine — the member, the appliance —
+  starts with an empty membrane memory (§4). A single global memory
+  would plant only the first machine's and leave the next machine to
+  freeze on its own first ARP again.
 
 And one transition is forbidden: an **incoming** grant never plants.
 An incoming park never freezes (`skip_freeze` is outgoing-only), so
@@ -235,84 +232,65 @@ destination alone, so an incoming memory (`skip_freeze=false`) would
 collide with and suppress the outgoing leg's live one for the same
 destination.
 
-## 4. The exec cycle: one exec, one machine
+## 4. The sealed one-shot trial: one boot, one experiment
 
-Cella has no exec-into, so `CellaEnvironment` honors the
-`BaseEnvironment` contract the only honest way a sealed runtime
-allows: **every `exec` is one whole experiment.**
+Cella has no exec-into, so `CellaEnvironment` honors the sealed model
+the only honest way: **the whole trial is one baked experiment.** No
+call opens a channel into a machine, because after the bake no call
+needs one.
 
-`start()` builds once: stage the build context (`FROM` lines
-qualified, agent install baked when given), `podman build`, export,
-and provision systemd into the tree when the image does not carry it
-(the same pipeline `make smoke-cella-rootfs` proves). The result is
-the *base tar*: the guest filesystem as bytes, numeric ownership
-preserved. Nothing boots yet.
+`start()` bakes once: stage the build context (`FROM` lines
+qualified, the agent install baked), `podman build`, export, and
+provision systemd into the tree when the image does not carry it
+(the same pipeline `make smoke-cella-rootfs` proves). The boot layer
+carries everything the trial will ever need: the agent's config, the
+task instruction, the tests, `pre_artifacts.sh` when the task ships
+one, and the **orchestrator** — a root-owned state machine that
+systemd starts on boot. `build_ext4` writes the flavor from the base
+tar. Host-produced bytes only: no guest-produced filesystem is ever
+mounted, parsed, or edited, anywhere on this rung.
 
-Each `exec(command)` then runs one cycle:
+One member boot then runs the trial:
 
-1. **Bake.** Files uploaded since the last cycle plus a runner enter
-   as the boot layer: `/titanium/command.sh` (the command),
-   `/titanium/job.sh` (cwd, env exports, the run — as root or via
-   `runuser` for a declared user — result capture to
-   `/titanium/result/{rc,stdout,stderr}`, then
-   `systemctl poweroff`), a oneshot unit, and its enablement
-   symlink. Cycle 0 builds its ext4 from the base tar
-   (`build_ext4`). Every later cycle is **disk to disk**: the
-   previous cycle's evidence copy *is* the next filesystem, and
-   `place_into_ext4` writes only the new entries into it -- the
-   same placement helpers and refusals, running against a fuse2fs
-   mount inside a krun guest. The flavor publishes under
-   `$CELLA_HOME/rootfs/` with its manifest.
-2. **Run.** `cella create <name> --kernel canonical --rootfs
-   <flavor> --mem-mb <task> --net <topology> --root rw`, then
-   `cella start`. Titanium waits for the VMM process to exit — a
-   completion signal that needs no console, so the field flavor's
-   blindness costs nothing.
-3. **Collect.** `cella stop`, then harvest (§6): three targeted
-   `debugfs` dumps read `/titanium/result/{rc,stdout,stderr}` -- the
-   `ExecResult`, and nothing else. The evidence copy is kept as the
-   next cycle's filesystem. The machine is destroyed and the cycle's
-   flavor removed. Harvest cost does not scale with the guest tree:
-   no full-tree pass exists anywhere in the cycle.
+1. **Setup.** The orchestrator prepares the agent's environment
+   in-guest (the steps other rungs spend boots on).
+2. **Payload.** One branch: the agent command, or the oracle's
+   solution replay. The whole agent loop runs inside this phase —
+   its inference and egress ride the machine's live window through
+   the appliance.
+3. **Collect.** `pre_artifacts.sh`, when present.
+4. **Verify.** The task's tests. The orchestrator writes each
+   phase's `/titanium/result/<phase>/{rc,stdout,stderr}` as root.
+5. **Beacon.** The orchestrator's last act is one egress to a
+   reserved, granted destination. The crossing parks; the bridge
+   delivers it; titanium's engine recognizes it as the completion
+   event. The membrane carries the signal with no new cella
+   semantics — it is a crossing like any other, granted with a
+   window so it never freezes the machine. A payload that forges
+   the beacon early only truncates its own run: the results are
+   root-written, and whatever exists at extract time is the grade.
 
-State moves forward only as evidence off still disks. Nothing is ever
-injected into a machine, live or stopped, so cella's rule — nothing
-is installed after boot — holds for every machine, literally.
+Budgets: the orchestrator enforces the per-phase timeouts in-guest;
+the host holds the total trial budget and a beacon-silence timeout.
+Observability: a second unit tails the payload's output over the
+appliance wire to a titanium-side sink — mid-trial logs are judged,
+chronicled traffic, not a post-hoc download.
 
-`upload_file` / `upload_dir` queue entries for the next bake
-(last-write-wins; symlinks preserved). `download_file` /
-`download_dir` read exactly the asked-for paths from the current
-evidence (the base tar before the first cycle, the last evidence
-disk after) and never touch a machine.
-`stop(delete)` destroys any machine and removes the work directory;
-nothing persists but trial evidence.
+**Collect** is then one still read: `cella stop`, one
+`cella extract` per asked-for directory (§6), destroy. The boots of
+a trial:
 
-The cost is stated plainly: a trial with N execs boots N machines and
-rebuilds N filesystems. This is the price of the sealed model, paid
-where the model says to pay it.
+| Machine | Count | Reason |
+|---|---|---|
+| `-appliance` | 1 (pair tasks only) | holds the world leg; freezes per park, thaws per verdict, for the trial's whole life |
+| the member | 1 | the experiment: orchestrator, payload, verify, beacon |
+| `-extractor` | 1 per extracted directory | cella's own evidence read (§6) |
 
-Each boot is one harness command, so the machines of a trial read as
-its phases in order. Every machine is named with the phase it serves --
-`titanium-<task>-c<NNNN>-<phase>` -- from the trial's `set_phase` calls
-(a no-op on every other rung), so a `cella list` or a chronicle reads
-setup -> agent -> collect -> verify at a glance. A real-agent trial
-boots roughly six:
-
-| Machine suffix | Command              | Reason                              |
-|----------------|----------------------|-------------------------------------|
-| `-setup`       | `pwd`                | resolve the agent's working directory |
-| `-setup`       | the setup script     | agent install and environment prep  |
-| `-agent`       | the agent run        | the agent attempts the task         |
-| `-collect`     | `pre_artifacts.sh`   | collect state before grading        |
-| `-verify`      | `chmod +x` the tests | verifier prep                       |
-| `-verify`      | the test script      | grade against evidence              |
-
-Boots in the same phase share the suffix (the cycle number keeps their
-names distinct). The exact count varies with the task -- an agentless
-oracle trial has no agent run (the solution replay stands in), and a
-task with no setup or pre-artifacts step drops those boots -- but the
-shape holds: setup, agent, collect, verify, each a boot, because nothing
-may exec into a live machine.
+Uploads enter at bake time only; there is no mid-trial upload — the
+sealed rule, nothing is installed after boot, holds literally.
+`download_file` / `download_dir` read from the extracted evidence and
+never touch a machine. `stop(delete)` destroys any machine and
+removes the work directory; nothing persists but trial evidence.
 
 ## 5. The smoke: `make smoke-cella-integration`
 
@@ -329,95 +307,45 @@ topologies:
   alone — a topology, not a firewall), egress fails, PID 1 is systemd,
   one vCPU, the declared memory.
 * **www** (`cella-policy-engine-www`, `verify-cella-env-www`):
-  `allow_internet = true` — the terminated pair (§9). The probe
+  `allow_internet = true` — the terminated pair. The probe
   reaches a granted name (`example.com`) through the appliance, its TLS
   terminated on a pair-CA leaf and the world leg judged by the resolved
   name, and confirms an ungranted name is refused. It times three
   sequential calls, so the membrane-memory warming (§3.2) shows as a
   cold call then two live ones.
 
-`make smoke-cella-all` runs the rootfs proof (§8), this suite, and
+`make smoke-cella-all` runs the rootfs proof (§7), this suite, and
 the bench + verify smoke (`smoke-cella`) together — the whole rung. `DRY_RUN=true` flips the appliance engine to collection and
 copies each www task's collected `cella.policy` back for review (§3.1).
-The rung-parity `smoke-cella` (the shared bench tasks under a real
-agent, like `smoke-krun-podman`) is separate future work.
+The rung-parity `smoke-cella` runs the shared bench tasks and the
+rung's verify tasks under a real agent, like `smoke-krun-podman`.
 
-## 6. Evidence collection, and the one judgment call
-
-`cella inspect` is an operator verb: it boots an inspector twin with
-the rock disk read-only at `/rock` and attaches the console — which
-only the lab flavor has. The programmatic extraction verb is
-`cella extract` (below); `inspect` is for a human at a console.
-
-So collection reads the still `disk.img` directly: copy the file out
-of `machines/<vm>/` after `cella stop`, then read only the asked-for
-paths from the copy (§7). This is the one place titanium touches a machine-directory
-artifact instead of a cella verb. What defends it: cella's own
-documentation blesses the machine directory as plain files that can
-be read; the read happens only on a still machine, only on a copy,
-read-only; and it recovers exactly what `inspect`'s evidence view
-exists to provide. It is a read of evidence, not a channel into
-anything.
-
-Named honestly, it is a cella-unmediated evidence read. Cella has
-since shipped the programmatic verb: `cella extract <machine>
-<guest-path>` streams the path out as tar on stdout, refuses a
-running machine, verifies the tar trailer (a truncated stream is an
-error, never evidence), works in the field flavor, and puts the read
-on cella's audit record (G.10). The direct read stays anyway — by
-cost, not by absence: `extract` boots a throwaway extractor machine
-per call, and `_harvest` reads many small paths per trial, so on a
-boot-per-command rung the verb multiplies a multi-second boot into
-the collection step where the direct read is one file copy. Swapping
-`_harvest` to `extract` (one call per directory, not per file) is
-the open trade if the audit-record gap ever outweighs the boots.
-Mounting *into* a cella VM is not an alternative: cella has no host-mount device at all (by
-design), its `--attach-ro` disk mechanism is not reachable from the
-CLI, and a reader VM cannot hand results back without the host
-reading a disk in the end anyway.
-
-## 7. Why krun was needed
+## 6. Evidence collection
 
 The disk being read is written by the task's own workload. Ext4
 metadata is parser input, and the workload controls every byte of it.
-A malicious task can craft a filesystem image that attacks the
-program that parses it — filesystem parsers have a long CVE history,
-in kernels and in userspace tools alike.
+So titanium never parses it: collection is `cella extract <machine>
+<guest-path>`, one call per asked-for directory, against the stopped
+machine. The verb boots a throwaway extractor with the evidence disk
+attached read-only, streams the path out as tar on stdout, verifies
+the tar trailer (a truncated stream is an error, never evidence),
+works in the field flavor, and puts every read on cella's audit
+record. A hostile filesystem attacks cella's disposable extractor
+guest, never the host, and never a titanium-side parser.
 
-The first implementation parsed the copy with `fuse2fs` on the host.
-That put task-controlled bytes through a host-side parser: exactly
-the class of exposure this stack exists to remove.
+`cella inspect` remains the operator verb: it boots an inspector twin
+with the rock disk read-only at `/rock` and attaches the console —
+which only the lab flavor has. `extract` is for the harness;
+`inspect` is for a human (G.10). Mounting *into* a cella VM is not an
+alternative to either: cella has no host-mount device at all, by
+design.
 
-So both directions of untrusted parsing run inside krun microVMs
-(`--runtime krun`, the KVM-isolated OCI runtime `make .krun-podman`
-provisions — see [KRUN-PODMAN.md](KRUN-PODMAN.md)):
-
-* **Reading** (`_harvest`, `download_*`): targeted `debugfs` dumps
-  for single files, and a read-only `fuse2fs` mount for directory
-  reads, both inside a krun guest (`--network=none`,
-  `--device /dev/fuse`, two bind mounts). A hostile filesystem
-  compromises a disposable KVM guest with no network, not the host.
-* **Writing** (`place_into_ext4` on the exec-cycle path): from the
-  second cycle on, the image the placement edits is guest-produced.
-  fuse2fs parses and writes it inside the krun guest; the placement
-  script is the same one `build_ext4` uses, with the same refusals.
-  Cycle 0 and the converter keep podman's default runtime: their
-  input is the task's own build, not a guest's output.
-
-The extractor image is the pinned rootfs builder
-(`localhost/titanium-cella-rootfs-builder:2`, alpine + e2fsprogs +
-GNU tar + fuse2fs, digest-addressed by id at use): the image that
-writes filesystems is the image that reads them. krun is therefore a
-hard dependency of this environment — `preflight()` refuses without
-it — not an optimization.
-
-## 8. Provisioning and targets
+## 7. Provisioning and targets
 
 | Target | What it does |
 |---|---|
 | `make .cella` | Installs cella from the git revision pinned in `runtime.env` (https URL, exact rev): cella's own field installer into `~/.cella/bin`, the canonical kernel golden, a trust-on-first-use digest pin, and `cella doctor gate`. |
 | `make .cella-debug` | Builds the lab flavor (console on) in the same pinned clone, for smokes that watch a guest console. The lab never installs; `CELLA_BIN` defaults to it in `smoke-cella-rootfs`. |
-| `make .krun-podman` | Provisions krun (§7). |
 | `make unit-cella` | The offline unit suite for the whole package, with coverage under `reports/unit/unit-cella/`. No podman, no cella, no network. |
 | `make smoke-cella-rootfs` | The conversion acceptance proof: a stock Debian with no init becomes a systemd-bootable ext4 and survives boot → freeze → thaw → stop → archive → destroy, driven by cella's own verbs. |
 | `make smoke-cella-integration` | §5. |
@@ -434,7 +362,7 @@ through one task, `build-pmars`, from an empty policy to a green run.
 The task builds pMARS from Debian source packages. It needs the network
 at solve time, so it uses the terminated pair — a good example.
 
-Read sections 1 to 8 first. This guide uses those terms: *member*,
+Read sections 1 to 7 first. This guide uses those terms: *member*,
 *appliance*, *crossing*, *grant*, *chronicle*.
 
 ### G.1 Before you start
@@ -643,19 +571,21 @@ machine.
 `archive` keeps `disk.img` and `ram.img` per machine (gigabytes each).
 Use it for a targeted run, not a routine smoke.
 
-## 9. Limitations and future work
+## 8. Limitations and future work
 
 * **One vCPU.** Every cella machine runs a single vCPU. The
   environment declares `cpu_limit = false`: a requested ceiling
   cannot be honored as asked. Memory is enforced (`--mem-mb`).
-* **The exec cycle is expensive** (§4). Do not put chatty
-  many-exec flows on this rung; the rung exists for sealed runs.
 * **`cella.policy` is not compiled from task URLs yet.** The
   allowlist-from-URLs derivation other rungs use has no cella
   translation; dry-run collection is the current authoring path.
-* **The evidence read is cella-unmediated** (§6). `cella extract`
-  now covers it, but at one extractor boot per call — the direct
-  read stays until that cost is paid down or accepted.
+* **The orchestrator is in-guest grading code.** The state machine
+  and the verify phase run inside the sealed guest, on substrate the
+  payload can influence — the same trust every rung's in-sandbox
+  verification carries (a root workload owns the interpreter that
+  runs the tests, on docker as much as here). The anchors stay
+  host-side: the chronicle, the beacon's judged delivery, and the
+  root-written results.
 * **A pure `--net none` airgap is agentless.** A real agent is baked
   into the guest and needs its inference line, so an agented task
   always stands the terminated pair -- the appliance's world leg
@@ -704,36 +634,23 @@ The rule does **not** extend to the appliance's *world-host* windows.
 Those gate real world egress and real re-judgment, so they stay a
 deliberate, shorter knob -- a different border, a different rule.
 
-### The exec budget comes from the task, not a constant
+### The budgets come from the task, not a constant
 
-A cella exec is a whole VM boot, run, and collect cycle. Because the
-guest command runs on a background thread that cannot be cancelled from
-outside, cella must bound each exec itself; the outer timeout the harness
-applies at the trial layer cannot stop a guest that has already begun.
-The bound is therefore taken from the task's own declaration, not from a
-figure fixed in cella.
+The task declares its phase budgets (`[agent] timeout_sec`,
+`[verifier] timeout_sec` in `task.toml`, resolved with any
+multiplier); nothing in cella fixes a figure of its own. The one-shot
+trial (§4) enforces them in two places:
 
-The per-exec budget resolves in the following order, and the first value
-that is set is used:
+1. **In-guest, per phase.** The orchestrator bakes the task's phase
+   budgets in and bounds each phase itself — the host cannot reach
+   into a sealed machine to stop one phase without ending the whole
+   experiment.
+2. **Host-side, in total.** The host bounds the whole boot with the
+   phases' sum plus a fixed boot margin, and separately bounds
+   beacon silence — a guest that hangs is still ended, never a
+   leaked live machine. `CELLA_EXEC_TIMEOUT` (`config.py`) stays the
+   floor beneath tasks that declare nothing.
 
-1. An explicit `timeout_sec` passed to the exec. This is a per-call
-   override and is normally absent, since the harness bounds the agent
-   and verifier at the trial layer rather than per command.
-2. The task's declared timeout for the current phase: `[verifier]
-   timeout_sec` once verification has begun (see `set_phase`),
-   and `[agent] timeout_sec` otherwise. This value is read from
-   `task.toml`, resolved with any multiplier, and passed to the
-   environment. It is the canonical source.
-3. `CELLA_EXEC_TIMEOUT` (`config.py`). A last-resort ceiling, used only
-   when a task declares no timeout for the phase. It exists so that a
-   hung guest is still bounded, rather than leaking a live machine and a
-   thread; it is not the normal path.
-
-The chosen value is then extended by a fixed boot margin, which covers
-the guest's boot and halt around the command itself.
-
-The intent is that a task states its own time budget and cella honours
-it. A task that needs longer raises its `[agent]`/`[verifier]
-timeout_sec`; nothing in cella needs to change. The constant is the
-floor beneath tasks that state nothing, never the figure a task is held
-to.
+The intent is unchanged: a task states its own time budget and cella
+honours it. A task that needs longer raises its `[agent]`/`[verifier]`
+`timeout_sec`; nothing in cella needs to change.
