@@ -56,8 +56,11 @@ while [[ "$component" != "/" ]]; do
 done
 
 # --- host: nothing titanium-shaped still running -----------------------------
-systemctl list-units --plain --no-legend --state=running 'run-p*.service' 2>/dev/null | grep -q . \
-  && flag "shim transient units still running (run-p*.service)"
+# Any state counts: deprovision stops and reset-fails the shim units first,
+# so a unit still visible here -- running, failed, or mid-teardown -- is
+# real leftover state, and the assert stays fail-closed.
+systemctl list-units --all --plain --no-legend 'run-p*.service' 2>/dev/null | grep -q . \
+  && flag "shim transient units still present (run-p*.service)"
 
 # --- checkout: fresh-clone equivalence ---------------------------------------
 # Untracked/ignored state must be gone except the sanctioned survivors.
