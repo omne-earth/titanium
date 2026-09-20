@@ -636,7 +636,6 @@ class CellaEnvironment(BaseEnvironment):
             ca_pem = pair_ca_path(Path.home()).read_bytes()
             job_entries = member_trust_entries(ca_pem) + job_entries
         boot_layer = BootLayer(entries=tuple(self._pending) + tuple(job_entries))
-        self._phase = "trial"
         flavor = self._publish_cycle_flavor(boot_layer)
         name = flavor
         self._machine = name
@@ -1180,16 +1179,17 @@ class CellaEnvironment(BaseEnvironment):
         self._appliance = None
 
     async def set_phase(self, phase: str) -> None:
-        """Name every machine from here on with the phase it serves, so its
-        cycles (and their chronicle and engine logs) read apart: setup ->
-        agent -> collect -> verify."""
+        """Record the trial phase. One boot runs every phase, so the
+        phase no longer names machines; it stays for the trial flow's
+        bookkeeping (the verifier announces itself here)."""
         self._phase = phase
 
     def _publish_cycle_flavor(self, boot_layer: BootLayer) -> str:
         assert self._work is not None
+        # The session id alone: one boot runs the whole trial, so the
+        # member carries no phase suffix -- and `cella extract`'s twin
+        # reads as `<session>-extractor`, not `<session>-trial-extractor`.
         flavor = _flavor_name(self.session_id)
-        if self._phase:
-            flavor = f"{flavor}-{self._phase}"
         size_bytes = (self._effective_storage_mb or 5120) * (1 << 20)
         with staging_flavor_dir(home=None) as staging:
             artifact = staging / ROOTFS_ARTIFACT_NAME

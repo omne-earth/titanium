@@ -111,8 +111,8 @@ def test_flavor_names_are_safe_and_within_the_extractor_budget():
     assert all(c.islower() or c.isdigit() or c == "-" for c in name)
     # cella caps machine names at 64 and `cella extract` appends
     # `-extractor` (10); the longest name this can produce -- the
-    # 40-char session cap plus the `-trial` phase suffix -- must fit.
-    longest = _flavor_name("x" * 100) + "-trial"
+    # 40-char session cap -- must fit.
+    longest = _flavor_name("x" * 100)
     assert len(longest) + len("-extractor") <= 64
 
 
