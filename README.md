@@ -91,10 +91,10 @@ Then prove the whole chain end to end:
 ```bash
 cp .secrets.template .secrets   # fill in OPENROUTER_MODEL and OPENROUTER_API_KEY
 make smoke-cella-all            # the whole cella rung: rootfs acceptance, the policy-engine probes, and the bench + verify tasks under a real agent
-make smoke-env                  # runs the podman, gvisor, gvisor-podman, and krun-podman smokes
+make smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman   # the four container smokes, in sequence
 ```
 
-`make BACKEND=claude smoke-env` uses the `claude-code` agent instead of `mini-swe-agent`. It authenticates with `ANTHROPIC_API_KEY` from your environment or `.secrets`.
+`make BACKEND=claude smoke-<env>` uses the `claude-code` agent instead of `mini-swe-agent`. It authenticates with `ANTHROPIC_API_KEY` from your environment or `.secrets`.
 
 ## Run
 
@@ -151,13 +151,18 @@ make collect    # archive artifacts only; shelve a campaign without deprovisioni
 ```bash
 .archive/2026-08-27__00-08-33/
 ├── .run/            # jobs, trial output, reports, staged smoke tasks
-├── .tasks/          # the cloned datasets
-└── .pytest_cache/   # any other untracked artifact dot-folder
+└── .logs/           # the per-target make run logs
 ```
+
+Each dot-folder's *contents* move, mirrored under the same structure;
+the folder itself stays in place, emptied, so recipes that expect
+`.run/jobs` to exist need not recreate it. Not swept: `.tasks` (the
+cloned task sources — slow to re-clone, not a run artifact) and
+`.pytest_cache` (a tool cache `make clean` owns).
 
 Not collected: `.git/` and `.archive/` (structural), `.venv/` (rebuilt byte-equivalent by `make sync`), `.secrets`, and any dot-folder holding tracked files (`.github/` is source, not artifact). It then deprovisions the host (runner user, both sandbox runtimes' registrations and digest pins, the runsc binaries), cleans the checkout back to fresh-clone equivalence, and asserts the result. It keeps `.secrets`, `.archive`, your tracked edits, distro packages, and the operator's docker-group grant. `make collect` also works on its own, to shelve a finished campaign. `make clean` drops repo-local caches only.
 
-The recommended validation cycle for a runtime change is: `make reset` → `make bootstrap` → `make smoke-env`.
+The recommended validation cycle for a runtime change is: `make reset` → `make bootstrap` → the four container smokes (`make smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman`).
 
 ### Image supply: vendor and restore
 
@@ -214,12 +219,12 @@ make smoke-cella-all      # everything below, plus the rootfs acceptance proof
 make smoke-cella-integration  # the four policy-engine probes, oracle, deterministic
 make smoke-cella          # the bench + verify tasks under cella, with a real agent
 make smoke-podman         # one environment, three trials
-make smoke-env            # the four container environments, one tmux session
-make run-attach           # watch a running smoke session
+make smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman
+                          # the four container environments, in sequence
 make reset                # deprovision; verify the clean slate
 ```
 
-For a runtime change, run the full cycle: `make reset` → `make init` → `make smoke-env` → inspect the job results under `.run/jobs/`. Unit tests gate every smoke target, and the podman-family smokes run as the `titanium` runner automatically.
+For a runtime change, run the full cycle: `make reset` → `make init` → the four container smokes → inspect the job results under `.run/jobs/`. Each smoke tees its output to `.logs/<run>/<target>.log`, so a backgrounded run keeps a durable, greppable record. Unit tests gate every smoke target, and the podman-family smokes run as the `titanium` runner automatically.
 
 ### Oracle runs
 
@@ -262,7 +267,7 @@ Isolation is only as good as its trust chain, so Titanium verifies rather than a
 - **Network policy is topology.** Egress rides the per-trial proxy on an `internal` network, or does not exist at all — never a firewall rule the workload could race.
 - **Escapes land in a throwaway.** On a provisioned host the whole run executes as the nologin `titanium` user; the krun VMM additionally runs under a tightened seccomp profile and a confined SELinux domain; and each cella machine runs jailed as its own sub-uid, so even a VMM escape lands in an account that owns one machine directory.
 - **Teardown is fail-closed.** Cleanup discovers resources by exact project label and refuses to report clean while any remain.
-- **The proof re-runs.** `make smoke-env` and the per-environment oracles re-verify the whole chain on demand; the per-environment documents record every relaxation, its blast radius, and the measurements behind it.
+- **The proof re-runs.** The per-environment smokes and oracles re-verify the whole chain on demand; the per-environment documents record every relaxation, its blast radius, and the measurements behind it.
 
 **The boundary** is containment of untrusted agent code plus privilege separation. For the gvisor family it is a *shared kernel* behind a gVisor application kernel — not a VM boundary. For `krun-podman` it is exactly a hypervisor boundary: a KVM microVM per container, at the price of the host's KVM subsystem in the trust chain. For `cella` it is the hypervisor boundary plus a total network border: every frame is judged outside the machine, and the chronicle records what was refused. None is formally verified. The per-environment protections, the relaxations made to run trials, the blast radius of each, and the avenues still open are documented in [`docs/environments/`](docs/environments/).
 

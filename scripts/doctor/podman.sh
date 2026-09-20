@@ -245,7 +245,7 @@ echo
 if [[ $FAILED -eq 0 ]]; then
   echo "All clear. Try:"
   echo "  make smoke-podman        # one environment"
-  echo "  make smoke-env           # all four"
+  echo "  make smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman  # all four"
 else
   echo "Fix the failures above first."
   exit 1
