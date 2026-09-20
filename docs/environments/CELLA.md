@@ -8,7 +8,7 @@ in `runtime.env` and installs that revision with `make .cella`.
 
 This document is complete for fresh eyes. It states the model, the
 knobs, the lifecycle, and the collection mechanism. What a finished trial leaves on
-disk — the `.run/` folders, files, and machine-name suffixes — lives
+disk — the `.run/` folders, files, and machine names — lives
 in one place only: [README-cella.md](../../README-cella.md), the
 operator's guide.
 
@@ -30,8 +30,8 @@ experiment:
 2. **Run.** The machine runs jailed and alone. There is no exec-into,
    no console in the field flavor, and no host mount. The only live
    observations are host-side files cella itself writes.
-3. **Collect.** The run ends when the guest halts or the timeout
-   stops it. Results are extracted from the still disk as evidence. A
+3. **Collect.** The run ends at the guest's forced reset or the
+   budget. Results are extracted from the still disk as evidence. A
    still disk cannot answer questions; it can only be read.
    Verification against evidence is stronger than verification by
    conversation.
@@ -504,7 +504,7 @@ cat .run/jobs/openrouter/smoke-cella-integration/*/build-pmars__*/artifacts/repo
 ```
 
 For everything else the trial left on disk — every `cella-*` folder,
-every chronicle file, the machine-name suffixes, and which entries
+every chronicle file, the machine names, and which entries
 appear for which kind of run — the single source is
 [README-cella.md](../../README-cella.md), including a
 where-to-look-by-question table (§9) for refusals, throughput, and
