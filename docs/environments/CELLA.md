@@ -42,7 +42,7 @@ with ACL-granted directories. A second separation scheme on top would
 fight the first. Titanium invokes cella as the plain operator.
 
 `titanium run` is unmodified. `CellaEnvironment` maps the whole trial
-onto one baked experiment (§4). The map is honest: no call lies
+onto two baked experiments — the member and the verifier (§4). The map is honest: no call lies
 about what happened, and no call opens a channel into a machine.
 
 ## 2. The two knobs, orthogonal
@@ -235,22 +235,22 @@ destination.
 ## 4. The sealed one-shot trial: one boot, one experiment
 
 Cella has no exec-into, so `CellaEnvironment` honors the sealed model
-the only honest way: **the whole trial is one baked experiment.** No
-call opens a channel into a machine, because after the bake no call
-needs one.
+the only honest way: **the trial is two baked experiments — the
+member and the verifier.** No call opens a channel into a machine,
+because after a bake no call needs one.
 
-`start()` bakes once: stage the build context (`FROM` lines
+`start()` bakes the member: stage the build context (`FROM` lines
 qualified, the agent install baked), `podman build`, export, and
 provision systemd into the tree when the image does not carry it
 (the same pipeline `make smoke-cella-rootfs` proves). The boot layer
-carries everything the trial will ever need: the agent's config, the
-task instruction, the tests, `collect.sh` when the task ships
-one, and the **orchestrator** — a root-owned state machine that
-systemd starts on boot. `build_ext4` writes the flavor from the base
-tar. Host-produced bytes only: no guest-produced filesystem is ever
-mounted, parsed, or edited, anywhere on this rung.
+carries the agent's config, the task instruction, `collect.sh` when
+the task ships one, and the **orchestrator** — a root-owned state
+machine that systemd starts on boot. **The tests are not aboard**:
+the member carries no grader the agent could read. `build_ext4`
+writes the flavor from the base tar. Host-produced bytes only: no
+filesystem is ever mounted, parsed, or edited, anywhere on this rung.
 
-One member boot then runs the trial:
+**The member** (`<session>`) runs the agent's whole turn:
 
 1. **Setup.** The orchestrator prepares the agent's environment
    in-guest (the steps other rungs spend boots on).
@@ -259,41 +259,55 @@ One member boot then runs the trial:
    its inference and egress ride the machine's live window through
    the appliance.
 3. **Collect.** `collect.sh`, when present.
-4. **Verify.** The task's tests. The orchestrator writes each
-   phase's `/titanium/result/<phase>/{rc,stdout,stderr}` as root.
-5. **Reset.** The orchestrator's last act is `sync` then a forced
+4. **Reset.** The orchestrator's last act is `sync` then a forced
    reset (`reboot -f`). The canonical kernel has no ACPI poweroff —
    a halted guest leaves the VMM alive — but a CPU reset exits the
    VMM (`cella: guest requested shutdown` in `vmm.log`). Completion
-   is therefore two host-side facts and no guest read: the VMM pid
-   is gone and no frozen `state` file exists. A reset that re-boots
-   the kernel instead (a measured rarity) re-enters the
-   orchestrator, which sees the results already written and resets
-   again. A payload that forces a reset early only truncates its
-   own run: the results are root-written, and whatever exists at
-   extract time is the grade.
+   is two host-side facts and no guest read: the VMM pid is gone and
+   no frozen `state` file exists. A reset that re-boots the kernel
+   instead (a measured rarity) re-enters the orchestrator, which
+   sees the results already written and resets again.
 
-Budgets: the orchestrator enforces the per-phase timeouts in-guest;
-the host holds the total trial budget.
-Observability: a second unit tails the payload's output over the
-appliance wire to a titanium-side sink — mid-trial logs are judged,
-chronicled traffic, not a post-hoc download.
+**The state extract** then carries the agent's work forward: one
+`cella extract <session> /` streams the full post-agent tree as a
+trailer-verified tar. That tar is both the trial's evidence cache
+(every agent-era download reads from it) and the verifier's rootfs
+source. The member's ext4 is only ever read by cella's own verb.
 
-**Collect** is then one still read: `cella stop`, one
-`cella extract` per asked-for directory (§6), destroy. The boots of
-a trial:
+**The verifier** (`<session>-verifier`) is baked from that state tar
+with `build_ext4` — the agent's filesystem as bytes, plus a boot
+layer that now carries the tests and a verify orchestrator. It joins
+the standing appliance wire when the task's verifier declares egress
+(a test harness that fetches), and boots `--net none` otherwise. The
+verify phase runs, the orchestrator folds its results under `/logs`,
+and the machine resets. One `cella extract <session>-verifier /logs`
+retrieves the reward, the test output, and the phase results in one
+read.
 
-| Machine | Count | Reason |
+The split is the grading boundary: **the tests and the agent never
+coexist.** An agent cannot read, run, or iterate against its graders
+— they enter the world only after its machine is still. The verifier
+still executes on an agent-authored filesystem; that substrate trust
+is every rung's, and §8 states it.
+
+Budgets: each orchestrator enforces its phases' timeouts in-guest;
+the host bounds each machine in total. The boots of a paired trial,
+exactly:
+
+| # | Boot | Why |
 |---|---|---|
-| `-appliance` | 1 (pair tasks only) | holds the world leg; freezes per park, thaws per verdict, for the trial's whole life |
-| the member | 1 | the experiment: orchestrator, payload, verify, reset |
-| `-extractor` | 1 per extracted directory | cella's own evidence read (§6) |
+| 1 | `<session>-appliance` | the world leg; boots once, thaws thereafter (paired trials only) |
+| 2 | `<session>` | the member: setup, payload, collect, reset |
+| 3 | extractor | the full post-agent state tar |
+| 4 | `<session>-verifier` | verify on the rebaked state, results folded under `/logs`, reset |
+| 5 | extractor | one read: reward, test output, phase results |
 
-Uploads enter at bake time only; there is no mid-trial upload — the
-sealed rule, nothing is installed after boot, holds literally.
-`download_file` / `download_dir` read from the extracted evidence and
-never touch a machine. `stop(delete)` destroys any machine and
-removes the work directory; nothing persists but trial evidence.
+Five boots paired; four airgapped-agentless. Uploads enter at bake
+time only; there is no mid-trial upload — the sealed rule, nothing
+is installed after boot, holds literally. `download_file` /
+`download_dir` read from the extracted evidence and never touch a
+machine. `stop(delete)` destroys any machine and keeps the work
+directory; nothing persists but trial evidence.
 
 ## 5. The smoke: `make smoke-cella-integration`
 
@@ -353,7 +367,11 @@ design.
 | `make smoke-cella-rootfs` | The conversion acceptance proof: a stock Debian with no init becomes a systemd-bootable ext4 and survives boot → freeze → thaw → stop → archive → destroy, driven by cella's own verbs. |
 | `make smoke-cella-integration` | §5. |
 
-The field flavor is blind by design: no console exists. Completion is
+The field flavor is blind by design: no console exists and nothing
+can enter a machine. The lab flavor is the debugging instrument:
+`console.log` in the machine dir, and `cella enter <machine>` to
+attach a running machine's console interactively
+(README-cella.md, "Watching a live guest"). Completion is
 the VMM's exit; diagnosis is `vmm.log` and the evidence tree;
 liveness on the judged path is the chronicle. Smokes that must watch
 a boot use the lab flavor through `CELLA_BIN`.
@@ -507,7 +525,7 @@ For everything else the trial left on disk — every `cella-*` folder,
 every chronicle file, the machine names, and which entries
 appear for which kind of run — the single source is
 [README-cella.md](../../README-cella.md), including a
-where-to-look-by-question table (§9) for refusals, throughput, and
+where-to-look-by-question table (§10) for refusals, throughput, and
 wedges.
 
 ### G.8 When a crossing is refused
@@ -582,13 +600,13 @@ Use it for a targeted run, not a routine smoke.
 * **`cella.policy` is not compiled from task URLs yet.** The
   allowlist-from-URLs derivation other rungs use has no cella
   translation; dry-run collection is the current authoring path.
-* **The orchestrator is in-guest grading code.** The state machine
-  and the verify phase run inside the sealed guest, on substrate the
-  payload can influence — the same trust every rung's in-sandbox
-  verification carries (a root workload owns the interpreter that
-  runs the tests, on docker as much as here). The anchors stay
-  host-side: the chronicle, the host-observed completion, and the
-  root-written results.
+* **The verifier runs on agent-authored substrate.** The tests never
+  coexist with the agent (the verifier machine is baked after the
+  member is still — §4), so the graders cannot be read or gamed. But
+  they execute on the filesystem the agent wrote — its interpreter,
+  its libraries — the same trust every rung's in-sandbox
+  verification carries. The anchors stay host-side: the chronicle,
+  the host-observed completion, and the root-written results.
 * **A pure `--net none` airgap is agentless.** A real agent is baked
   into the guest and needs its inference line, so an agented task
   always stands the terminated pair -- the appliance's world leg

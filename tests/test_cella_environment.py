@@ -195,6 +195,64 @@ def test_orchestrator_files_render_the_trial(tmp_path):
     assert wants.target == "../titanium-trial.service"
 
 
+def test_verifier_orchestrator_folds_results_under_logs(tmp_path):
+    env = _make_env(tmp_path)
+    phases = [SealedPhaseSpec(name="verify", steps=[SealedPhaseStep(command="true")])]
+    folded = next(
+        e
+        for e in env._orchestrator_files(phases, fold_results=True)
+        if e.path == "/titanium/orchestrator.sh"
+    ).contents.decode()
+    # One extract of /logs must retrieve the phase results too.
+    assert "cp -r $R/. /logs/titanium-result/" in folded
+    assert folded.index("cp -r $R/.") < folded.index("touch $R/done")
+    bare = next(
+        e
+        for e in env._orchestrator_files(phases)
+        if e.path == "/titanium/orchestrator.sh"
+    ).contents.decode()
+    assert "titanium-result" not in bare
+
+
+def test_verifier_result_root_avoids_the_members_marker(tmp_path):
+    env = _make_env(tmp_path)
+    phases = [SealedPhaseSpec(name="verify", steps=[SealedPhaseStep(command="true")])]
+    files = env._orchestrator_files(
+        phases, fold_results=True, result_dir="/titanium/result-verifier"
+    )
+    orch = next(
+        e for e in files if e.path == "/titanium/orchestrator.sh"
+    ).contents.decode()
+    # Its own root and marker: the member's carried /titanium/result/done
+    # must not fire the re-entry guard.
+    assert "R=/titanium/result-verifier" in orch
+    assert "/titanium/result/done" not in orch
+    phase = next(
+        e for e in files if e.path == "/titanium/phases/verify.sh"
+    ).contents.decode()
+    assert phase.startswith("R=/titanium/result-verifier")
+
+
+def test_evidence_cache_resolves_by_longest_root(tmp_path):
+    env = _make_env(tmp_path)
+    state = tmp_path / "state"
+    (state / "logs" / "agent").mkdir(parents=True)
+    (state / "logs" / "agent" / "old.txt").write_text("member era")
+    verifier_logs = tmp_path / "vlogs"
+    (verifier_logs / "verifier").mkdir(parents=True)
+    (verifier_logs / "verifier" / "reward.txt").write_text("1")
+    env._evidence_cache = {"/": state, "/logs": verifier_logs}
+    # The verifier's /logs overlays the member's tree.
+    assert (
+        env._evidence_cache_dir("/logs/verifier") == verifier_logs / "verifier"
+    )
+    # Anything outside /logs still reads from the member's state.
+    assert env._evidence_cache_dir("/app") == state / "app"
+    with pytest.raises(FileNotFoundError):
+        empty = _make_env(tmp_path / "e")
+        empty._evidence_cache_dir("/app")
+
+
 def test_orchestrator_steps_drop_privilege_when_asked(tmp_path):
     env = _make_env(tmp_path)
     phases = [

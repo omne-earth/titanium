@@ -20,11 +20,14 @@ make smoke-cella
 make smoke-cella DRY_RUN=true TITANIUM_AGENT=oracle
 ```
 
-The whole trial is one boot. A guest orchestrator runs the phases —
-setup, agent (or the oracle's solve), collect, verify — writes each
-phase's result, and ends the machine with a forced reset. An oracle
-trial and an agent trial write the same records; they differ only in
-the `agent/` folder (§3) and the payload the agent phase runs.
+The trial is two machines. The **member** runs the agent's whole
+turn — setup, agent (or the oracle's solve), collect — with no tests
+aboard, and ends itself with a forced reset. Its full state is then
+extracted as a tar (cella's own verb) and rebaked, with the tests,
+into the **verifier**, which grades and resets. The agent and its
+graders never coexist. An oracle trial and an agent trial write the
+same records; they differ only in the `agent/` folder (§3) and the
+payload the agent phase runs.
 
 ## 2. The trial directory
 
@@ -59,9 +62,9 @@ Use this table as the first check. An agentless airgapped trial with a
 Note the timing: the record is live. The `cella-*` folders appear
 when their machine does, and the host-side books — the chronicle
 files, `edge.log`, `engine.log` — mirror into the trial dir once a
-second while the experiment runs. Only the still-disk evidence —
-results, artifacts, the verifier's output, the `.txt` decodes — lands
-at trial end, when `cella extract` reads the halted machine.
+second while a machine runs. Only the still-disk evidence — the
+member's state tar, the verifier's output, the `.txt` decodes —
+lands when its machine is still and `cella extract` reads it.
 
 ## 3. `agent/`
 
@@ -70,10 +73,11 @@ at trial end, when `cella extract` reads the halted machine.
 - **Agent run** (for example mini-swe-agent): the agent's trajectory
   files, extracted from `/logs/agent` at trial end.
 
-The agent phase's own stdout and stderr also land in the phase result
-(`/titanium/result/agent/` in the guest, extracted at collection). A
-phase killed by its in-guest budget records `rc` 124; the trial then
-records the timeout and still grades what the payload left.
+The agent phase's own stdout and stderr also land in the phase
+result, extracted with the member's state. A phase killed by its
+in-guest budget records `rc` 124; the trial then records the timeout
+and still grades what the payload left — in the verifier, which
+never boots until the member is still.
 
 ## 4. Machine names
 
@@ -83,14 +87,15 @@ dashes:
 
 | Machine | Count | What it is |
 |---|---|---|
-| `<session>` | 1 | the member: the experiment itself — orchestrator, phases, reset |
+| `<session>` | 1 | the member: the agent's turn — setup, payload, collect, reset. No tests aboard. |
+| `<session>-verifier` | 1 | the grader: baked from the member's extracted state plus the tests; folds its results under `/logs`, resets |
 | `<session>-appliance` | 1, paired trials only | the terminator: holds the world leg; freezes on each park, thaws on each verdict, for the trial's whole life |
-| `<session>-extractor` | transient | `cella extract`'s twin, one per evidence read; cella destroys it, nothing is preserved from it |
+| `<session>-extractor`, `<session>-verifier-extractor` | transient | `cella extract`'s twins — the member's full-state read and the verifier's results read; cella destroys them |
 
-There is no cycle counter and no harness prefix: one boot runs the
-whole trial, so the session id alone names it. The name budget is
-deliberate — cella caps names at 64, and the extractor suffix (10)
-must fit.
+Five boots paired, four airgapped-agentless — exactly. There is no
+cycle counter and no harness prefix; the session id alone names the
+trial. The name budget is deliberate — cella caps names at 64, and
+the extractor suffix (10) must fit past `-verifier`.
 
 ## 5. `cella-chronicle/<machine>/` — cella's record
 
@@ -194,7 +199,26 @@ egress only. The agent's inference and install line comes from the
 agent's allowlist, composed into the appliance border on every trial.
 Do not add it.
 
-## 9. Where to look, by question
+## 9. Watching a live guest
+
+The field flavor is blind by design: no console exists, and nothing
+can enter a machine. To watch a boot or a wedge, rerun the trial
+under the **lab flavor** — the same pinned cella, console on:
+
+```bash
+make .cella-debug   # builds the lab binary in the pinned clone
+CELLA_BIN=$HOME/.cache/titanium/cella-src/target/lab/cella \
+  make titanium-run TITANIUM_ENV=cella TITANIUM_TASK=path/to/task ...
+```
+
+Under the lab flavor the machine dir grows a `console.log` (mirrored
+live into the trial dir like the other books), and
+`cella enter <machine>` attaches the console of a running machine
+interactively. The lab flavor is a debugging instrument: a trial run
+under it is an observation, never the graded record — the smokes and
+the benchmarks run the field flavor.
+
+## 10. Where to look, by question
 
 | Question | Read |
 |---|---|
