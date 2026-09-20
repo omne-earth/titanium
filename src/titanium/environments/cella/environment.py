@@ -302,6 +302,9 @@ class CellaEnvironment(BaseEnvironment):
         # stop(delete) retires it.
         self._evidence_machine: str | None = None
         self._evidence_cache: dict[str, Path] = {}
+        # Machines whose host-side books mirror live into the trial dir
+        # (the drain thread copies changed files once a second).
+        self._mirrored: dict[str, Path] = {}
 
     @staticmethod
     def type() -> str:
@@ -656,6 +659,7 @@ class CellaEnvironment(BaseEnvironment):
                 "--root",
                 "rw",
             )
+            self._register_mirror(name)
             self._cella("start", name)
             if judged:
                 self._cella("gateway", name, "open")
@@ -920,13 +924,53 @@ class CellaEnvironment(BaseEnvironment):
             self._log_drain_thread.start()
 
     def _drain_engine_logs(self) -> None:
-        """Flush each machine's buffered engine log once a second. The file
-        writes happen here, never on the decide hot path. `wait` returns
-        True only when stop is set, so teardown ends the loop at once; the
-        final flush is each sink's own close()."""
+        """The one-second housekeeping thread: flush each machine's
+        buffered engine log, and mirror each registered machine's
+        host-side books into the trial dir -- so the chronicle and
+        edge.log read live, not only at teardown. File writes happen
+        here, never on the decide hot path. `wait` returns True only
+        when stop is set, so teardown ends the loop at once; the final
+        flush is each sink's close(), and the final book copy is
+        _preserve_chronicle."""
         while not self._log_drain_stop.wait(ENGINE_LOG_DRAIN_SEC):
             for sink in list(self._engine_log_sinks.values()):
                 sink.flush()
+            self._mirror_books()
+
+    def _register_mirror(self, name: str) -> None:
+        """Mirror *name*'s books live: create its trial-dir folders now
+        (the record appears when the machine does) and let the drain
+        thread copy changed files each second. Only the still-disk
+        evidence (results, artifacts) waits for the trial's end."""
+        chronicle = self.trial_paths.trial_dir / "cella-chronicle" / name
+        (chronicle / "network").mkdir(parents=True, exist_ok=True)
+        self._mirrored[name] = self._machine_dir(name)
+        self._ensure_log_drain()
+
+    def _mirror_books(self) -> None:
+        for name, machine_dir in list(self._mirrored.items()):
+            out = self.trial_paths.trial_dir / "cella-chronicle" / name
+            for relative in self._CHRONICLE_FILES:
+                self._mirror_one(machine_dir / relative, out / relative)
+            self._mirror_one(
+                machine_dir / "edge.log", self._engine_dir(name) / "edge.log"
+            )
+
+    @staticmethod
+    def _mirror_one(source: Path, dest: Path) -> None:
+        try:
+            stat = source.stat()
+        except OSError:
+            return
+        try:
+            if dest.exists():
+                d = dest.stat()
+                if d.st_size == stat.st_size and d.st_mtime >= stat.st_mtime:
+                    return
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, dest)
+        except OSError:
+            return  # a book mid-write copies on the next tick
 
     def _ensure_engine(self, key: str, policy_path: Path, dry_run: bool) -> int:
         """Start one in-process policy engine for the machine named
@@ -1077,6 +1121,7 @@ class CellaEnvironment(BaseEnvironment):
             "--root",
             "rw",
         )
+        self._register_mirror(name)
         self._cella("start", name)
         self._cella("gateway", name, "open")
         # In dry-run the appliance records the world leg (by name) into
@@ -1280,6 +1325,7 @@ class CellaEnvironment(BaseEnvironment):
                 pass
 
     def _retire_machine(self, name: str) -> None:
+        self._mirrored.pop(name, None)
         """End a machine's life at teardown. `teardown` (the default)
         destroys it. `archive` stops it and latches it as a cella
         artifact (`cella archive`) -- a rock, inspected with `cella
