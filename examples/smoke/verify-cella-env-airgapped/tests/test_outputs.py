@@ -26,9 +26,20 @@ def test_report_claims():
     assert r["root_device_is_vda"] is True
 
 
-def test_no_nic_exists():
+def test_topology_is_a_valid_airgap():
+    """The airgap has two valid shapes, and only two.
+
+    Agentless: no nic at all (``--net none``) -- loopback alone.
+    Agented: the terminated pair stands so the agent can reach its
+    inference line, and the member's one interface is the wire to the
+    appliance. The workload's airgap claim is then not "no nic" but
+    "no world beyond the judged appliance line", which
+    ``test_egress_is_denied`` asserts independently.
+    """
     interfaces = sorted(os.listdir("/sys/class/net"))
-    assert interfaces == ["lo"]
+    assert interfaces in (["lo"], ["eth0", "lo"]), (
+        f"unexpected interfaces for an air-gapped task: {interfaces}"
+    )
     assert report()["net_interfaces"] == interfaces
 
 
