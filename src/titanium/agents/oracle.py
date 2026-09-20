@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from titanium.agents.base import BaseAgent
+from titanium.agents.base import BaseAgent, SealedCommandSpec, SealedStep
 from titanium.environments.base import BaseEnvironment
 from titanium.models.agent.context import AgentContext
 from titanium.models.agent.name import AgentName
@@ -40,6 +40,44 @@ class OracleAgent(BaseAgent):
 
     async def setup(self, environment: BaseEnvironment) -> None:
         return
+
+    def sealed_command_spec(
+        self, instruction: str, environment: BaseEnvironment
+    ) -> SealedCommandSpec | None:
+        """The solve as bake-time inputs: upload the solution dir, then
+        run the same command :meth:`run` would exec, chmod folded in
+        (the orchestrator runs the payload as one script)."""
+        env_paths = environment.env_paths
+        solution_dir, solve_path = self._resolve_solution_paths()
+        if not solve_path.exists():
+            raise FileNotFoundError(f"Solution script not found: {solve_path}")
+        task_os = self._task.config.environment.os
+        container_solve_path = str(
+            env_paths.solution_dir / solve_path.relative_to(solution_dir).as_posix()
+        )
+        command = build_execution_command(
+            container_solve_path,
+            stdout_path=str(env_paths.agent_dir / self._ORACLE_LOG_FILE),
+            task_os=task_os,
+        )
+        env = {"DEBIAN_FRONTEND": "noninteractive", **self._extra_env}
+        if self._task.config.solution.env:
+            env.update(resolve_env_vars(self._task.config.solution.env))
+        steps: list[SealedStep] = []
+        if needs_chmod(container_solve_path):
+            steps.append(
+                SealedStep(
+                    command=(
+                        f"chmod +x {quote_shell_arg(container_solve_path, task_os)}"
+                    ),
+                    user="root",
+                )
+            )
+        steps.append(SealedStep(command=command, env=env))
+        return SealedCommandSpec(
+            steps=tuple(steps),
+            uploads=((solution_dir, str(env_paths.solution_dir)),),
+        )
 
     def _resolve_solution_paths(self) -> tuple[Path, Path]:
         task_os = self._task.config.environment.os

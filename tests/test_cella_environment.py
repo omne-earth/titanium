@@ -39,6 +39,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+from titanium.environments.base import SealedPhaseSpec, SealedPhaseStep
 
 from titanium.environments.cella.environment import (
     CellaEnvironment,
@@ -140,36 +141,67 @@ async def test_upload_dir_walks_and_preserves_links(tmp_path):
     assert link.target == "test.sh"
 
 
-def test_job_files_render_the_cycle(tmp_path):
+def test_orchestrator_files_render_the_trial(tmp_path):
     env = _make_env(tmp_path)
     env._image_config = {"WorkingDir": "/app", "Env": ["PATH=/usr/bin"]}
-    files = env._job_files("bash solve.sh", None, {"K": "a b"}, None)
+    phases = [
+        SealedPhaseSpec(
+            name="agent",
+            steps=[SealedPhaseStep(command="bash solve.sh", env={"K": "a b"})],
+            timeout_sec=600,
+        ),
+        SealedPhaseSpec(
+            name="verify",
+            steps=[
+                SealedPhaseStep(command="chmod +x /tests/test.sh", user="root"),
+                SealedPhaseStep(command="bash /tests/test.sh"),
+            ],
+            timeout_sec=300,
+        ),
+    ]
+    files = env._orchestrator_files(phases)
     by_path = {entry.path: entry for entry in files}
-    command = by_path["/titanium/command.sh"].contents.decode()
-    assert command == "bash solve.sh\n"
-    job = by_path["/titanium/job.sh"].contents.decode()
-    assert "cd /app" in job
-    assert "export PATH=/usr/bin" in job
-    assert "export K='a b'" in job
-    # rc is written last, after the outputs are synced: its presence
-    # is the host's completion signal, so it must prove the rest.
-    assert "echo $rc > /titanium/result/rc" in job
-    assert job.index("sync") < job.index("echo $rc")
-    assert "systemctl poweroff" in job
-    # Always runuser, root included: the systemd job has no HOME, and
-    # runuser pins the target user's.
-    assert "runuser -u root -- bash /titanium/command.sh" in job
-    unit = by_path["/etc/systemd/system/titanium-exec.service"].contents.decode()
-    assert "ExecStart=/bin/bash /titanium/job.sh" in unit
-    wants = by_path["/etc/systemd/system/multi-user.target.wants/titanium-exec.service"]
-    assert wants.target == "../titanium-exec.service"
+    agent_phase = by_path["/titanium/phases/agent.sh"].contents.decode()
+    assert "cd '/app'" in agent_phase or "cd /app" in agent_phase
+    assert "export PATH=/usr/bin" in agent_phase
+    assert "export K='a b'" in agent_phase
+    # Always runuser, root included: the unit has no HOME, and runuser
+    # pins the target user's.
+    assert "runuser -u root -- bash /titanium/steps/agent-0.sh" in agent_phase
+    assert by_path["/titanium/steps/agent-0.sh"].contents.decode() == "bash solve.sh\n"
+    verify_phase = by_path["/titanium/phases/verify.sh"].contents.decode()
+    # A failing step ends its phase with its rc on the record.
+    assert "echo $rc > $R/verify/rc" in verify_phase
+    orchestrator = by_path["/titanium/orchestrator.sh"].contents.decode()
+    # Phase budgets are baked and enforced in-guest.
+    assert "timeout -k 10 600 bash /titanium/phases/agent.sh" in orchestrator
+    assert "timeout -k 10 300 bash /titanium/phases/verify.sh" in orchestrator
+    # A phase killed by its budget still leaves an rc.
+    assert "[ -f $R/agent/rc ] || echo 124 > $R/agent/rc" in orchestrator
+    # The forced reset is the completion signal, and a re-boot that
+    # did not exit the VMM resets again off the done marker.
+    assert "reboot -f" in orchestrator
+    assert orchestrator.index('if [ -f "$R/done" ]') < orchestrator.index("mkdir -p $R ")
+    unit = by_path["/etc/systemd/system/titanium-trial.service"].contents.decode()
+    assert "ExecStart=/bin/bash /titanium/orchestrator.sh" in unit
+    wants = by_path[
+        "/etc/systemd/system/multi-user.target.wants/titanium-trial.service"
+    ]
+    assert wants.target == "../titanium-trial.service"
 
 
-def test_job_files_drop_privilege_when_asked(tmp_path):
+def test_orchestrator_steps_drop_privilege_when_asked(tmp_path):
     env = _make_env(tmp_path)
-    files = env._job_files("id", None, None, "agent")
-    job = next(e for e in files if e.path == "/titanium/job.sh").contents.decode()
-    assert "runuser -u agent -- bash /titanium/command.sh" in job
+    phases = [
+        SealedPhaseSpec(
+            name="agent", steps=[SealedPhaseStep(command="id", user="agent")]
+        )
+    ]
+    files = env._orchestrator_files(phases)
+    phase = next(
+        e for e in files if e.path == "/titanium/phases/agent.sh"
+    ).contents.decode()
+    assert "runuser -u agent -- bash /titanium/steps/agent-0.sh" in phase
 
 
 def _state_tar(tmp_path, entries) -> Path:

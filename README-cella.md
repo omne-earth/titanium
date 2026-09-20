@@ -80,7 +80,7 @@ The counter gives the order. The phase names who booted it:
 |---|---|---|
 | `-setup` | the agent's install and setup scripts | agent runs only; oracle runs have no setup boots |
 | `-agent` | the agent phase — each exec, or the oracle's solve | always |
-| `-collect` | the task's `pre_artifacts.sh` | only when the task ships one |
+| `-collect` | the task's `collect.sh` | only when the task ships one |
 | `-verify` | the verifier's execs | always |
 | `-appliance` | the terminator appliance (`c000-appliance`) | egress tasks only — **one** machine for the whole trial; cella freezes and thaws it across every cycle, so its chronicle spans all phases |
 

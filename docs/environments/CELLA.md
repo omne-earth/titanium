@@ -244,7 +244,7 @@ qualified, the agent install baked), `podman build`, export, and
 provision systemd into the tree when the image does not carry it
 (the same pipeline `make smoke-cella-rootfs` proves). The boot layer
 carries everything the trial will ever need: the agent's config, the
-task instruction, the tests, `pre_artifacts.sh` when the task ships
+task instruction, the tests, `collect.sh` when the task ships
 one, and the **orchestrator** — a root-owned state machine that
 systemd starts on boot. `build_ext4` writes the flavor from the base
 tar. Host-produced bytes only: no guest-produced filesystem is ever
@@ -258,7 +258,7 @@ One member boot then runs the trial:
    solution replay. The whole agent loop runs inside this phase —
    its inference and egress ride the machine's live window through
    the appliance.
-3. **Collect.** `pre_artifacts.sh`, when present.
+3. **Collect.** `collect.sh`, when present.
 4. **Verify.** The task's tests. The orchestrator writes each
    phase's `/titanium/result/<phase>/{rc,stdout,stderr}` as root.
 5. **Reset.** The orchestrator's last act is `sync` then a forced

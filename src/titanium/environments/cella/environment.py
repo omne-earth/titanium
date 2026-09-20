@@ -69,19 +69,16 @@ def network_topology(allow_internet: bool) -> NetworkTopology:
 # The environment class: bake, run, collect -- one cycle per exec
 # ---------------------------------------------------------------------------
 #
-# Cella has no exec-into, by design, so the BaseEnvironment contract is
-# honored the only honest way a sealed runtime allows: every `exec` is
-# one whole experiment. Files uploaded since the last cycle plus a
-# oneshot unit running the command are baked into a fresh ext4; a fresh
-# machine boots it, runs, and powers off; the still disk is copied and
-# read as evidence (fuse2fs, read-only, on the copy), which yields the
-# command's exit code and output *and* becomes the next cycle's
-# filesystem -- state moves forward only as evidence off still disks.
-# Downloads never touch a machine at all: they read the current state
-# tar. Nothing reaches into a running guest, nothing is installed after
-# a boot, and no channel outlives a cycle.
+# Cella has no exec-into, by design, so the whole trial is one baked
+# experiment (sealed_oneshot): every input -- uploads, the agent's
+# command spec, the tests, the guest orchestrator -- enters the boot
+# layer, one member boots and runs every phase, and the forced reset
+# ends the VMM (the completion signal, host-observed). Results and
+# downloads are extracted from the still machine with `cella extract`;
+# no guest-produced filesystem is ever mounted or parsed by titanium.
 
 import asyncio
+import io
 import logging
 import os
 import re
@@ -120,18 +117,15 @@ from titanium.environments.cella.flavor import (
 )
 from titanium.environments.cella.image_config import parse_image_record
 from titanium.environments.cella.podman import (
-    PodmanError,
     build_image,
     export_rootfs_tar,
     inspect_image,
     new_build_tag,
-    run_podman,
     untag_image,
 )
 from titanium.environments.cella.policy import Policy
 from titanium.environments.cella.rootfs import (
     build_ext4,
-    ensure_rootfs_builder_image,
     place_into_ext4,
     sha3_256_file,
 )
@@ -298,7 +292,6 @@ class CellaEnvironment(BaseEnvironment):
         # Cycle 0 boots from the prepared tar; every later cycle boots
         # from the previous cycle's evidence disk, edited in place.
         self._base_tar: Path | None = None
-        self._state_img: Path | None = None
         self._pending: list[BootEntry] = []
         self._pending_paths: set[str] = set()
         self._cycle = 0
@@ -309,6 +302,11 @@ class CellaEnvironment(BaseEnvironment):
         self._phase = "setup"
         self._image_config: dict = {}
         self._machine: str | None = None
+        # After the sealed boot ends, the halted member is the evidence:
+        # downloads extract from it (once per directory, cached), and
+        # stop(delete) retires it.
+        self._evidence_machine: str | None = None
+        self._evidence_cache: dict[str, Path] = {}
 
     @staticmethod
     def type() -> str:
@@ -323,6 +321,9 @@ class CellaEnvironment(BaseEnvironment):
             # terminator appliance that resolves, terminates, and splices
             # named world egress, judged by name. See terminator.py.
             filtered_egress=True,
+            # The whole trial is one baked boot; the trial flow bakes
+            # and calls run_sealed_trial instead of issuing execs.
+            sealed_oneshot=True,
         )
 
     @classmethod
@@ -337,14 +338,6 @@ class CellaEnvironment(BaseEnvironment):
         if shutil.which(binary) is None and not Path(binary).is_file():
             raise RuntimeError(
                 f"no cella CLI at {binary!r}: run `make .cella`, or set CELLA_BIN"
-            )
-        # Evidence disks and guest-produced tars are parsed inside krun
-        # microVMs, never by host-side code: krun is a hard dependency of
-        # this environment, not an option.
-        if shutil.which("krun") is None:
-            raise RuntimeError(
-                "krun is not on PATH: the cella environment parses evidence "
-                "disks inside krun microVMs (run `make .krun-podman`)"
             )
 
     def _validate_definition(self):
@@ -491,103 +484,326 @@ class CellaEnvironment(BaseEnvironment):
 
     # -------------------------------------------------------------- exec
 
-    def _job_files(
-        self,
-        command: str,
-        cwd: str | None,
-        env: dict[str, str] | None,
-        user: str | int | None,
-    ) -> list[BootEntry]:
-        effective_cwd = cwd or self._image_config.get("WorkingDir") or "/"
-        merged_env: dict[str, str] = {}
-        for declared in self._image_config.get("Env") or []:
-            key, _, value = str(declared).partition("=")
-            merged_env[key] = value
-        merged_env.update(self._persistent_env)
-        merged_env.update(env or {})
+    # --- the sealed one-shot trial (docs/environments/CELLA.md §4) ------
 
-        # The identity ladder matches the container rungs: an explicit
-        # user, else titanium's declared default, else the image's own
-        # Config.User -- which after an agent bake is the agent user
-        # the install steps ran as (their `USER` directive wins), so
-        # the baked agent's ~/.local paths resolve. runuser supplies
-        # that user's HOME.
-        run_as = user if user is not None else self.default_user
-        if run_as is None:
-            run_as = self._image_config.get("User") or None
-        if run_as in (None, 0, "0"):
-            run_as = "root"
-        exports = "".join(
-            f"export {key}={_shell_quote(value)}\n" for key, value in merged_env.items()
-        )
-        # Always through runuser, root included: the job runs under a
-        # systemd unit with no HOME at all, and a baked agent's
-        # ~/.local paths need the target user's real HOME. runuser
-        # sets HOME/USER/LOGNAME for the target and keeps the exports.
-        invoke = (
-            f"runuser -u {_shell_quote(str(run_as))} -- bash {_RUNNER_DIR}/command.sh"
-        )
-        # A paired member is wire-only: the appliance holds the world, so
-        # its one nic is eth0. The prelude addresses it (no kernel
-        # autoconfiguration on a wire), folds the pair CA into the trust
-        # bundle, and pins the ephemeral range to the reply window.
-        wire_prelude = ""
-        if self._paired:
-            wire_prelude = member_prelude("eth0")
-        job = (
+    def _orchestrator_files(self, phases) -> list[BootEntry]:
+        """The guest state machine as boot-layer entries: one step
+        script per step, one phase script per phase (steps in order, a
+        failing step ends its phase), and the orchestrator that runs
+        the phases under their baked budgets and ends the machine with
+        a forced reset — the completion signal the host observes
+        (reboot=k: the reset exits the VMM). Re-entry after a reset
+        that re-booted instead of exiting sees the done marker and
+        resets again."""
+        effective_cwd = self._image_config.get("WorkingDir") or "/"
+        entries: list[BootEntry] = []
+        phase_lines: list[str] = []
+        for phase in phases:
+            phase_script_lines = [
+                "#!/bin/bash",
+                f"cd {_shell_quote(effective_cwd)} || cd /",
+            ]
+            for index, step in enumerate(phase.steps):
+                merged_env: dict[str, str] = {}
+                for declared in self._image_config.get("Env") or []:
+                    key, _, value = str(declared).partition("=")
+                    merged_env[key] = value
+                merged_env.update(self._persistent_env)
+                merged_env.update(step.env)
+                run_as = step.user if step.user is not None else self.default_user
+                if run_as is None:
+                    run_as = self._image_config.get("User") or None
+                if run_as in (None, 0, "0"):
+                    run_as = "root"
+                step_path = f"{_RUNNER_DIR}/steps/{phase.name}-{index}.sh"
+                entries.append(
+                    GuestFile(
+                        path=step_path,
+                        contents=(step.command + "\n").encode(),
+                        mode=0o755,
+                        uid=0,
+                        gid=0,
+                    )
+                )
+                exports = "".join(
+                    f"export {key}={_shell_quote(value)}\n"
+                    for key, value in merged_env.items()
+                )
+                phase_script_lines.append(
+                    "(\n"
+                    + exports
+                    + f"runuser -u {_shell_quote(str(run_as))} -- "
+                    f"bash {step_path}\n"
+                    f") >> $R/{phase.name}/stdout 2>> $R/{phase.name}/stderr\n"
+                    "rc=$?\n"
+                    "if [ $rc -ne 0 ]; then\n"
+                    f"  echo $rc > $R/{phase.name}/rc\n"
+                    "  exit $rc\n"
+                    "fi"
+                )
+            phase_script_lines.append(f"echo 0 > $R/{phase.name}/rc")
+            entries.append(
+                GuestFile(
+                    path=f"{_RUNNER_DIR}/phases/{phase.name}.sh",
+                    contents=(
+                        "R=" + _RUNNER_DIR + "/result\n"
+                        + "\n".join(phase_script_lines)
+                        + "\n"
+                    ).encode(),
+                    mode=0o755,
+                    uid=0,
+                    gid=0,
+                )
+            )
+            budget = (
+                f"timeout -k 10 {int(phase.timeout_sec)} "
+                if phase.timeout_sec
+                else ""
+            )
+            phase_lines.append(
+                f"mkdir -p $R/{phase.name}\n"
+                f"touch $R/{phase.name}/stdout $R/{phase.name}/stderr\n"
+                f"{budget}bash {_RUNNER_DIR}/phases/{phase.name}.sh\n"
+                f"[ -f $R/{phase.name}/rc ] || echo 124 > $R/{phase.name}/rc"
+            )
+        wire_prelude = member_prelude("eth0") if self._paired else ""
+        orchestrator = (
             "#!/bin/bash\n"
-            "# Generated by titanium's cella environment: one exec, one boot.\n"
-            f"mkdir -p {_RUNNER_DIR}/result /logs/agent /logs/verifier /logs/artifacts\n"
+            "# Generated by titanium: the sealed one-shot trial's state\n"
+            "# machine. One boot runs every phase; the forced reset is\n"
+            "# the completion signal (reboot=k exits the VMM).\n"
+            f"R={_RUNNER_DIR}/result\n"
+            "end() { sync; reboot -f; echo 1 > /proc/sys/kernel/sysrq; "
+            "echo b > /proc/sysrq-trigger; }\n"
+            'if [ -f "$R/done" ]; then end; fi\n'
+            f"mkdir -p $R /logs/agent /logs/verifier /logs/artifacts\n"
             + wire_prelude
-            + f"cd {_shell_quote(effective_cwd)} || cd /\n"
-            f"{exports}"
-            f"{invoke} > {_RUNNER_DIR}/result/stdout 2> {_RUNNER_DIR}/result/stderr\n"
-            "rc=$?\n"
-            "sync\n"
-            f"echo $rc > {_RUNNER_DIR}/result/rc\n"
-            "sync\n"
-            "systemctl poweroff --no-block\n"
+            + "\n".join(phase_lines)
+            + "\ntouch $R/done\nend\n"
         )
         unit = (
             "[Unit]\n"
-            "Description=Titanium exec cycle\n"
+            "Description=Titanium sealed one-shot trial\n"
             "After=basic.target\n\n"
             "[Service]\n"
             "Type=oneshot\n"
             "RemainAfterExit=yes\n"
-            f"ExecStart=/bin/bash {_RUNNER_DIR}/job.sh\n\n"
+            f"ExecStart=/bin/bash {_RUNNER_DIR}/orchestrator.sh\n\n"
             "[Install]\n"
             "WantedBy=multi-user.target\n"
         )
-        return [
+        entries.append(
             GuestFile(
-                path=f"{_RUNNER_DIR}/command.sh",
-                contents=(command + "\n").encode(),
+                path=f"{_RUNNER_DIR}/orchestrator.sh",
+                contents=orchestrator.encode(),
                 mode=0o755,
                 uid=0,
                 gid=0,
-            ),
+            )
+        )
+        entries.append(
             GuestFile(
-                path=f"{_RUNNER_DIR}/job.sh",
-                contents=job.encode(),
-                mode=0o755,
-                uid=0,
-                gid=0,
-            ),
-            GuestFile(
-                path="/etc/systemd/system/titanium-exec.service",
+                path="/etc/systemd/system/titanium-trial.service",
                 contents=unit.encode(),
                 mode=0o644,
                 uid=0,
                 gid=0,
-            ),
+            )
+        )
+        entries.append(
             GuestSymlink(
-                path="/etc/systemd/system/multi-user.target.wants/titanium-exec.service",
-                target="../titanium-exec.service",
+                path=(
+                    "/etc/systemd/system/multi-user.target.wants/"
+                    "titanium-trial.service"
+                ),
+                target="../titanium-trial.service",
                 uid=0,
                 gid=0,
-            ),
-        ]
+            )
+        )
+        return entries
+
+    async def run_sealed_trial(self, phases) -> dict[str, ExecResult]:
+        return await asyncio.to_thread(self._run_sealed_blocking, list(phases))
+
+    def _run_sealed_blocking(self, phases) -> dict[str, ExecResult]:
+        with self._lifecycle:
+            return self._run_sealed_locked(phases)
+
+    def _run_sealed_locked(self, phases) -> dict[str, ExecResult]:
+        if self._base_tar is None:
+            raise CellaError("sealed trial before start: not running")
+        job_entries = self._orchestrator_files(phases)
+        if self._paired:
+            ca_pem = pair_ca_path(Path.home()).read_bytes()
+            job_entries = member_trust_entries(ca_pem) + job_entries
+        boot_layer = BootLayer(entries=tuple(self._pending) + tuple(job_entries))
+        self._phase = "trial"
+        flavor = self._publish_cycle_flavor(boot_layer)
+        name = flavor
+        self._machine = name
+        memory_mb = self._effective_memory_mb or 1024
+        bridge: subprocess.Popen | None = None
+        judged = self._paired
+        try:
+            self._destroy_quietly(name)
+            self._cella(
+                "create",
+                name,
+                "--kernel",
+                "canonical",
+                "--rootfs",
+                flavor,
+                "--mem-mb",
+                str(memory_mb),
+                "--net",
+                self._task_net(),
+                "--root",
+                "rw",
+            )
+            self._cella("start", name)
+            if judged:
+                self._cella("gateway", name, "open")
+                port = self._ensure_engine(
+                    name, self._member_policy_path(), dry_run=False
+                )
+                bridge = self._spawn_bridge(name, port)
+            # The total budget: the phases' declared budgets summed,
+            # the config ceiling standing in per phase that declared
+            # none, plus one boot margin.
+            budget = (
+                sum(p.timeout_sec or config.CELLA_EXEC_TIMEOUT for p in phases)
+                + _BOOT_MARGIN_SEC
+            )
+            self._wait_for_reset(name, time.monotonic() + budget)
+        finally:
+            if bridge is not None:
+                bridge.terminate()
+                try:
+                    bridge.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    bridge.kill()
+            self._kill_engine(name)
+            self._preserve_chronicle(name)
+            self._preserve_edge_log(name)
+            self._machine = None
+            flavor_dir = rootfs_flavor_dir(flavor)
+            if flavor_dir.exists():
+                shutil.rmtree(flavor_dir, ignore_errors=True)
+        # The machine is the evidence now: every later download
+        # extracts from it, and stop(delete) retires it.
+        self._evidence_machine = name
+        return self._sealed_results(name, phases)
+
+    def _wait_for_reset(self, name: str, deadline: float) -> None:
+        """Wait for the guest's forced reset, thawing through parks.
+
+        Completion is two host-side facts: the VMM pid is gone and no
+        frozen ``state`` file exists. A park still freezes the member
+        (the park is the freeze), so the wait pumps thaws exactly as
+        the exec model did; no guest byte is ever read here."""
+        machine_dir = self._machine_dir(name)
+        while time.monotonic() < deadline:
+            if (machine_dir / "state").is_file():
+                time.sleep(1.0)
+                try:
+                    self._cella("thaw", name)
+                except CellaError:
+                    pass  # raced a concurrent transition; loop decides
+                continue
+            if not self._vmm_alive(name):
+                if (machine_dir / "state").is_file():
+                    continue
+                return
+            time.sleep(1.0)
+        raise CellaError(
+            f"machine {name} did not reset in time; vmm.log tail:\n"
+            + _tail(machine_dir / "vmm.log")
+        )
+
+    def _sealed_results(self, name: str, phases) -> dict[str, ExecResult]:
+        assert self._work is not None
+        out_dir = Path(tempfile.mkdtemp(prefix="cella-results-", dir=self._work))
+        try:
+            self._extract_dir(name, f"{_RUNNER_DIR}/result", out_dir)
+            results: dict[str, ExecResult] = {}
+            for phase in phases:
+                phase_dir = out_dir / phase.name
+                if not phase_dir.is_dir():
+                    continue
+                try:
+                    return_code = int((phase_dir / "rc").read_text().strip())
+                except (OSError, ValueError):
+                    continue
+                results[phase.name] = ExecResult(
+                    stdout=_read_or_empty(phase_dir / "stdout"),
+                    stderr=_read_or_empty(phase_dir / "stderr"),
+                    return_code=return_code,
+                )
+            if not results:
+                raise CellaError(
+                    "the guest reset without a result; vmm.log tail:\n"
+                    + _tail(self._machine_dir(name) / "vmm.log")
+                )
+            return results
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+    def _evidence_cache_dir(self, guest_dir: str) -> Path:
+        """The host-side cache of one extracted guest directory.
+
+        One extractor boot per *directory*, ever: the first read under
+        a root extracts it once; every later file or dir read under it
+        is a host-side copy from the cache. ``/logs`` is the standing
+        root (agent, verifier, and artifacts all live under it), so a
+        whole trial's downloads normally cost one extract. A path
+        outside every cached root extracts its own parent directory,
+        which then joins the cache."""
+        assert self._work is not None and self._evidence_machine is not None
+        for cached_guest, cached_host in self._evidence_cache.items():
+            if guest_dir == cached_guest or guest_dir.startswith(cached_guest + "/"):
+                inner = cached_host / guest_dir[len(cached_guest) :].lstrip("/")
+                return inner
+        root = "/logs" if guest_dir.startswith("/logs") else guest_dir
+        host = Path(
+            tempfile.mkdtemp(prefix="cella-evidence-", dir=self._work)
+        )
+        self._extract_dir(self._evidence_machine, root, host)
+        self._evidence_cache[root] = host
+        inner = host / guest_dir[len(root) :].lstrip("/")
+        return inner
+
+    def _evidence_file_read(self, source_path: str, target: Path) -> None:
+        """One file out of the evidence cache (extracted per directory,
+        never per file — see :meth:`_evidence_cache_dir`)."""
+        guest = str(PurePosixPath("/") / str(source_path).lstrip("/"))
+        parent = str(PurePosixPath(guest).parent)
+        cached = self._evidence_cache_dir(parent)
+        extracted = cached / PurePosixPath(guest).name
+        if not extracted.is_file():
+            raise FileNotFoundError(f"{source_path} is not in the evidence tree")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(extracted, target)
+
+    def _extract_dir(self, name: str, guest_path: str, target: Path) -> None:
+        """``cella extract``: the machine's own evidence verb. The tar
+        arrives trailer-verified on stdout; extraction filters every
+        member (stdlib ``data`` filter), so a hostile archive cannot
+        write outside *target*."""
+        target.mkdir(parents=True, exist_ok=True)
+        completed = subprocess.run(
+            [cella_bin(), "extract", name, guest_path],
+            capture_output=True,
+            timeout=self.task_env_config.build_timeout_sec,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise FileNotFoundError(
+                f"cella extract {name} {guest_path} failed: "
+                + completed.stderr.decode(errors="replace").strip()[-500:]
+            )
+        with tarfile.open(fileobj=io.BytesIO(completed.stdout), mode="r:") as archive:
+            archive.extractall(target, filter="data")
 
     def _bridge_bin(self) -> Path:
         return Path(cella_bin()).parent / "cella-engine"
@@ -851,6 +1067,10 @@ class CellaEnvironment(BaseEnvironment):
                 image=artifact,
                 boot_layer=BootLayer(entries=(terminator_conf_entry(),)),
                 timeout_sec=self.task_env_config.build_timeout_sec,
+                # The golden is host-built by `make .cella`, not guest
+                # bytes: the default runtime is enough, and krun is not
+                # a dependency of this rung.
+                runtime=None,
             )
             write_manifest(
                 staging,
@@ -958,33 +1178,18 @@ class CellaEnvironment(BaseEnvironment):
         size_bytes = (self._effective_storage_mb or 5120) * (1 << 20)
         with staging_flavor_dir(home=None) as staging:
             artifact = staging / ROOTFS_ARTIFACT_NAME
-            if self._state_img is None:
-                # Cycle 0: build from the prepared tar. Its bytes came
-                # from the task's own image build, so podman's default
-                # runtime is enough here.
-                assert self._base_tar is not None
-                build_ext4(
-                    rootfs_tar=self._base_tar,
-                    boot_layer=boot_layer,
-                    size_bytes=size_bytes,
-                    dest=artifact,
-                    timeout_sec=self.task_env_config.build_timeout_sec,
-                )
-            else:
-                # Disk to disk: the previous evidence copy is the next
-                # filesystem; only the boot layer changes. Guest-produced
-                # bytes, so placement parses them under krun.
-                shutil.copyfile(self._state_img, artifact)
-                place_into_ext4(
-                    image=artifact,
-                    boot_layer=boot_layer,
-                    # The carried disk holds the previous cycle's result;
-                    # left in place it would answer the completion poll
-                    # before this cycle's guest ever ran (measured: every
-                    # cycle after the first returned its predecessor's rc).
-                    purge=(f"{_RUNNER_DIR}/result",),
-                    timeout_sec=self.task_env_config.build_timeout_sec,
-                )
+            # One boot, one build: from the prepared tar. Its bytes
+            # came from the task's own image build, so podman's default
+            # runtime is enough; no guest-produced filesystem is ever
+            # mounted or edited on this rung.
+            assert self._base_tar is not None
+            build_ext4(
+                rootfs_tar=self._base_tar,
+                boot_layer=boot_layer,
+                size_bytes=size_bytes,
+                dest=artifact,
+                timeout_sec=self.task_env_config.build_timeout_sec,
+            )
             write_manifest(
                 staging,
                 render_golden_json(
@@ -1006,37 +1211,7 @@ class CellaEnvironment(BaseEnvironment):
 
     # How often the live disk is probed for the result, and the grace
     # the guest gets to finish its poweroff after the result appears.
-    _RESULT_POLL_SEC = config.RESULT_POLL_SEC
     _POWEROFF_GRACE_SEC = config.POWEROFF_GRACE_SEC
-
-    def _result_landed(self, name: str) -> bool:
-        """Whether ``/titanium/result/rc`` exists on the machine's disk.
-
-        The canonical kernel has no ACPI poweroff and the VMM exits only
-        on a CPU reset, so a finished guest *halts* and its VMM lives
-        on (measured; see docs/environments/CELLA.md §4). Completion is
-        therefore read where the guest put it: the result file. The
-        runner writes rc last, after a sync of the outputs, so rc's
-        presence proves everything before it is durable. The read is a
-        targeted debugfs dump inside krun against the machine's own
-        disk file -- cella documents the machine directory as plain
-        files that may be read while a machine runs, and nothing is
-        written.
-        """
-        assert self._work is not None
-        disk = self._machine_dir(name) / "disk.img"
-        out_dir = Path(tempfile.mkdtemp(prefix="cella-poll-", dir=self._work))
-        try:
-            script = (
-                f'debugfs -R "dump {_RUNNER_DIR}/result/rc /out/rc" /img 2>/dev/null'
-            )
-            try:
-                self._read_from_image(disk, script, out_dir)
-            except PodmanError:
-                return False
-            return (out_dir / "rc").is_file()
-        finally:
-            shutil.rmtree(out_dir, ignore_errors=True)
 
     def _vmm_alive(self, name: str) -> bool:
         try:
@@ -1053,166 +1228,6 @@ class CellaEnvironment(BaseEnvironment):
             pass
         return True
 
-    def _let_the_guest_halt(self, name: str) -> None:
-        """After the result lands, walk the guest to its halt.
-
-        The shutdown itself can park (a last frame on the way down),
-        and the park is the freeze -- so keep thawing through it for a
-        bounded moment. A guest that halts cleanly unmounts its
-        filesystem; one stopped frozen leaves a dirty journal that the
-        copy-side recovery must replay.
-        """
-        machine_dir = self._machine_dir(name)
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if (machine_dir / "state").is_file():
-                time.sleep(1.0)
-                try:
-                    self._cella("thaw", name)
-                except CellaError:
-                    pass
-                continue
-            if not self._vmm_alive(name):
-                return
-            time.sleep(self._POWEROFF_GRACE_SEC)
-
-    def _wait_for_result(self, name: str, deadline: float) -> None:
-        """Wait for the guest's result, thawing through the judgments.
-
-        On a judged machine **the park is the freeze**: cella's
-        egress rule (one-shot) cryo-freezes the machine at every park,
-        the bridge lands the engine's decision into the verdict file
-        while the machine lies frozen, and the decision applies at the
-        thaw edge, in park order. The harness's side of that contract
-        is exactly cella's own engine gate's: whenever the state file
-        exists, thaw. A thaw that raced ahead of a staged decision is
-        harmless -- the next park freezes again and the probes retry.
-        """
-        machine_dir = self._machine_dir(name)
-        thaw_pause = 1.0
-        last_poll = 0.0
-        while time.monotonic() < deadline:
-            if (machine_dir / "state").is_file():
-                # A short breath first: the bridge tails at 200ms, so
-                # the decision is usually staged before this thaw.
-                time.sleep(thaw_pause)
-                try:
-                    self._cella("thaw", name)
-                except CellaError:
-                    pass  # raced a concurrent transition; loop decides
-                continue
-            alive = self._vmm_alive(name)
-            if time.monotonic() - last_poll >= self._RESULT_POLL_SEC:
-                last_poll = time.monotonic()
-                if self._result_landed(name):
-                    self._let_the_guest_halt(name)
-                    return
-            if not alive and not (machine_dir / "state").is_file():
-                # Halted (or gone) with no frozen state and no result
-                # yet: one final result check below decides.
-                if self._result_landed(name):
-                    return
-                raise CellaError(
-                    f"machine {name} ended without a result; vmm.log tail:\n"
-                    + _tail(machine_dir / "vmm.log")
-                )
-            time.sleep(1.0)
-        raise CellaError(
-            f"machine {name} produced no result in time; vmm.log tail:\n"
-            + _tail(machine_dir / "vmm.log")
-        )
-
-    def _read_from_image(
-        self, image: Path, script: str, out_dir: Path, recover: bool = False
-    ) -> None:
-        """Run one read-only extraction script against *image* in a krun
-        guest, with the image at ``/img`` and *out_dir* at ``/out``.
-
-        The disk's contents are the workload's own writing, and ext4
-        metadata is an attack surface like any parser input. A hostile
-        filesystem compromises a disposable KVM guest with no network,
-        never the host.
-
-        ``recover=True`` replays the journal first (``e2fsck -p``) --
-        for titanium's own copies only, never a machine's live disk: a
-        guest frozen mid-shutdown leaves a dirty journal that a plain
-        read-only mount refuses, and the copy is titanium's to repair.
-        """
-        builder = ensure_rootfs_builder_image(
-            timeout_sec=self.task_env_config.build_timeout_sec
-        )
-        if recover:
-            # -fy, not preen: a disk frozen mid-shutdown needs the full
-            # replay, and a dirty journal left in the image would be
-            # replayed by the NEXT guest kernel over whatever placement
-            # wrote meanwhile -- measured as vanished uploads.
-            script = "e2fsck -fy /img >/dev/null 2>&1 || true\n" + script
-        run_podman(
-            [
-                "run",
-                "--rm",
-                "--runtime",
-                "krun",
-                "--network=none",
-                "--device",
-                "/dev/fuse",
-                "-v",
-                f"{image}:/img:{'z' if recover else 'ro,z'}",
-                "-v",
-                f"{out_dir}:/out:z",
-                builder,
-                "sh",
-                "-c",
-                script,
-            ],
-            timeout_sec=self.task_env_config.build_timeout_sec,
-        )
-
-    def _harvest(self, name: str) -> ExecResult:
-        """Copy the still disk, read the result triple, keep the disk.
-
-        The one host-side act is the byte copy. The copy *is* the next
-        cycle's filesystem (state moves disk to disk), so the harvest
-        reads only ``/titanium/result/{rc,stdout,stderr}`` -- three
-        targeted ``debugfs`` dumps inside a krun guest, no mount, no
-        full-tree pass.
-        """
-        assert self._work is not None
-        disk = self._machine_dir(name) / "disk.img"
-        evidence = self._work / f"state-{self._cycle + 1:04d}.img"
-        shutil.copyfile(disk, evidence)
-
-        out_dir = self._work / f"harvest-{self._cycle:04d}"
-        out_dir.mkdir()
-        script = "\n".join(
-            f'debugfs -R "dump {_RUNNER_DIR}/result/{f} /out/{f}" /img 2>/dev/null'
-            for f in ("rc", "stdout", "stderr")
-        )
-        try:
-            self._read_from_image(evidence, script, out_dir, recover=True)
-        except PodmanError as exc:
-            raise CellaError(
-                f"cycle {self._cycle}: evidence extraction failed: {exc}; "
-                f"vmm.log tail:\n" + _tail(self._machine_dir(name) / "vmm.log")
-            ) from exc
-
-        try:
-            return_code = int((out_dir / "rc").read_text().strip())
-        except (OSError, ValueError) as exc:
-            raise CellaError(
-                f"cycle {self._cycle}: the guest halted without a result "
-                f"({exc}); vmm.log tail:\n" + _tail(self._machine_dir(name) / "vmm.log")
-            ) from exc
-        stdout = _read_or_empty(out_dir / "stdout")
-        stderr = _read_or_empty(out_dir / "stderr")
-
-        previous = self._state_img
-        self._state_img = evidence
-        if previous is not None:
-            previous.unlink(missing_ok=True)
-        shutil.rmtree(out_dir, ignore_errors=True)
-        return ExecResult(stdout=stdout, stderr=stderr, return_code=return_code)
-
     async def exec(
         self,
         command: str,
@@ -1221,152 +1236,12 @@ class CellaEnvironment(BaseEnvironment):
         timeout_sec: int | None = None,
         user: str | int | None = None,
     ) -> ExecResult:
-        # Off the event loop: one exec is a whole VM boot/run/collect
-        # cycle of blocking cella verbs, sleeps, and krun disk reads.
-        # See _start_blocking on why this must not block the loop.
-        return await asyncio.to_thread(
-            self._exec_blocking, command, cwd, env, timeout_sec, user
+        raise CellaError(
+            "the cella rung is sealed one-shot: no per-command exec exists. "
+            "The trial flow bakes every input and calls run_sealed_trial; "
+            "a task healthcheck or interactive agent cannot run here."
         )
 
-    def _exec_blocking(
-        self,
-        command: str,
-        cwd: str | None,
-        env: dict[str, str] | None,
-        timeout_sec: int | None,
-        user: str | int | None,
-    ) -> ExecResult:
-        # Serialize with any lifecycle still running from an abandoned
-        # (timed-out) await: hold the lock for the whole cycle so no two
-        # execs share the mutable cycle state or a disk path.
-        with self._lifecycle:
-            return self._exec_locked(command, cwd, env, timeout_sec, user)
-
-    def _exec_locked(
-        self,
-        command: str,
-        cwd: str | None,
-        env: dict[str, str] | None,
-        timeout_sec: int | None,
-        user: str | int | None,
-    ) -> ExecResult:
-        if self._base_tar is None:
-            raise CellaError("exec before start: the environment is not running")
-        job_entries = self._job_files(command, cwd, env, user)
-        if self._paired:
-            # A paired member bakes the pair CA and points its resolver
-            # at the appliance; the prelude folds the CA into the trust
-            # bundle. No proxy env -- the resolver is the interceptor.
-            ca_pem = pair_ca_path(Path.home()).read_bytes()
-            job_entries = member_trust_entries(ca_pem) + job_entries
-
-        boot_layer = BootLayer(entries=tuple(self._pending) + tuple(job_entries))
-        flavor = self._publish_cycle_flavor(boot_layer)
-        name = flavor
-        self._machine = name
-        memory_mb = self._effective_memory_mb or 1024
-        bridge: subprocess.Popen | None = None
-        judged = self._paired
-        try:
-            # Idempotent create: a trial-level retry builds a fresh
-            # environment with the same session id, so it regenerates
-            # this exact machine name while the failed attempt's machine
-            # may still linger. Clear it first -- cella refuses to create
-            # over an existing name, and the name is this trial's alone.
-            self._destroy_quietly(name)
-            self._cella(
-                "create",
-                name,
-                "--kernel",
-                "canonical",
-                "--rootfs",
-                flavor,
-                "--mem-mb",
-                str(memory_mb),
-                "--net",
-                self._task_net(),
-                "--root",
-                "rw",
-            )
-            self._cella("start", name)
-            if judged:
-                # E1's order: start, then open -- open is the membrane,
-                # and from here every crossing parks for the engine.
-                # One valve per machine: with the line, the wire parks
-                # under the same open.
-                self._cella("gateway", name, "open")
-                # The member border is fixed and always enforced; the
-                # world leg (and any dry-run collection) is the
-                # appliance's, stood up once in start(). The engine is
-                # this member machine's own -- a fresh one per cycle.
-                port = self._ensure_engine(
-                    name, self._member_policy_path(), dry_run=False
-                )
-                bridge = self._spawn_bridge(name, port)
-            # Canonical budget: the task's own declared timeout for this
-            # phase (verifier once set_phase("verify") has fired, else the
-            # agent). A caller-supplied timeout wins; the config ceiling is
-            # only the last resort when the task declared neither.
-            phase_timeout = (
-                self.verifier_timeout_sec
-                if self._phase == "verify"
-                else self.agent_timeout_sec
-            )
-            budget = (
-                timeout_sec or phase_timeout or config.CELLA_EXEC_TIMEOUT
-            ) + _BOOT_MARGIN_SEC
-            self._wait_for_result(name, time.monotonic() + budget)
-            try:
-                self._cella("stop", name)
-            except CellaError:
-                # A machine that ended frozen refuses stop; frozen is
-                # still, which is all the harvest needs, and destroy
-                # (in the finally) takes a frozen machine.
-                if not (self._machine_dir(name) / "state").is_file():
-                    raise
-            result = self._harvest(name)
-        finally:
-            if bridge is not None:
-                # The tether ends the bridge when the machine directory
-                # goes; the kill is just promptness.
-                bridge.terminate()
-                try:
-                    bridge.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    bridge.kill()
-            # This member machine's engine dies with it (per cycle); the
-            # appliance's, keyed by its own name, is untouched here.
-            self._kill_engine(name)
-            self._preserve_chronicle(name)
-            self._preserve_edge_log(name)
-            self._retire_machine(name)
-            self._machine = None
-            flavor_dir = rootfs_flavor_dir(flavor)
-            if flavor_dir.exists():
-                shutil.rmtree(flavor_dir, ignore_errors=True)
-            # Advance the cycle even when this exec raised: the verifier
-            # retries a failed exec, and reusing the cycle number would
-            # name the next machine after this one -- which cella refuses
-            # as "already exists". A fresh number per attempt, always.
-            self._cycle += 1
-        # Success only (skipped when the exec raised): the queued uploads
-        # were baked into this cycle and are done; a retry after a failure
-        # keeps them so it re-bakes the same inputs.
-        self._pending = []
-        self._pending_paths = set()
-        return result
-
-    # The per-machine files that make the run auditable: the Event
-    # chronicle, the Decision record, the witnessed verb book, the
-    # standing memories the engine planted, the names the ratchet
-    # learned, the VMM's own execution log (boot and the freeze/thaw
-    # timings -- the cryogenic record), and the small state markers.
-    # Destroy takes them with the machine, so they are copied out first
-    # -- the rung's whole point is the record of every crossing the
-    # workload attempted, granted and refused. What is deliberately left
-    # behind: disk.img and ram.img (gigabytes, and a run-to-completion
-    # machine has nothing to resume -- see the guide's note on forensic
-    # archival), and the transient sockets and pid files.
     _CHRONICLE_FILES = (
         "network/ledger",
         "network/names",
@@ -1379,10 +1254,8 @@ class CellaEnvironment(BaseEnvironment):
         "uid",
     )
 
-    # The framed-protobuf books cella's ``--dump`` renders to text. The
-    # manifest is already JSON; the disk and transients are not audit
-    # evidence. ``--dump`` keys membrane-memory on its basename, which
-    # the preserved copy keeps.
+    # The books cella's own --dump decoder renders to a .txt beside
+    # the raw bytes.
     _CHRONICLE_DUMPABLE = (
         "network/ledger",
         "network/names",
@@ -1469,8 +1342,8 @@ class CellaEnvironment(BaseEnvironment):
         await asyncio.to_thread(self._download_file_sync, source_path, target_path)
 
     def _download_file_sync(self, source_path: str, target_path: Path | str) -> None:
-        if self._state_img is not None:
-            self._image_file_read(source_path, Path(target_path))
+        if self._evidence_machine is not None:
+            self._evidence_file_read(source_path, Path(target_path))
             return
         wanted = "./" + str(PurePosixPath(source_path)).lstrip("/")
         with self._state_members() as archive:
@@ -1491,64 +1364,21 @@ class CellaEnvironment(BaseEnvironment):
     async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
         await asyncio.to_thread(self._download_dir_sync, source_dir, target_dir)
 
-    def _image_file_read(self, source_path: str, target: Path) -> None:
-        assert self._work is not None and self._state_img is not None
-        guest = str(PurePosixPath("/") / str(source_path).lstrip("/"))
-        out_dir = Path(tempfile.mkdtemp(prefix="cella-read-", dir=self._work))
-        try:
-            script = (
-                f'debugfs -R "dump {_shell_quote(guest)} /out/file" /img 2>/dev/null'
-            )
-            self._read_from_image(self._state_img, script, out_dir, recover=True)
-            extracted = out_dir / "file"
-            if not extracted.is_file():
-                raise FileNotFoundError(f"{source_path} is not in the evidence tree")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(extracted, target)
-        finally:
-            shutil.rmtree(out_dir, ignore_errors=True)
-
-    def _image_dir_read(self, source_dir: str, target: Path) -> None:
-        assert self._work is not None and self._state_img is not None
-        guest = str(PurePosixPath("/") / str(source_dir).lstrip("/"))
-        out_dir = Path(tempfile.mkdtemp(prefix="cella-read-", dir=self._work))
-        try:
-            # A directory needs traversal, so this read mounts -- still
-            # read-only, still inside krun, still only the asked-for
-            # subtree tarred out.
-            script = (
-                "set -eu\n"
-                "mkdir -p /work/mnt\n"
-                "fuse2fs -o fakeroot,ro /img /work/mnt\n"
-                f"if [ -d /work/mnt{guest} ]; then\n"
-                f"  tar -cpf /out/dir.tar -C /work/mnt{guest} .\n"
-                "fi\n"
-                "umount /work/mnt\n"
-            )
-            self._read_from_image(self._state_img, script, out_dir, recover=True)
-            bundle = out_dir / "dir.tar"
-            target.mkdir(parents=True, exist_ok=True)
-            if not bundle.is_file():
+    def _download_dir_sync(self, source_dir: str, target_dir: Path | str) -> None:
+        if self._evidence_machine is not None:
+            target = Path(target_dir)
+            guest = str(PurePosixPath("/") / str(source_dir).lstrip("/"))
+            try:
+                cached = self._evidence_cache_dir(guest)
+            except FileNotFoundError:
                 # An absent directory downloads as empty, matching the
                 # tolerant log-collection paths in the trial flow.
+                target.mkdir(parents=True, exist_ok=True)
                 return
-            with tarfile.open(bundle, "r:") as archive:
-                for member in archive.getmembers():
-                    if not member.isfile():
-                        continue
-                    destination = target / member.name.lstrip("./")
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    handle = archive.extractfile(member)
-                    if handle is None:
-                        continue
-                    with handle, destination.open("wb") as sink:
-                        shutil.copyfileobj(handle, sink)
-        finally:
-            shutil.rmtree(out_dir, ignore_errors=True)
-
-    def _download_dir_sync(self, source_dir: str, target_dir: Path | str) -> None:
-        if self._state_img is not None:
-            self._image_dir_read(source_dir, Path(target_dir))
+            if cached.is_dir():
+                shutil.copytree(cached, target, dirs_exist_ok=True, symlinks=True)
+            else:
+                target.mkdir(parents=True, exist_ok=True)
             return
         prefix = "./" + str(PurePosixPath(source_dir)).lstrip("/")
         prefix = prefix.rstrip("/") + "/"
@@ -1588,11 +1418,15 @@ class CellaEnvironment(BaseEnvironment):
             if self._machine is not None:
                 self._retire_machine(self._machine)
                 self._machine = None
+            # The evidence machine held the trial's still disk for the
+            # post-run extracts; its life ends with the environment.
+            if self._evidence_machine is not None:
+                self._retire_machine(self._evidence_machine)
+                self._evidence_machine = None
             if delete and self._work is not None:
                 shutil.rmtree(self._work, ignore_errors=True)
                 self._work = None
                 self._base_tar = None
-                self._state_img = None
 
 
 def _flavor_name(session_id: str, cycle: int) -> str:

@@ -45,6 +45,34 @@ class ExecResult(BaseModel):
     return_code: int
 
 
+class SealedPhaseStep(BaseModel):
+    """One in-guest step of a sealed phase: command, env, user."""
+
+    command: str
+    env: dict[str, str] = {}
+    user: str | None = None
+
+
+class SealedPhaseSpec(BaseModel):
+    """One trial phase of a sealed-oneshot run, stated at bake time.
+
+    ``run_sealed_trial`` takes the whole trial as an ordered list of
+    these: the guest orchestrator runs each phase's steps in order,
+    inside one boot, under the phase's own budget. A failing step ends
+    its phase; later phases still run (the trial grades whatever the
+    payload left, exactly as the exec model did).
+    """
+
+    name: str
+    """The trial phase: ``setup``, ``agent``, ``collect``, or ``verify``."""
+
+    steps: list[SealedPhaseStep] = []
+
+    timeout_sec: float | None = None
+    """The phase budget, enforced in-guest; ``None`` means unbounded
+    within the trial's total budget."""
+
+
 class BaseEnvironment(ABC):
     """
     The containerized environment the agent interacts with.
@@ -568,6 +596,21 @@ class BaseEnvironment(ABC):
         conversion). Mounted environments (Docker on Linux) need to chown files
         written by the in-container agent user; other environments are no-ops.
         """
+
+    async def run_sealed_trial(
+        self, phases: Sequence[SealedPhaseSpec]
+    ) -> dict[str, ExecResult]:
+        """Run the whole trial as one sealed boot (``sealed_oneshot``).
+
+        Every input is already baked (uploads queued before this call
+        enter the boot layer); the guest orchestrator runs the phases
+        in order and the machine ends itself. Returns one ExecResult
+        per phase name that ran. Only environments declaring
+        ``capabilities.sealed_oneshot`` implement this.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not run sealed one-shot trials"
+        )
 
     async def set_phase(self, phase: str) -> None:
         """Announce the trial phase now beginning: ``setup``, ``agent``,

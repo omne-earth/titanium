@@ -1,4 +1,4 @@
-"""Tests for the optional task-level pre_artifacts.sh hook.
+"""Tests for the optional task-level collect.sh hook.
 
 The hook runs inside the agent environment after the agent finishes and
 immediately before artifact collection, so tasks can materialize artifacts
@@ -40,18 +40,18 @@ def _fake_trial(task_dir: Path) -> SimpleNamespace:
 @run_async
 async def test_no_script_is_a_noop(tmp_path: Path) -> None:
     trial = _fake_trial(tmp_path)
-    await Trial._run_pre_artifacts_script(trial)
+    await Trial._run_collect_script(trial)
     trial._environment.upload_file.assert_not_awaited()
     trial._environment.exec.assert_not_awaited()
 
 
 @run_async
 async def test_script_is_uploaded_and_executed(tmp_path: Path) -> None:
-    (tmp_path / "pre_artifacts.sh").write_text("#!/bin/bash\necho hi\n")
+    (tmp_path / "collect.sh").write_text("#!/bin/bash\necho hi\n")
     trial = _fake_trial(tmp_path)
-    await Trial._run_pre_artifacts_script(trial)
+    await Trial._run_collect_script(trial)
     trial._environment.upload_file.assert_awaited_once_with(
-        source_path=tmp_path / "pre_artifacts.sh",
+        source_path=tmp_path / "collect.sh",
         target_path="/tmp/.titanium-pre-artifacts.sh",
     )
     trial._environment.exec.assert_awaited_once_with(
@@ -62,15 +62,15 @@ async def test_script_is_uploaded_and_executed(tmp_path: Path) -> None:
 
 @run_async
 async def test_nonzero_exit_does_not_raise(tmp_path: Path) -> None:
-    (tmp_path / "pre_artifacts.sh").write_text("#!/bin/bash\nexit 3\n")
+    (tmp_path / "collect.sh").write_text("#!/bin/bash\nexit 3\n")
     trial = _fake_trial(tmp_path)
     trial._environment.exec.return_value = SimpleNamespace(return_code=3)
-    await Trial._run_pre_artifacts_script(trial)  # must not raise
+    await Trial._run_collect_script(trial)  # must not raise
 
 
 @run_async
 async def test_exec_exception_is_swallowed(tmp_path: Path) -> None:
-    (tmp_path / "pre_artifacts.sh").write_text("#!/bin/bash\n")
+    (tmp_path / "collect.sh").write_text("#!/bin/bash\n")
     trial = _fake_trial(tmp_path)
     trial._environment.exec.side_effect = RuntimeError("env died")
-    await Trial._run_pre_artifacts_script(trial)  # must not raise
+    await Trial._run_collect_script(trial)  # must not raise
