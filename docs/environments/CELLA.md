@@ -261,17 +261,20 @@ One member boot then runs the trial:
 3. **Collect.** `pre_artifacts.sh`, when present.
 4. **Verify.** The task's tests. The orchestrator writes each
    phase's `/titanium/result/<phase>/{rc,stdout,stderr}` as root.
-5. **Beacon.** The orchestrator's last act is one egress to a
-   reserved, granted destination. The crossing parks; the bridge
-   delivers it; titanium's engine recognizes it as the completion
-   event. The membrane carries the signal with no new cella
-   semantics — it is a crossing like any other, granted with a
-   window so it never freezes the machine. A payload that forges
-   the beacon early only truncates its own run: the results are
-   root-written, and whatever exists at extract time is the grade.
+5. **Reset.** The orchestrator's last act is `sync` then a forced
+   reset (`reboot -f`). The canonical kernel has no ACPI poweroff —
+   a halted guest leaves the VMM alive — but a CPU reset exits the
+   VMM (`cella: guest requested shutdown` in `vmm.log`). Completion
+   is therefore two host-side facts and no guest read: the VMM pid
+   is gone and no frozen `state` file exists. A reset that re-boots
+   the kernel instead (a measured rarity) re-enters the
+   orchestrator, which sees the results already written and resets
+   again. A payload that forces a reset early only truncates its
+   own run: the results are root-written, and whatever exists at
+   extract time is the grade.
 
 Budgets: the orchestrator enforces the per-phase timeouts in-guest;
-the host holds the total trial budget and a beacon-silence timeout.
+the host holds the total trial budget.
 Observability: a second unit tails the payload's output over the
 appliance wire to a titanium-side sink — mid-trial logs are judged,
 chronicled traffic, not a post-hoc download.
@@ -283,7 +286,7 @@ a trial:
 | Machine | Count | Reason |
 |---|---|---|
 | `-appliance` | 1 (pair tasks only) | holds the world leg; freezes per park, thaws per verdict, for the trial's whole life |
-| the member | 1 | the experiment: orchestrator, payload, verify, beacon |
+| the member | 1 | the experiment: orchestrator, payload, verify, reset |
 | `-extractor` | 1 per extracted directory | cella's own evidence read (§6) |
 
 Uploads enter at bake time only; there is no mid-trial upload — the
@@ -584,7 +587,7 @@ Use it for a targeted run, not a routine smoke.
   payload can influence — the same trust every rung's in-sandbox
   verification carries (a root workload owns the interpreter that
   runs the tests, on docker as much as here). The anchors stay
-  host-side: the chronicle, the beacon's judged delivery, and the
+  host-side: the chronicle, the host-observed completion, and the
   root-written results.
 * **A pure `--net none` airgap is agentless.** A real agent is baked
   into the guest and needs its inference line, so an agented task
@@ -646,10 +649,9 @@ trial (§4) enforces them in two places:
    into a sealed machine to stop one phase without ending the whole
    experiment.
 2. **Host-side, in total.** The host bounds the whole boot with the
-   phases' sum plus a fixed boot margin, and separately bounds
-   beacon silence — a guest that hangs is still ended, never a
-   leaked live machine. `CELLA_EXEC_TIMEOUT` (`config.py`) stays the
-   floor beneath tasks that declare nothing.
+   phases' sum plus a fixed boot margin — a guest that hangs is
+   still ended, never a leaked live machine. `CELLA_EXEC_TIMEOUT`
+   (`config.py`) stays the floor beneath tasks that declare nothing.
 
 The intent is unchanged: a task states its own time budget and cella
 honours it. A task that needs longer raises its `[agent]`/`[verifier]`
