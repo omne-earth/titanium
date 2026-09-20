@@ -97,12 +97,19 @@ if [[ -d "$HOME/.cella" ]]; then
   rm -rf "$HOME/.cella"
   echo "removed $HOME/.cella"
 fi
-SUBUID_START=$(awk -F: -v u="$OPERATOR" '$1==u {print $2; exit}' /etc/subuid)
-if [[ -n "$SUBUID_START" ]]; then
-  for ((uid = SUBUID_START; uid < SUBUID_START + 16; uid++)); do
-    setfacl -x "u:$uid" "$HOME" 2>/dev/null || true
-  done
-  echo "dropped $HOME traversal ACLs for sub-uids $SUBUID_START-$((SUBUID_START + 15))"
+# Drop by what is actually on $HOME, not by recomputing the range from
+# /etc/subuid: a delegation that moved since the grant would strand the
+# old entries. A numeric ACL qualifier with no passwd entry is exactly a
+# machine sub-uid (sub-uids never have passwd entries), so those are the
+# strays to remove -- named users' entries stay untouched.
+DROPPED=""
+while read -r acl_uid; do
+  if getent passwd "$acl_uid" >/dev/null; then continue; fi
+  setfacl -x "u:$acl_uid" "$HOME" 2>/dev/null || true
+  DROPPED="$DROPPED $acl_uid"
+done < <(getfacl -p "$HOME" 2>/dev/null | sed -n 's/^user:\([0-9]\{1,\}\):.*/\1/p')
+if [[ -n "$DROPPED" ]]; then
+  echo "dropped $HOME traversal ACLs for sub-uids:$DROPPED"
 fi
 CELLA_SRC="${XDG_CACHE_HOME:-$HOME/.cache}/titanium/cella-src"
 if [[ -d "$CELLA_SRC" ]]; then
