@@ -42,6 +42,32 @@ Every environment installs agents, honors per-task network allowlists, and runs 
 | **Overhead** | near-native | near-native; rootless image builds cost more — pre-load images | syscall interposition tax — syscall- and I/O-heavy workloads pay most | gvisor's tax, plus a user-mode network hop (pasta) at the host edge; pre-load images | VM boot per container, virtiofs I/O, and each guest kernel's memory footprint; pre-load images | a VM boot per command and the judge round-trip; the highest of the rungs |
 | **Pre-load images** | — | `images-vendor` / `images-restore` | — | `images-vendor` / `images-restore` | `images-vendor` / `images-restore` | — the task image becomes a rootfs golden |
 
+### Infiltration Attack Surface
+
+Infiltration is the workload attacking the host through its sandbox
+boundary. Two numbers size that risk for each environment: how much
+code the workload can push bytes at, and what account the workload
+holds if that code breaks. No layer is solid. The table counts the
+code that must have the bug, not layers assumed to hold.
+
+| Environment | Code the workload can reach | Lines | Landing zone on a win |
+|---|---|---|---|
+| `cella` | the cella VMM and the KVM ioctl surface; after boot, seccomp allowlists the run loop to `KVM_RUN` plus the freeze-path reads | **2,466 lines of Rust** (1,757 code lines; the whole cella workspace is 16,680) — measured at the pinned rev, `wc -l` on `crates/cella-vmm/src` | the machine's own sub-uid, inside a bwrap jail with user, mount, pid, ipc, uts, and cgroup namespaces unshared; its filesystem reach is one machine directory plus execute-only traversal ACLs; every network frame it sends still parks at the membrane for a named verdict |
+| `krun-podman` | the libkrun VMM and the KVM ioctl surface | ~35,000 lines of Rust and C (upstream estimate, not measured here) | the `titanium` runner uid outside the VM; the VMM ran under a confined SELinux domain and a tightened seccomp profile |
+| `gvisor-podman` | the Sentry (a userspace application kernel in Go), or the host kernel through the narrowed syscall profile the Sentry itself uses | ~250,000 lines of Go (upstream estimate, not measured here) | the `runsc` sandbox process, owned by the `titanium` runner uid, still inside the seccomp filter `runsc` installs on itself |
+| `gvisor` | the same two surfaces | the same ~250,000 | the same sandbox process — but uid 0 under `dockerd` |
+| `podman` | the host kernel, through the full syscall table under a seccomp filter | not enumerable — the kernel tree is tens of millions of lines, and the reachable slice has no stable measure | the nologin `titanium` uid: its subuid range, its container storage, trial state — no login, no sudo, no keys |
+| `docker` | the host kernel, through the same filtered syscall table | the same non-enumerable kernel slice | a uid-0 process in the initial user namespace; the daemon socket it can then reach is root-equivalent |
+
+The measured number is the argument. The code a hostile guest can
+attack on the `cella` rung is three orders of magnitude smaller than
+the kernel rungs and two smaller than the Sentry — small enough that
+one person can read all of it. Both KVM rows share one irreducible
+base: KVM itself is kernel code, but its ioctl surface is narrow and
+heavily exercised. The estimates for gVisor and libkrun come from
+their upstream trees; the cella number is measured by this
+repository's pin and moves with it.
+
 ### Network
 
 Network policy is enforced by a **per-trial egress proxy**, not by trust: an allowlist task puts the sandbox on an `internal` network whose only route out is a Squid proxy built fresh for that trial (Alpine-based, per-trial auth token, the task's domain allowlist compiled in). The sandbox reaches it by literal IP and never needs DNS; the proxy is health-gated before the agent starts, runs outside the sandbox runtime, and is verified there by the same host-side checks that verify the sandbox. Air-gapped tasks get `network_mode: none` outright — the proxy exists only when an allowlist grants egress.
