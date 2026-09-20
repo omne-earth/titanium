@@ -346,7 +346,8 @@ agent, like `smoke-krun-podman`) is separate future work.
 
 `cella inspect` is an operator verb: it boots an inspector twin with
 the rock disk read-only at `/rock` and attaches the console — which
-only the lab flavor has. It is not a programmatic extraction API.
+only the lab flavor has. The programmatic extraction verb is
+`cella extract` (below); `inspect` is for a human at a console.
 
 So collection reads the still `disk.img` directly: copy the file out
 of `machines/<vm>/` after `cella stop`, then read only the asked-for
@@ -358,16 +359,19 @@ read-only; and it recovers exactly what `inspect`'s evidence view
 exists to provide. It is a read of evidence, not a channel into
 anything.
 
-Named honestly, it is a cella-unmediated evidence read. The durable
-fix is cella-side: a programmatic verb such as
-`cella inspect <vm> --dump <guest-path>` emitting a tar stream, where
-`--dump /` is the whole rootfs. That form preserves numeric
-ownership, covers single-file reads and full-tree export with one
-flag, and would put every evidence read on cella's audit record —
-better than today, where the direct read leaves no trace in cella's
-books. The environment's `_harvest` is a one-function swap when it
-lands. Until then, the direct read stays, and mounting *into* a cella
-VM is not an alternative: cella has no host-mount device at all (by
+Named honestly, it is a cella-unmediated evidence read. Cella has
+since shipped the programmatic verb: `cella extract <machine>
+<guest-path>` streams the path out as tar on stdout, refuses a
+running machine, verifies the tar trailer (a truncated stream is an
+error, never evidence), works in the field flavor, and puts the read
+on cella's audit record (G.10). The direct read stays anyway — by
+cost, not by absence: `extract` boots a throwaway extractor machine
+per call, and `_harvest` reads many small paths per trial, so on a
+boot-per-command rung the verb multiplies a multi-second boot into
+the collection step where the direct read is one file copy. Swapping
+`_harvest` to `extract` (one call per directory, not per file) is
+the open trade if the audit-record gap ever outweighs the boots.
+Mounting *into* a cella VM is not an alternative: cella has no host-mount device at all (by
 design), its `--attach-ro` disk mechanism is not reachable from the
 CLI, and a reader VM cannot hand results back without the host
 reading a disk in the end anyway.
@@ -649,8 +653,9 @@ Use it for a targeted run, not a routine smoke.
 * **`cella.policy` is not compiled from task URLs yet.** The
   allowlist-from-URLs derivation other rungs use has no cella
   translation; dry-run collection is the current authoring path.
-* **The evidence read is cella-unmediated** (§6) until a
-  `cella inspect --dump` verb exists.
+* **The evidence read is cella-unmediated** (§6). `cella extract`
+  now covers it, but at one extractor boot per call — the direct
+  read stays until that cost is paid down or accepted.
 * **A pure `--net none` airgap is agentless.** A real agent is baked
   into the guest and needs its inference line, so an agented task
   always stands the terminated pair -- the appliance's world leg
