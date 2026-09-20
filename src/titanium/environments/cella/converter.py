@@ -53,9 +53,14 @@ from titanium.environments.cella.buildfile import (
     PreparedContext,
     prepare_build_context,
 )
-from titanium.environments.cella.flavor import (
+from titanium.environments.cella.constants import (
+    BOOT_LAYER_FIELD,
+    CONVERTER_VERSION,
     MANIFEST_NAME,
     ROOTFS_ARTIFACT_NAME,
+    ROOTFS_BUILDER_CONTAINERFILE,
+)
+from titanium.environments.cella.flavor import (
     manifest_field,
     publish_flavor,
     render_golden_json,
@@ -74,7 +79,6 @@ from titanium.environments.cella.podman import (
     untag_image,
 )
 from titanium.environments.cella.rootfs import (
-    ROOTFS_BUILDER_CONTAINERFILE,
     build_ext4,
     rootfs_builder_image_id,
     sha3_256_file,
@@ -86,21 +90,6 @@ from titanium.environments.cella.systemd_boot import (
     prepare_systemd_rootfs,
 )
 from titanium.models.agent.install import AgentInstallSpec
-
-# Bumped when a change to this pipeline could produce a different filesystem
-# from identical task inputs. Offered to the identity function as a fact;
-# whether it belongs in the cache key is that function's decision.
-CONVERTER_VERSION = "1"
-
-#: The manifest field recording which boot layer produced an artifact.
-#:
-#: Written on every publish and checked on every cache hit. The flavor name is
-#: the identity decision's to choose, and a decision that ignored the boot
-#: layer would let a changed controller binary answer from a directory built
-#: before it existed. This field closes that hole without taking the naming
-#: decision away: a hit whose layer does not match is refused rather than
-#: served.
-BOOT_LAYER_FIELD = "input_boot_layer"
 
 
 class ConversionError(RuntimeError):

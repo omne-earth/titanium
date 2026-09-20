@@ -1,7 +1,7 @@
 import json
 import shlex
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
@@ -60,10 +60,10 @@ def _iso_timestamp(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, int | float):
-        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(value, tz=UTC).isoformat()
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat()
+            return datetime.fromisoformat(value).isoformat()
         except ValueError:
             return None
     return None
@@ -559,7 +559,7 @@ class MiniSweAgent(BaseInstalledAgent):
         "https://raw.githubusercontent.com/BerriAI/litellm/main/"
         "model_prices_and_context_window.json"
     )
-    _DEFAULT_PROVIDER_DOMAINS: dict[str, list[str]] = {
+    _DEFAULT_PROVIDER_DOMAINS: ClassVar[dict[str, list[str]]] = {
         "anthropic": ["api.anthropic.com"],
         "bedrock": [".amazonaws.com"],
         "deepseek": ["api.deepseek.com"],
@@ -575,7 +575,7 @@ class MiniSweAgent(BaseInstalledAgent):
 
     def __init__(
         self,
-        cost_limit: str | int | float | None = 0,
+        cost_limit: str | float | None = 0,
         reasoning_effort: str | None = None,
         model_class: str | None = "auto",
         model_kwargs: dict[str, Any] | None = None,
@@ -818,7 +818,6 @@ mini-swe-agent --help
         except Exception as e:
             self.logger.debug(f"Failed to convert trajectory to ATIF format: {e}")
 
-    @with_prompt_template
     def sealed_command_spec(
         self, instruction: str, environment: BaseEnvironment
     ) -> SealedCommandSpec | None:
@@ -826,7 +825,9 @@ mini-swe-agent --help
         config write, then the agent invocation — the same commands
         :meth:`run` execs, stated up front. The install itself is
         baked into the image (``preinstall_agents``), so no install
-        steps appear here."""
+        steps appear here. The prompt template renders here explicitly:
+        the ``with_prompt_template`` decorator is async-only."""
+        instruction = self.render_instruction(instruction)
         augmented_instruction = self._augment_instruction(instruction)
         escaped_instruction = shlex.quote(augmented_instruction)
         run_model_name = self._run_model_name
@@ -912,6 +913,7 @@ mini-swe-agent --help
             env["OPENAI_BASE_URL"] = self._get_env("OPENAI_BASE_URL") or ""
         return env
 
+    @with_prompt_template
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:

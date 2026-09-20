@@ -33,7 +33,6 @@ added to it.
 """
 
 from titanium.environments.cella.boot_layer import (
-    MAX_GUEST_FILE_MODE,
     BootEntry,
     BootLayer,
     BootLayerError,
@@ -43,14 +42,23 @@ from titanium.environments.cella.boot_layer import (
     validate_boot_layer,
 )
 from titanium.environments.cella.buildfile import (
-    BUILD_FILE_NAMES,
     BuildFileError,
     PreparedContext,
     discover_build_file,
     prepare_build_context,
 )
-from titanium.environments.cella.converter import (
+from titanium.environments.cella.constants import (
+    BUILD_FILE_NAMES,
     CONVERTER_VERSION,
+    MANIFEST_NAME,
+    MAX_GUEST_FILE_MODE,
+    ROOTFS_ARTIFACT_NAME,
+    ROOTFS_BUILDER_BASE_IMAGE,
+    ROOTFS_BUILDER_IMAGE,
+    STRATEGY_ALREADY_SYSTEMD,
+    SYSTEMD_BINARY_CANDIDATES,
+)
+from titanium.environments.cella.converter import (
     BuildFacts,
     ComputeFlavorIdentity,
     ConversionResult,
@@ -59,8 +67,6 @@ from titanium.environments.cella.converter import (
     convert_task_to_rootfs_flavor,
 )
 from titanium.environments.cella.flavor import (
-    MANIFEST_NAME,
-    ROOTFS_ARTIFACT_NAME,
     FlavorIntegrityError,
     ManifestFieldError,
     cella_home,
@@ -71,16 +77,12 @@ from titanium.environments.cella.flavor import (
 from titanium.environments.cella.image_config import ImageRecord, parse_image_record
 from titanium.environments.cella.podman import PodmanError
 from titanium.environments.cella.rootfs import (
-    ROOTFS_BUILDER_BASE_IMAGE,
-    ROOTFS_BUILDER_IMAGE,
     build_ext4,
     ensure_rootfs_builder_image,
     rootfs_builder_image_id,
     sha3_256_file,
 )
 from titanium.environments.cella.systemd_boot import (
-    STRATEGY_ALREADY_SYSTEMD,
-    SYSTEMD_BINARY_CANDIDATES,
     BuildRun,
     GuestOsInfo,
     PlanSystemdProvisioning,

@@ -33,20 +33,19 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
+from titanium.environments.cella.constants import (
+    FLAVOR_NAME_MAX,
+    MANIFEST_MODE,
+    MANIFEST_NAME,
+    ROOTFS_ARTIFACT_NAME,
+    ROOTFS_AXIS,
+    STAGING_PREFIX,
+)
 from titanium.environments.cella.rootfs import sha3_256_file
 
 # Cella's names, not Titanium's.
-ROOTFS_AXIS = "rootfs"
-ROOTFS_ARTIFACT_NAME = "rootfs.ext4"
-MANIFEST_NAME = "golden.json"
 
-# Cella writes its manifests read-only: "the manifest states what was built,
-# and nothing edits that statement" (cella_libs::golden).
-MANIFEST_MODE = 0o444
 
-# Staging directories share the flavor store's filesystem so publication is a
-# rename. The leading dot keeps a half-built tree from reading as a flavor.
-_STAGING_PREFIX = ".tmp-"
 
 # A flavor name is a path component and a manifest value at once. This is the
 # floor both roles require -- it constrains the name, it does not choose one.
@@ -54,8 +53,6 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SAFE_FIELD_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SAFE_FIELD_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]*$")
 
-# NAME_MAX. Not a policy, the filesystem's own limit.
-_NAME_MAX = 255
 
 
 class ManifestFieldError(ValueError):
@@ -82,16 +79,16 @@ def cella_home() -> Path:
 
 def validate_flavor_name(flavor: str) -> str:
     """Reject a flavor name that cannot be a directory or a manifest value."""
-    if not flavor or len(flavor.encode()) > _NAME_MAX:
+    if not flavor or len(flavor.encode()) > FLAVOR_NAME_MAX:
         raise ManifestFieldError(
-            f"Flavor name must be 1..{_NAME_MAX} bytes, got {len(flavor.encode())}."
+            f"Flavor name must be 1..{FLAVOR_NAME_MAX} bytes, got {len(flavor.encode())}."
         )
     if not _SAFE_NAME.match(flavor):
         raise ManifestFieldError(
             f"Flavor name {flavor!r} must start alphanumeric and hold only "
             "letters, digits, '.', '_', and '-'."
         )
-    if flavor in (".", "..") or flavor.startswith(_STAGING_PREFIX):
+    if flavor in (".", "..") or flavor.startswith(STAGING_PREFIX):
         raise ManifestFieldError(f"Flavor name {flavor!r} is reserved.")
     return flavor
 
@@ -280,7 +277,7 @@ def staging_flavor_dir(*, home: Path | None = None) -> Iterator[Path]:
 
     root = (home or cella_home()) / ROOTFS_AXIS
     root.mkdir(parents=True, exist_ok=True)
-    staging = root / f"{_STAGING_PREFIX}{uuid.uuid4().hex}"
+    staging = root / f"{STAGING_PREFIX}{uuid.uuid4().hex}"
     staging.mkdir()
     try:
         yield staging

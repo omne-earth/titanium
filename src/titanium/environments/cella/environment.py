@@ -95,7 +95,6 @@ from titanium.environments.capabilities import (
     EnvironmentCapabilities,
     EnvironmentResourceCapabilities,
 )
-from titanium.environments.cella import config
 from titanium.environments.cella.boot_layer import (
     BootEntry,
     BootLayer,
@@ -106,9 +105,17 @@ from titanium.environments.cella.buildfile import (
     discover_build_file,
     prepare_build_context,
 )
+from titanium.environments.cella.constants import (
+    BOOT_MARGIN_SEC,
+    CELLA_EXEC_TIMEOUT,
+    CELLA_VERB_TIMEOUT_SEC,
+    ENGINE_LOG_DRAIN_SEC,
+    POWEROFF_GRACE_SEC,
+    ROOTFS_ARTIFACT_NAME,
+    RUNNER_DIR,
+)
 from titanium.environments.cella.engine import bound_port, build_judge, serve
 from titanium.environments.cella.flavor import (
-    ROOTFS_ARTIFACT_NAME,
     cella_home,
     render_golden_json,
     rootfs_flavor_dir,
@@ -126,7 +133,6 @@ from titanium.environments.cella.podman import (
 from titanium.environments.cella.policy import Policy
 from titanium.environments.cella.rootfs import (
     build_ext4,
-    place_into_ext4,
     sha3_256_file,
 )
 from titanium.environments.cella.systemd_boot import (
@@ -139,20 +145,7 @@ from titanium.environments.cella.terminator import (
     member_prelude,
     member_trust_entries,
     pair_ca_path,
-    terminator_conf_entry,
-    terminator_golden_rootfs,
 )
-
-# The guest-side scratch the runner owns. Deliberately one directory:
-# excluded from the state carried to the next cycle, so a cycle's
-# result files never masquerade as task state.
-_RUNNER_DIR = "/titanium"
-
-# How long past the exec timeout the guest gets to boot and halt.
-_BOOT_MARGIN_SEC = config.BOOT_MARGIN_SEC
-
-# How often the engine-log drainer writes its batch to disk.
-_ENGINE_LOG_DRAIN_SEC = 1.0
 
 
 class _BufferedEngineLog(logging.Handler):
@@ -171,7 +164,10 @@ class _BufferedEngineLog(logging.Handler):
 
     def __init__(self, path: Path):
         super().__init__()
-        self._file = open(path, "a", encoding="utf-8")
+        # The path, not a held handle: each drain opens, appends the
+        # batch, and closes -- one open per second costs nothing, and
+        # no descriptor outlives its write.
+        self._path = path
         self._buf: list[logging.LogRecord] = []
         self._lock = threading.Lock()
         self._closed = False
@@ -185,24 +181,23 @@ class _BufferedEngineLog(logging.Handler):
             if not self._closed:
                 self._buf.append(record)
 
+    def _drain(self) -> None:
+        pending, self._buf = self._buf, []
+        if not pending:
+            return
+        with self._path.open("a", encoding="utf-8") as sink:
+            sink.write("".join(self.format(r) + "\n" for r in pending))
+
     def flush(self) -> None:
         with self._lock:
-            if self._closed or not self._buf:
+            if self._closed:
                 return
-            pending, self._buf = self._buf, []
-            self._file.write("".join(self.format(r) + "\n" for r in pending))
-            self._file.flush()
+            self._drain()
 
     def close(self) -> None:
         with self._lock:
             if not self._closed:
-                if self._buf:
-                    self._file.write(
-                        "".join(self.format(r) + "\n" for r in self._buf)
-                    )
-                    self._file.flush()
-                self._buf = []
-                self._file.close()
+                self._drain()
                 self._closed = True
         super().close()
 
@@ -345,7 +340,7 @@ class CellaEnvironment(BaseEnvironment):
 
     # ------------------------------------------------------------- verbs
 
-    def _cella(self, *args: str, timeout_sec: float | None = config.CELLA_VERB_TIMEOUT_SEC) -> str:
+    def _cella(self, *args: str, timeout_sec: float | None = CELLA_VERB_TIMEOUT_SEC) -> str:
         # Inherit cella's own environment untouched -- in particular
         # never set CELLA_THAW_PREFAULT. Its default (deep) re-warms all
         # guest memory on a thaw, which is what keeps frozen time truly
@@ -515,7 +510,7 @@ class CellaEnvironment(BaseEnvironment):
                     run_as = self._image_config.get("User") or None
                 if run_as in (None, 0, "0"):
                     run_as = "root"
-                step_path = f"{_RUNNER_DIR}/steps/{phase.name}-{index}.sh"
+                step_path = f"{RUNNER_DIR}/steps/{phase.name}-{index}.sh"
                 entries.append(
                     GuestFile(
                         path=step_path,
@@ -544,9 +539,9 @@ class CellaEnvironment(BaseEnvironment):
             phase_script_lines.append(f"echo 0 > $R/{phase.name}/rc")
             entries.append(
                 GuestFile(
-                    path=f"{_RUNNER_DIR}/phases/{phase.name}.sh",
+                    path=f"{RUNNER_DIR}/phases/{phase.name}.sh",
                     contents=(
-                        "R=" + _RUNNER_DIR + "/result\n"
+                        "R=" + RUNNER_DIR + "/result\n"
                         + "\n".join(phase_script_lines)
                         + "\n"
                     ).encode(),
@@ -563,7 +558,7 @@ class CellaEnvironment(BaseEnvironment):
             phase_lines.append(
                 f"mkdir -p $R/{phase.name}\n"
                 f"touch $R/{phase.name}/stdout $R/{phase.name}/stderr\n"
-                f"{budget}bash {_RUNNER_DIR}/phases/{phase.name}.sh\n"
+                f"{budget}bash {RUNNER_DIR}/phases/{phase.name}.sh\n"
                 f"[ -f $R/{phase.name}/rc ] || echo 124 > $R/{phase.name}/rc"
             )
         wire_prelude = member_prelude("eth0") if self._paired else ""
@@ -572,7 +567,7 @@ class CellaEnvironment(BaseEnvironment):
             "# Generated by titanium: the sealed one-shot trial's state\n"
             "# machine. One boot runs every phase; the forced reset is\n"
             "# the completion signal (reboot=k exits the VMM).\n"
-            f"R={_RUNNER_DIR}/result\n"
+            f"R={RUNNER_DIR}/result\n"
             "end() { sync; reboot -f; echo 1 > /proc/sys/kernel/sysrq; "
             "echo b > /proc/sysrq-trigger; }\n"
             'if [ -f "$R/done" ]; then end; fi\n'
@@ -588,13 +583,13 @@ class CellaEnvironment(BaseEnvironment):
             "[Service]\n"
             "Type=oneshot\n"
             "RemainAfterExit=yes\n"
-            f"ExecStart=/bin/bash {_RUNNER_DIR}/orchestrator.sh\n\n"
+            f"ExecStart=/bin/bash {RUNNER_DIR}/orchestrator.sh\n\n"
             "[Install]\n"
             "WantedBy=multi-user.target\n"
         )
         entries.append(
             GuestFile(
-                path=f"{_RUNNER_DIR}/orchestrator.sh",
+                path=f"{RUNNER_DIR}/orchestrator.sh",
                 contents=orchestrator.encode(),
                 mode=0o755,
                 uid=0,
@@ -672,8 +667,8 @@ class CellaEnvironment(BaseEnvironment):
             # the config ceiling standing in per phase that declared
             # none, plus one boot margin.
             budget = (
-                sum(p.timeout_sec or config.CELLA_EXEC_TIMEOUT for p in phases)
-                + _BOOT_MARGIN_SEC
+                sum(p.timeout_sec or CELLA_EXEC_TIMEOUT for p in phases)
+                + BOOT_MARGIN_SEC
             )
             self._wait_for_reset(name, time.monotonic() + budget)
         finally:
@@ -725,10 +720,10 @@ class CellaEnvironment(BaseEnvironment):
         assert self._work is not None
         out_dir = Path(tempfile.mkdtemp(prefix="cella-results-", dir=self._work))
         try:
-            self._extract_dir(name, f"{_RUNNER_DIR}/result", out_dir)
+            result_root = self._extract_dir(name, f"{RUNNER_DIR}/result", out_dir)
             results: dict[str, ExecResult] = {}
             for phase in phases:
-                phase_dir = out_dir / phase.name
+                phase_dir = result_root / phase.name
                 if not phase_dir.is_dir():
                     continue
                 try:
@@ -768,10 +763,9 @@ class CellaEnvironment(BaseEnvironment):
         host = Path(
             tempfile.mkdtemp(prefix="cella-evidence-", dir=self._work)
         )
-        self._extract_dir(self._evidence_machine, root, host)
-        self._evidence_cache[root] = host
-        inner = host / guest_dir[len(root) :].lstrip("/")
-        return inner
+        extracted = self._extract_dir(self._evidence_machine, root, host)
+        self._evidence_cache[root] = extracted
+        return extracted / guest_dir[len(root) :].lstrip("/")
 
     def _evidence_file_read(self, source_path: str, target: Path) -> None:
         """One file out of the evidence cache (extracted per directory,
@@ -785,11 +779,14 @@ class CellaEnvironment(BaseEnvironment):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(extracted, target)
 
-    def _extract_dir(self, name: str, guest_path: str, target: Path) -> None:
+    def _extract_dir(self, name: str, guest_path: str, target: Path) -> Path:
         """``cella extract``: the machine's own evidence verb. The tar
         arrives trailer-verified on stdout; extraction filters every
         member (stdlib ``data`` filter), so a hostile archive cannot
-        write outside *target*."""
+        write outside *target*. The guest tars from the filesystem
+        root (`tar -C /rock .<path>`), so members carry the full guest
+        path; the returned path is the extracted *guest_path* inside
+        *target*."""
         target.mkdir(parents=True, exist_ok=True)
         completed = subprocess.run(
             [cella_bin(), "extract", name, guest_path],
@@ -804,6 +801,7 @@ class CellaEnvironment(BaseEnvironment):
             )
         with tarfile.open(fileobj=io.BytesIO(completed.stdout), mode="r:") as archive:
             archive.extractall(target, filter="data")
+        return target / str(guest_path).strip("/")
 
     def _bridge_bin(self) -> Path:
         return Path(cella_bin()).parent / "cella-engine"
@@ -926,7 +924,7 @@ class CellaEnvironment(BaseEnvironment):
         writes happen here, never on the decide hot path. `wait` returns
         True only when stop is set, so teardown ends the loop at once; the
         final flush is each sink's own close()."""
-        while not self._log_drain_stop.wait(_ENGINE_LOG_DRAIN_SEC):
+        while not self._log_drain_stop.wait(ENGINE_LOG_DRAIN_SEC):
             for sink in list(self._engine_log_sinks.values()):
                 sink.flush()
 
@@ -1023,7 +1021,7 @@ class CellaEnvironment(BaseEnvironment):
                 self.logger.debug("cella: could not preserve edge.log: %s", exc)
 
     def _wire_name(self) -> str:
-        return f"{_flavor_name(self.session_id, 0)[:40].rstrip('-')}-line"
+        return f"{_flavor_name(self.session_id)[:40].rstrip('-')}-line"
 
     def _task_net(self) -> str:
         """The member (task) machine's --net. A paired member is
@@ -1038,14 +1036,18 @@ class CellaEnvironment(BaseEnvironment):
     def _ensure_appliance(self) -> None:
         """Stand the terminator appliance for the trial, once.
 
-        The appliance is cella's terminator golden with titanium's
-        constant ``/etc/cella-terminator.conf`` injected: --net
-        world,wire, its world membrane judged by titanium's engine
-        serving the appliance border (the world leg, by name --
-        terminator.py). It runs for the trial's whole life; a
-        background thread thaws it through every park (the park is the
-        freeze, and the appliance parks on every DNS and world flow it
-        forwards -- standing memory keeps the hot paths live).
+        The appliance boots cella's terminator golden **directly** --
+        no titanium flavor, no file injected: the golden's own init
+        writes ``/etc/cella-terminator.conf`` at boot, and its
+        defaults (wire 10.77.0.1, resolver 9.9.9.9, listen 443,80) are
+        exactly the constants terminator.py grants against. Titanium
+        edits no filesystem anywhere on this rung. --net world,wire,
+        the world membrane judged by titanium's engine serving the
+        appliance border (the world leg, by name -- terminator.py). It
+        runs for the trial's whole life; a background thread thaws it
+        through every park (the park is the freeze, and the appliance
+        parks on every DNS and world flow it forwards -- standing
+        memory keeps the hot paths live).
         """
         if self._appliance is not None:
             return
@@ -1056,38 +1058,7 @@ class CellaEnvironment(BaseEnvironment):
                 f"no pair CA at {ca_path}: the terminator golden is not "
                 "built (re-run `make .cella`)"
             )
-        # Titanium's appliance flavor: a copy of the terminator golden
-        # with the conf injected. The conf is constant, so this is a
-        # per-trial rebuild of one fixed template.
-        name = f"{_flavor_name(self.session_id, 0)[:33].rstrip('-')}-appliance"
-        with staging_flavor_dir(home=None) as staging:
-            artifact = staging / ROOTFS_ARTIFACT_NAME
-            shutil.copyfile(terminator_golden_rootfs(Path.home()), artifact)
-            place_into_ext4(
-                image=artifact,
-                boot_layer=BootLayer(entries=(terminator_conf_entry(),)),
-                timeout_sec=self.task_env_config.build_timeout_sec,
-                # The golden is host-built by `make .cella`, not guest
-                # bytes: the default runtime is enough, and krun is not
-                # a dependency of this rung.
-                runtime=None,
-            )
-            write_manifest(
-                staging,
-                render_golden_json(
-                    flavor=name,
-                    sha3_256=sha3_256_file(artifact),
-                    size_bytes=artifact.stat().st_size,
-                    built_epoch=int(time.time()),
-                    extra_fields={},
-                ),
-            )
-            destination = rootfs_flavor_dir(name)
-            if destination.exists():
-                shutil.rmtree(destination)
-            os.rename(staging, destination)
-            staging.mkdir(exist_ok=True)
-
+        name = f"{_flavor_name(self.session_id)[:33].rstrip('-')}-appliance"
         # Idempotent create: a trial-level retry regenerates this exact
         # appliance name (per session, no cycle) while the prior
         # attempt's may linger. Clear it first.
@@ -1098,7 +1069,7 @@ class CellaEnvironment(BaseEnvironment):
             "--kernel",
             "canonical",
             "--rootfs",
-            name,
+            "terminator",
             "--mem-mb",
             "512",
             "--net",
@@ -1159,9 +1130,8 @@ class CellaEnvironment(BaseEnvironment):
         self._preserve_chronicle(self._appliance)
         self._preserve_edge_log(self._appliance)
         self._retire_machine(self._appliance)
-        flavor_dir = rootfs_flavor_dir(self._appliance)
-        if flavor_dir.exists():
-            shutil.rmtree(flavor_dir, ignore_errors=True)
+        # No flavor to clean: the appliance boots the terminator golden
+        # directly, and the golden belongs to `make .cella`, not a trial.
         self._appliance = None
 
     async def set_phase(self, phase: str) -> None:
@@ -1172,7 +1142,7 @@ class CellaEnvironment(BaseEnvironment):
 
     def _publish_cycle_flavor(self, boot_layer: BootLayer) -> str:
         assert self._work is not None
-        flavor = _flavor_name(self.session_id, self._cycle)
+        flavor = _flavor_name(self.session_id)
         if self._phase:
             flavor = f"{flavor}-{self._phase}"
         size_bytes = (self._effective_storage_mb or 5120) * (1 << 20)
@@ -1211,7 +1181,7 @@ class CellaEnvironment(BaseEnvironment):
 
     # How often the live disk is probed for the result, and the grace
     # the guest gets to finish its poweroff after the result appears.
-    _POWEROFF_GRACE_SEC = config.POWEROFF_GRACE_SEC
+    _POWEROFF_GRACE_SEC = POWEROFF_GRACE_SEC
 
     def _vmm_alive(self, name: str) -> bool:
         try:
@@ -1423,22 +1393,29 @@ class CellaEnvironment(BaseEnvironment):
             if self._evidence_machine is not None:
                 self._retire_machine(self._evidence_machine)
                 self._evidence_machine = None
-            if delete and self._work is not None:
-                shutil.rmtree(self._work, ignore_errors=True)
+            # The work dir (cella-env-<id>/ in the trial dir) is part of
+            # the trial's record and survives teardown: the build
+            # context, the base tar, and the extracted evidence caches
+            # say what the machine was made from and what came out.
+            if delete:
                 self._work = None
                 self._base_tar = None
 
 
-def _flavor_name(session_id: str, cycle: int) -> str:
+def _flavor_name(session_id: str) -> str:
     """A name valid as both a flavor and a machine name.
 
     The machine name is the stricter contract: cella accepts only
-    lowercase letters, digits, and dashes there, and the cycle's
-    machine is named after its flavor. Runs of anything else collapse
-    to one dash so two session ids cannot alias by punctuation alone.
+    lowercase letters, digits, and dashes there, at most 64 of them,
+    and `cella extract` appends `-extractor` (10 more) to name its
+    twin. One boot runs the whole trial, so the session id alone
+    names it: no harness prefix, no cycle counter. The session cap of
+    40 plus the longest phase suffix and the extractor twin stays
+    under cella's 64. Runs of anything else collapse to one dash so
+    two session ids cannot alias by punctuation alone.
     """
     safe = re.sub(r"[^a-z0-9]+", "-", session_id.lower())
-    return f"titanium-{safe[:40].strip('-') or 'trial'}-c{cycle:04d}"
+    return safe[:40].strip("-") or "trial"
 
 
 def _shell_quote(value: str) -> str:

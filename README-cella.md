@@ -34,10 +34,9 @@ multi-step work each cause their own boots (§4).
 ├── cella-chronicle/     # cella's tamper-evident record, one folder per machine (§5)
 ├── cella-engine/        # titanium's judge, one folder per machine (§6)
 ├── cella-policy/        # the composed borders, as enforced (§7)
-├── cella-env-<id>/      # work area: build context, rootfs tars, freeze
-│                        #   states. It exists while the trial runs. A clean
-│                        #   teardown removes it. It stays when a trial dies.
-│                        #   Its presence in a finished trial is a symptom.
+├── cella-env-<id>/      # work area, kept as part of the record: the build
+│                        #   context, the base tar the machine was made from,
+│                        #   and the extracted evidence caches.
 ├── verifier/            # reward.txt, test-stdout.txt, ctrf.json
 ├── config.json          # the trial's full configuration
 ├── result.json          # reward, timings, exception info
@@ -246,4 +245,4 @@ in the task file. Do not add it.
 | Why is it slow? | the `host_ns` gaps in `ledger.txt` (~1 ms is healthy; ~200 ms is a stale bridge), and whether `membrane-memory.txt` is present |
 | Why did it wedge? | the tail of the appliance's `vmm.log` (a freeze-thaw storm? a park with no verdict?), then `exception.txt` |
 | Did the agent run at all? | the `agent/` contents (§3), then `audit.txt` in the `-agent` machines |
-| A finished trial has `cella-env-<id>/` | the trial died before teardown — its `context/`, rootfs tars, and freeze states are the material for the post-mortem |
+| What was the machine made from? | `cella-env-<id>/` — the build context and the base tar, kept for every trial |

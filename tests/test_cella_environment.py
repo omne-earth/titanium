@@ -39,8 +39,8 @@ import tarfile
 from pathlib import Path
 
 import pytest
-from titanium.environments.base import SealedPhaseSpec, SealedPhaseStep
 
+from titanium.environments.base import SealedPhaseSpec, SealedPhaseStep
 from titanium.environments.cella.environment import (
     CellaEnvironment,
     _flavor_name,
@@ -101,14 +101,19 @@ def test_dry_run_accepts_the_string_forms(tmp_path):
     assert env._policy_path() == environment_dir / "cella.policy"
 
 
-def test_flavor_names_are_safe_and_distinct():
-    name = _flavor_name("Task__Trial!weird name", 3)
+def test_flavor_names_are_safe_and_within_the_extractor_budget():
+    name = _flavor_name("Task__Trial!weird name")
     # The machine-name contract is the strict one: lowercase letters,
-    # digits, and dashes only.
-    assert name == "titanium-task-trial-weird-name-c0003"
+    # digits, and dashes only. No harness prefix, no cycle counter:
+    # one boot runs the whole trial, so the session id alone names it.
+    assert name == "task-trial-weird-name"
     assert validate_flavor_name(name) == name
     assert all(c.islower() or c.isdigit() or c == "-" for c in name)
-    assert _flavor_name("t", 1) != _flavor_name("t", 2)
+    # cella caps machine names at 64 and `cella extract` appends
+    # `-extractor` (10); the longest name this can produce -- the
+    # 40-char session cap plus the `-trial` phase suffix -- must fit.
+    longest = _flavor_name("x" * 100) + "-trial"
+    assert len(longest) + len("-extractor") <= 64
 
 
 @pytest.mark.asyncio
@@ -387,25 +392,28 @@ async def test_chronicle_preservation_skips_absent_files(tmp_path, monkeypatch):
 # appliance, replacing the tinyproxy router.
 # ---------------------------------------------------------------------------
 
+from titanium.environments.cella import constants as C
 from titanium.environments.cella import terminator as term
 
 
-def test_the_terminator_conf_is_constant_and_complete():
-    conf = term.terminator_conf_text()
-    assert f"wire_ip={term.APPLIANCE_WIRE_ADDRESS}" in conf
-    assert f"upstream_dns={term.UPSTREAM_DNS}" in conf
-    assert "listen=443,80" in conf
-    entry = term.terminator_conf_entry()
-    assert entry.path == "/etc/cella-terminator.conf"
-    assert entry.contents.decode() == conf
+def test_the_constants_match_the_goldens_boot_defaults():
+    # The appliance boots the terminator golden directly; its init
+    # writes /etc/cella-terminator.conf at boot from these defaults
+    # (cella scripts/build/rootfs-terminator.sh). Titanium injects
+    # nothing -- these constants must equal the golden's defaults, or
+    # the borders titanium composes judge a different appliance than
+    # the one that boots.
+    assert C.APPLIANCE_WIRE_ADDRESS == "10.77.0.1"
+    assert C.UPSTREAM_DNS == "9.9.9.9"
+    assert tuple(C.LISTEN_PORTS) == (443, 80)
 
 
 def test_member_trust_bakes_the_ca_and_points_the_resolver():
     entries = {e.path: e for e in term.member_trust_entries(b"PAIRCA")}
-    assert entries[term.MEMBER_CA_PATH].contents == b"PAIRCA"
-    assert entries[term.MEMBER_CA_PATH].mode == 0o444
+    assert entries[C.MEMBER_CA_PATH].contents == b"PAIRCA"
+    assert entries[C.MEMBER_CA_PATH].mode == 0o444
     resolv = entries["/etc/resolv.conf"].contents.decode()
-    assert f"nameserver {term.APPLIANCE_WIRE_ADDRESS}\n" in resolv
+    assert f"nameserver {C.APPLIANCE_WIRE_ADDRESS}\n" in resolv
     # Patience past the appliance's first-crossing freeze, or the lookup
     # times out before the frozen reply is thawed.
     assert "timeout:30" in resolv
@@ -415,14 +423,14 @@ def test_member_prelude_trusts_the_pair_and_pins_the_reply_window():
     prelude = term.member_prelude("eth0")
     assert f"ip addr replace {term.MEMBER_WIRE_ADDRESS}/24 dev eth0" in prelude
     # The pair CA is folded into the system bundle the native clients read.
-    assert f"cat {term.MEMBER_CA_PATH} >> {term.SYSTEM_CA_BUNDLE}" in prelude
+    assert f"cat {C.MEMBER_CA_PATH} >> {C.SYSTEM_CA_BUNDLE}" in prelude
     # And Python's TLS is pointed at that bundle, so the agent's certifi-based
     # inference client trusts the appliance's minted leaf, not just curl/git.
-    assert f"export SSL_CERT_FILE={term.SYSTEM_CA_BUNDLE}" in prelude
-    assert f"export REQUESTS_CA_BUNDLE={term.SYSTEM_CA_BUNDLE}" in prelude
+    assert f"export SSL_CERT_FILE={C.SYSTEM_CA_BUNDLE}" in prelude
+    assert f"export REQUESTS_CA_BUNDLE={C.SYSTEM_CA_BUNDLE}" in prelude
     # The ephemeral range is pinned to the appliance's granted reply window.
     assert (
-        f"echo '{term.REPLY_PORT_LOW} {term.REPLY_PORT_HIGH}' "
+        f"echo '{C.REPLY_PORT_LOW} {C.REPLY_PORT_HIGH}' "
         "> /proc/sys/net/ipv4/ip_local_port_range" in prelude
     )
 
@@ -430,7 +438,7 @@ def test_member_prelude_trusts_the_pair_and_pins_the_reply_window():
 def test_member_policy_reaches_only_the_appliance():
     policy = Policy.parse(term.member_policy_text())
     lines = {g.line() for g in policy.grants}
-    gw = term.APPLIANCE_WIRE_ADDRESS
+    gw = C.APPLIANCE_WIRE_ADDRESS
     # Every member hop is 24h: the plumbing to the appliance should never
     # re-freeze mid-run (the window governs freeze frequency, not reach).
     assert f"release outgoing {gw}:443/tcp (keep_open=24h) (skip_freeze=true)" in lines
@@ -450,9 +458,9 @@ def test_appliance_border_judges_the_world_by_name():
     assert ("astral.sh", 443) in host_grants
     # The upstream resolver and the member's reply window are present.
     ips = {(g.ip, g.port, g.proto) for g in policy.grants if not g.host}
-    assert (term.UPSTREAM_DNS, 53, 17) in ips
-    assert (term.MEMBER_WIRE_ADDRESS, term.REPLY_PORT_LOW, 6) in ips
-    assert (term.MEMBER_WIRE_ADDRESS, term.REPLY_PORT_HIGH, 17) in ips
+    assert (C.UPSTREAM_DNS, 53, 17) in ips
+    assert (term.MEMBER_WIRE_ADDRESS, C.REPLY_PORT_LOW, 6) in ips
+    assert (term.MEMBER_WIRE_ADDRESS, C.REPLY_PORT_HIGH, 17) in ips
 
 
 def test_appliance_border_parses_with_no_hosts():

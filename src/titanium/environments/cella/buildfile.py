@@ -28,13 +28,11 @@ from titanium.environments.agent_setup import (
     qualify_dockerfile_froms,
     write_agent_dockerfile,
 )
+from titanium.environments.cella.constants import (
+    BUILD_FILE_NAMES,
+    STAGED_BUILD_FILE_NAME,
+)
 from titanium.models.agent.install import AgentInstallSpec
-
-# Podman accepts either name. A task ships one.
-BUILD_FILE_NAMES = ("Dockerfile", "Containerfile")
-
-# The name every staged context uses, whatever the task called it.
-STAGED_BUILD_FILE_NAME = "Dockerfile"
 
 
 class BuildFileError(ValueError):

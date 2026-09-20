@@ -5,10 +5,9 @@ import logging
 import shlex
 import shutil
 import traceback
-from collections.abc import Sequence
-from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from tenacity import (
     retry,
@@ -18,8 +17,11 @@ from tenacity import (
 )
 
 from titanium.agents.installed.base import BaseInstalledAgent, NonZeroAgentExitCodeError
-from titanium.environments.base import SealedPhaseSpec, SealedPhaseStep
-from titanium.environments.base import HealthcheckError
+from titanium.environments.base import (
+    HealthcheckError,
+    SealedPhaseSpec,
+    SealedPhaseStep,
+)
 from titanium.environments.factory import EnvironmentFactory
 from titanium.models.agent.context import AgentContext
 from titanium.models.task.config import (
@@ -50,13 +52,13 @@ from titanium.models.trial.result import (
 )
 from titanium.models.verifier.result import VerifierResult
 from titanium.trial.artifact_handler import ArtifactHandler
-from titanium.trial.hooks import TrialEvent, TrialHookEvent
 from titanium.trial.execution import (
     AgentSetupTimeoutError,
     AgentTimeoutError,
     EnvironmentStartTimeoutError,
     TrialExecution,
 )
+from titanium.trial.hooks import TrialEvent, TrialHookEvent
 from titanium.utils.logger import logger
 from titanium.verifier.verifier import Verifier
 
@@ -287,7 +289,7 @@ class Trial:
         await self._invoke_hooks(TrialEvent.ENVIRONMENT_START)
 
         self.result.environment_setup = TimingInfo(
-            started_at=datetime.now(timezone.utc)
+            started_at=datetime.now(UTC)
         )
 
         try:
@@ -295,20 +297,20 @@ class Trial:
                 force_build=self.config.environment.force_build
             )
         finally:
-            self.result.environment_setup.finished_at = datetime.now(timezone.utc)
+            self.result.environment_setup.finished_at = datetime.now(UTC)
 
     async def _setup_agent(self) -> None:
-        self.result.agent_setup = TimingInfo(started_at=datetime.now(timezone.utc))
+        self.result.agent_setup = TimingInfo(started_at=datetime.now(UTC))
         try:
             await self._execution.setup_agent()
         finally:
-            self.result.agent_setup.finished_at = datetime.now(timezone.utc)
+            self.result.agent_setup.finished_at = datetime.now(UTC)
 
     async def _execute_agent(self) -> None:
         await self._environment.set_phase("agent")
         await self._invoke_hooks(TrialEvent.AGENT_START)
 
-        self.result.agent_execution = TimingInfo(started_at=datetime.now(timezone.utc))
+        self.result.agent_execution = TimingInfo(started_at=datetime.now(UTC))
 
         try:
             self.result.agent_result = AgentContext()
@@ -318,7 +320,7 @@ class Trial:
                 context=self.result.agent_result,
             )
         finally:
-            self.result.agent_execution.finished_at = datetime.now(timezone.utc)
+            self.result.agent_execution.finished_at = datetime.now(UTC)
 
     async def _run_sealed(self) -> None:
         """The sealed one-shot flow (``capabilities.sealed_oneshot``).
@@ -394,12 +396,12 @@ class Trial:
             )
         await env.set_phase("trial")
         await self._invoke_hooks(TrialEvent.AGENT_START)
-        self.result.agent_execution = TimingInfo(started_at=datetime.now(timezone.utc))
+        self.result.agent_execution = TimingInfo(started_at=datetime.now(UTC))
         self.result.agent_result = AgentContext()
         try:
             results = await env.run_sealed_trial(phases)
         finally:
-            self.result.agent_execution.finished_at = datetime.now(timezone.utc)
+            self.result.agent_execution.finished_at = datetime.now(UTC)
         agent_result = results.get("agent")
         if agent_result is None:
             raise RuntimeError("the sealed trial left no agent-phase result")
@@ -423,12 +425,12 @@ class Trial:
     async def _run_verification(self) -> None:
         await self._invoke_hooks(TrialEvent.VERIFICATION_START)
 
-        self.result.verifier = TimingInfo(started_at=datetime.now(timezone.utc))
+        self.result.verifier = TimingInfo(started_at=datetime.now(UTC))
 
         try:
             await self._verify_with_retry()
         finally:
-            self.result.verifier.finished_at = datetime.now(timezone.utc)
+            self.result.verifier.finished_at = datetime.now(UTC)
 
     @retry(
         reraise=True,
@@ -442,7 +444,7 @@ class Trial:
                 self._verify_once(step_cfg=None),
                 timeout=self._verifier_timeout_sec,
             )
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             raise VerifierTimeoutError(
                 f"Verifier execution timed out after {
                     self._verifier_timeout_sec
@@ -621,7 +623,7 @@ class Trial:
     async def _cleanup_and_finalize(self) -> None:
         await self._stop_agent_environment()
 
-        self.result.finished_at = datetime.now(timezone.utc)
+        self.result.finished_at = datetime.now(UTC)
         self.result.n_agent_steps = self.result.agent_step_count()
 
         self._trial_paths.result_path.write_text(self.result.model_dump_json(indent=4))
@@ -738,7 +740,7 @@ class Trial:
             specific_multiplier=self.config.agent_timeout_multiplier,
         )
 
-        step_result.agent_execution = TimingInfo(started_at=datetime.now(timezone.utc))
+        step_result.agent_execution = TimingInfo(started_at=datetime.now(UTC))
         try:
             step_result.agent_result = AgentContext()
             await self._invoke_hooks(TrialEvent.AGENT_START)
@@ -750,10 +752,10 @@ class Trial:
                 ),
                 timeout=timeout,
             )
-        except (asyncio.TimeoutError, NonZeroAgentExitCodeError) as e:
+        except (TimeoutError, NonZeroAgentExitCodeError) as e:
             step_result.exception_info = ExceptionInfo.from_exception(e)
         finally:
-            step_result.agent_execution.finished_at = datetime.now(timezone.utc)
+            step_result.agent_execution.finished_at = datetime.now(UTC)
 
     async def _verify_step(
         self,
@@ -776,7 +778,7 @@ class Trial:
             specific_multiplier=self.config.verifier_timeout_multiplier,
         )
 
-        step_result.verifier = TimingInfo(started_at=datetime.now(timezone.utc))
+        step_result.verifier = TimingInfo(started_at=datetime.now(UTC))
         try:
             await self._invoke_hooks(TrialEvent.VERIFICATION_START)
             # Separate-mode verification runs in its own environment; the agent
@@ -801,7 +803,7 @@ class Trial:
             if step_result.exception_info is None:
                 step_result.exception_info = ExceptionInfo.from_exception(e)
         finally:
-            step_result.verifier.finished_at = datetime.now(timezone.utc)
+            step_result.verifier.finished_at = datetime.now(UTC)
 
     async def _run_steps(self) -> None:
         """Execute multi-step flow: iterate through each step sequentially."""
@@ -1013,7 +1015,7 @@ class Trial:
             trial_name=self.config.trial_name,
             task_name=self._task.name,
             task_id=self.config.task.get_task_id(),
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             config=self.config,
             task_checksum=self._task.checksum,
             trial_uri=self._trial_paths.trial_dir.expanduser().resolve().as_uri(),
