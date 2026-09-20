@@ -31,7 +31,7 @@ experiment:
    no console in the field flavor, and no host mount. The only live
    observations are host-side files cella itself writes.
 3. **Collect.** The run ends when the guest halts or the timeout
-   stops it. Results are read from the still disk as evidence. A
+   stops it. Results are extracted from the still disk as evidence. A
    still disk cannot answer questions; it can only be read.
    Verification against evidence is stronger than verification by
    conversation.
