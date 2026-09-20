@@ -178,7 +178,7 @@ $(RUN_TASKS)/%: FORCE | .sentinel/tasks
 bootstrap:
 	bash scripts/init/bootstrap.sh
 
-init: sync .podman .runsc .runsc-podman .krun-podman .cella .titanium | .sentinel/tasks
+init: .sudo-tty-guard sync .podman .runsc .runsc-podman .krun-podman .cella .titanium | .sentinel/tasks
 	@bash scripts/init/docker-group.sh
 
 # utility: run any podman command in the runner's context — trial containers
@@ -459,7 +459,7 @@ collect:
 # reset owns titanium's state, not the machine's package set. Tracked-file
 # edits are never touched; only untracked/ignored state is cleaned. Ends by
 # asserting the slate is actually clean.
-reset: collect
+reset: .sudo-tty-guard collect
 	bash scripts/reset/deprovision.sh
 	git clean -xdf -e .secrets -e .archive -e .tasks
 	bash scripts/reset/assert-clean-slate.sh
