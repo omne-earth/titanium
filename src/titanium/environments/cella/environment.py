@@ -1383,7 +1383,13 @@ class CellaEnvironment(BaseEnvironment):
     # manifest is already JSON; the disk and transients are not audit
     # evidence. ``--dump`` keys membrane-memory on its basename, which
     # the preserved copy keeps.
-    _CHRONICLE_DUMPABLE = ("network/ledger", "verdict", "audit", "membrane-memory")
+    _CHRONICLE_DUMPABLE = (
+        "network/ledger",
+        "network/names",
+        "verdict",
+        "audit",
+        "membrane-memory",
+    )
 
     def _preserve_chronicle(self, name: str) -> None:
         """Copy a still machine's audit files into the trial dir before

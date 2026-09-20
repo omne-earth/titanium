@@ -102,7 +102,7 @@ binary as the evidence.
 | `membrane-memory` / `membrane-memory.txt` | the standing memories planted (`memory ip=... skip_freeze=true keep_open=... written=...`). **An absent file means nothing was planted.** On an egress machine that means every crossing froze it one-shot. Expect that machine to be slow or wedged. |
 | `vmm.log` | the VMM's own log: boot, `valve Open/Closed`, `parked egress/ingress ...`, freeze and thaw timings, `applying N decision(s) from the verdict file`. A healthy airgapped machine writes two lines (valve, booting). Quiet is normal there. |
 | `network/ledger` / `ledger.txt` | every crossing: `parked id=... dir=... ip=... port=... host=<resolved name> guest_ns=... host_ns=...`, then `released id=... bytes_in=... bytes_out=...`. Measure throughput from the gaps between consecutive `host_ns` values. |
-| `network/names` | the resolved world names the appliance stamped (binary; read it with `strings`). This is the fastest check of what the task reached. |
+| `network/names` / `names.txt` | the resolved world names the appliance stamped. This is the fastest check of what the task reached. |
 | `manifest.json` | the chronicle's own integrity manifest. |
 | `uid` | the machine's sub-uid offset — the throwaway account it ran jailed as. |
 | `valve` | the network valve's final position (`open` or `closed`). |
