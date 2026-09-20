@@ -242,11 +242,28 @@ because after a bake no call needs one.
 `start()` bakes the member: stage the build context (`FROM` lines
 qualified, the agent install baked), `podman build`, export, and
 provision systemd into the tree when the image does not carry it
-(the same pipeline `make smoke-cella-rootfs` proves). The boot layer
-carries the agent's config, the task instruction, `collect.sh` when
-the task ships one, and the **orchestrator** — a root-owned state
-machine that systemd starts on boot. **The tests are not aboard**:
-the member carries no grader the agent could read. `build_ext4`
+(the same pipeline `make smoke-cella-rootfs` proves). The staged
+build also creates the standard non-root user `titanium` (a real
+passwd entry with a home directory, a no-op when the image ships it
+already). The boot layer carries the agent's config, the task
+instruction, and the **orchestrator** — a root-owned state machine
+that systemd starts on boot. Its scripts are checked-in templates
+(`src/titanium/environments/cella/scripts/`, verb-noun named);
+titanium only fills their `{{TOKENS}}`. Baked modes are stated
+explicitly and are root-only where secrets live: the orchestrator
+and phase scripts (which carry the env exports, the inference key
+included) are 0700, the unit 0600; step scripts are 0444 so a
+non-root agent user can read its own command, and
+`/titanium/task-type` is 0444 by contract — the harness's ground
+truth (`agent` or `oracle`), baked because the guest cannot honestly
+self-determine who runs it; probes report it verbatim and verifiers
+branch on it strictly. **The tests are not aboard, and neither is
+`collect.sh`**: the member carries no grader the agent could read or
+rewrite. A task that runs its agent as a non-root user declares that
+user's sudo grant itself, command by command, in
+`environment/sudoers` beside its Dockerfile; titanium bakes it
+verbatim to `/etc/sudoers.d/titanium-agent` (0440 root, or sudo
+refuses the file). No file, no elevation. `build_ext4`
 writes the flavor from the base tar. Host-produced bytes only: no
 filesystem is ever mounted, parsed, or edited, anywhere on this rung.
 
@@ -258,8 +275,7 @@ filesystem is ever mounted, parsed, or edited, anywhere on this rung.
    solution replay. The whole agent loop runs inside this phase —
    its inference and egress ride the machine's live window through
    the appliance.
-3. **Collect.** `collect.sh`, when present.
-4. **Reset.** The orchestrator's last act is `sync` then a forced
+3. **Reset.** The orchestrator's last act is `sync` then a forced
    reset (`reboot -f`). The canonical kernel has no ACPI poweroff —
    a halted guest leaves the VMM alive — but a CPU reset exits the
    VMM (`cella: guest requested shutdown` in `vmm.log`). Completion
@@ -276,10 +292,12 @@ source. The member's ext4 is only ever read by cella's own verb.
 
 **The verifier** (`<session>-verifier`) is baked from that state tar
 with `build_ext4` — the agent's filesystem as bytes, plus a boot
-layer that now carries the tests and a verify orchestrator. It joins
+layer that now carries the tests, `collect.sh` when the task ships
+one, and a verify orchestrator. It joins
 the standing appliance wire when the task's verifier declares egress
 (a test harness that fetches), and boots `--net none` otherwise. The
-verify phase runs, the orchestrator folds its results under `/logs`,
+collect phase (when the task ships `collect.sh`) and the verify
+phase run, the orchestrator folds its results under `/logs`,
 and the machine resets. One `cella extract <session>-verifier /logs`
 retrieves the reward, the test output, and the phase results in one
 read.
@@ -297,9 +315,9 @@ exactly:
 | # | Boot | Why |
 |---|---|---|
 | 1 | `<session>-appliance` | the world leg; boots once, thaws thereafter (paired trials only) |
-| 2 | `<session>` | the member: setup, payload, collect, reset |
+| 2 | `<session>` | the member: setup, payload, reset |
 | 3 | extractor | the full post-agent state tar |
-| 4 | `<session>-verifier` | verify on the rebaked state, results folded under `/logs`, reset |
+| 4 | `<session>-verifier` | collect and verify on the rebaked state, results folded under `/logs`, reset |
 | 5 | extractor | one read: reward, test output, phase results |
 
 Five boots paired; four airgapped-agentless. Uploads enter at bake

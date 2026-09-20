@@ -1,18 +1,18 @@
 #!/bin/bash
 set -uo pipefail
 
-# The terminated pair (allow_internet=true): the member reaches the
-# world only through the terminator appliance, by NAME. A granted name
-# resolves to the appliance, whose minted leaf verifies against the
-# pair CA titanium folded into the trust bundle; an ungranted name is
-# refused on the appliance's world-leg border. Names, not ips: the
-# terminator reads the SNI, so the probe must speak TLS (a bare TCP
-# connect carries no name and the appliance cannot route it).
+# Gated egress (allow_internet=true): the machine reaches the
+# world only through the gateway, by NAME. A granted name
+# resolves to the gateway, whose certificate verifies against the
+# interception CA titanium folded into the trust bundle; an ungranted name is
+# refused on the gateway's egress path. Names, not ips: the
+# gateway reads the SNI, so the probe must speak TLS (a bare TCP
+# connect carries no name and the gateway cannot route it).
 #
 # The probe times three sequential calls to the same granted name. This
-# makes the membrane-memory warming visible: the first call pays a
-# deep-thaw freeze at each first crossing (upstream DNS, the world leg),
-# and the standing memory makes the second and third run live.
+# makes the egress warm-up visible: the first call pays a pause at
+# each first contact (upstream DNS, the egress path); the second and
+# third should run without one.
 python3 - <<'PY'
 import json, os, socket, time, urllib.request
 
@@ -23,14 +23,14 @@ def probe(fn, default=False):
         return default
 
 def timed_get(url, timeout):
-    # Default context: verifies the terminator's minted leaf against the
-    # system trust bundle, into which the prelude folded the pair CA.
+    # Default context: verifies the gateway's certificate against the
+    # system trust bundle, into which the prelude folded the interception CA.
     # measured_at is the guest wall clock (time.time), and secs is guest
-    # elapsed (time.monotonic) -- BOTH cryogenic: deep thaw restores them
-    # across a freeze, so from inside the VM they exclude the frozen
-    # time. Pairing measured_at against the host clock cella stamps on
-    # every event (host_ns in the preserved audit book) is what reveals
-    # how long the guest slept frozen: host_elapsed - guest secs.
+    # elapsed (time.monotonic) -- both are restored across an
+    # environment pause, so from inside the VM they exclude the paused
+    # time. The harness's own records carry the host clock, so the
+    # paused span is host_elapsed minus guest secs -- visible from
+    # outside, never from here.
     at = round(time.time(), 3)
     t0 = time.monotonic()
     try:
@@ -61,11 +61,16 @@ r = {
     # The warming curve: each call's guest-perceived seconds and the
     # guest wall clock it was measured at (cold, then two live).
     "calls": [first_c, second_c, third_c],
-    # An ungranted name: the appliance refuses its world leg.
+    # An ungranted name: the gateway refuses its egress path.
     "denied_https_blocked": not timed_get("https://example.org/", timeout=60)[0],
-    # The interceptor answers every name with the appliance's address.
-    "resolver_is_appliance": probe(
-        lambda: socket.gethostbyname("example.com") == "10.77.0.1"),
+    # The interceptor answers every name with one address. Observe:
+    # do the granted and the ungranted name resolve identically, and
+    # to what. No address is assumed here; the verifier knows its own.
+    "resolver_is_gateway": probe(
+        lambda: socket.gethostbyname("example.com")
+        == socket.gethostbyname("example.org")),
+    "resolver_address": probe(
+        lambda: socket.gethostbyname("example.com"), ""),
     "pid1_comm": probe(lambda: open("/proc/1/comm").read().strip(), ""),
     "uid": os.getuid(),
     "nproc": probe(lambda: os.cpu_count(), 0),

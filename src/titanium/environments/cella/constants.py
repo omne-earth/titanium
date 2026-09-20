@@ -114,6 +114,16 @@ FLAVOR_NAME_MAX = 255
 IMAGE_FORMAT = "docker"
 BUILD_FILE_NAMES = ("Dockerfile", "Containerfile")
 STAGED_BUILD_FILE_NAME = "Dockerfile"
+
+# The harness's standard non-root user, baked into every cella rootfs
+# at image-build time (a real /etc/passwd entry with a home directory,
+# never an ext4 edit). A task that runs its agent as this user grants
+# elevation, command by command, in its own environment/sudoers.
+AGENT_USER = "titanium"
+USER_BAKE_LINE = (
+    f"RUN id -u {AGENT_USER} >/dev/null 2>&1 || "
+    f"useradd -m -s /bin/bash {AGENT_USER}\n"
+)
 CONVERTER_VERSION = "1"
 BOOT_LAYER_FIELD = "input_boot_layer"
 MAX_GUEST_FILE_MODE = 0o7777

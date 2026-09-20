@@ -26,21 +26,21 @@ def test_report_claims():
     assert r["root_device_is_vda"] is True
 
 
-def test_topology_is_a_valid_airgap():
-    """The airgap has two valid shapes, and only two.
-
-    Agentless: no nic at all (``--net none``) -- loopback alone.
-    Agented: the terminated pair stands so the agent can reach its
-    inference line, and the member's one interface is the wire to the
-    appliance. The workload's airgap claim is then not "no nic" but
-    "no world beyond the judged appliance line", which
-    ``test_egress_is_denied`` asserts independently.
-    """
+def test_topology_matches_the_baked_task_type():
+    """The harness bakes /titanium/task-type; the topology must match
+    it exactly. Agentless (oracle): no nic at all -- loopback alone.
+    Agented: the transport interface to the gateway and loopback,
+    nothing else.
+    The verifier reads the baked marker itself, so a report cannot
+    launder the shape."""
+    baked = Path("/titanium/task-type").read_text().strip()
     interfaces = sorted(os.listdir("/sys/class/net"))
-    assert interfaces in (["lo"], ["eth0", "lo"]), (
-        f"unexpected interfaces for an air-gapped task: {interfaces}"
+    expected = {"oracle": ["lo"], "agent": ["eth0", "lo"]}[baked]
+    assert interfaces == expected, (
+        f"task_type={baked} expects {expected}, machine shows {interfaces}"
     )
     assert report()["net_interfaces"] == interfaces
+    assert report()["task_type"] == baked
 
 
 def test_egress_is_denied():

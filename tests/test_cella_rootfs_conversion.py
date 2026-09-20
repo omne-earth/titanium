@@ -603,6 +603,10 @@ def test_staging_normalizes_and_qualifies(tmp_path):
     assert "docker.io/library/alpine:3.20" in staged
     assert context.source_build_file_name == "Containerfile"
     assert not context.agent_install_applied
+    # The standard non-root agent user is baked into every image, at
+    # build time, guarded so an image that ships it already is a no-op.
+    assert "useradd -m -s /bin/bash titanium" in staged
+    assert staged.index("FROM") < staged.index("useradd")
 
 
 def test_staging_refuses_a_leftover_context(tmp_path):

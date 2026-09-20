@@ -493,9 +493,12 @@ class CellaEnvironment(BaseEnvironment):
         failing step ends its phase), and the orchestrator that runs
         the phases under their baked budgets and ends the machine with
         a forced reset — the completion signal the host observes
-        (reboot=k: the reset exits the VMM). Re-entry after a reset
+        (reboot=t: the reset exits the VMM). Re-entry after a reset
         that re-booted instead of exiting sees the done marker and
-        resets again."""
+        resets again.
+
+        Every script is a checked-in template under ``scripts/``; this
+        method only fills the ``{{TOKENS}}``."""
         # The verifier boots the member's state, which already carries
         # the member's result tree and done marker; its own result root
         # must differ or the re-entry guard fires on a stale marker.
@@ -504,10 +507,7 @@ class CellaEnvironment(BaseEnvironment):
         entries: list[BootEntry] = []
         phase_lines: list[str] = []
         for phase in phases:
-            phase_script_lines = [
-                "#!/bin/bash",
-                f"cd {_shell_quote(effective_cwd)} || cd /",
-            ]
+            step_blocks: list[str] = []
             for index, step in enumerate(phase.steps):
                 merged_env: dict[str, str] = {}
                 for declared in self._image_config.get("Env") or []:
@@ -521,11 +521,15 @@ class CellaEnvironment(BaseEnvironment):
                 if run_as in (None, 0, "0"):
                     run_as = "root"
                 step_path = f"{RUNNER_DIR}/steps/{phase.name}-{index}.sh"
+                # 0444: the step's runuser'd shell (possibly non-root)
+                # must read its own script; it carries the raw command
+                # only -- the secrets (env exports) live in the 0700
+                # phase script.
                 entries.append(
                     GuestFile(
                         path=step_path,
                         contents=(step.command + "\n").encode(),
-                        mode=0o755,
+                        mode=0o444,
                         uid=0,
                         gid=0,
                     )
@@ -534,28 +538,29 @@ class CellaEnvironment(BaseEnvironment):
                     f"export {key}={_shell_quote(value)}\n"
                     for key, value in merged_env.items()
                 )
-                phase_script_lines.append(
-                    "(\n"
-                    + exports
-                    + f"runuser -u {_shell_quote(str(run_as))} -- "
-                    f"bash {step_path}\n"
-                    f") >> $R/{phase.name}/stdout 2>> $R/{phase.name}/stderr\n"
-                    "rc=$?\n"
-                    "if [ $rc -ne 0 ]; then\n"
-                    f"  echo $rc > $R/{phase.name}/rc\n"
-                    "  exit $rc\n"
-                    "fi"
+                step_blocks.append(
+                    _render_snippet(
+                        "invoke-step.sh",
+                        EXPORTS=exports,
+                        USER=_shell_quote(str(run_as)),
+                        STEP_PATH=step_path,
+                        PHASE=phase.name,
+                    ).rstrip("\n")
                 )
-            phase_script_lines.append(f"echo 0 > $R/{phase.name}/rc")
             entries.append(
                 GuestFile(
                     path=f"{RUNNER_DIR}/phases/{phase.name}.sh",
-                    contents=(
-                        "R=" + result_root + "\n"
-                        + "\n".join(phase_script_lines)
-                        + "\n"
+                    contents=_render_script(
+                        "run-steps.sh",
+                        RESULT_ROOT=result_root,
+                        CWD=_shell_quote(effective_cwd),
+                        PHASE=phase.name,
+                        STEP_BLOCKS="\n".join(step_blocks),
                     ).encode(),
-                    mode=0o755,
+                    # Root-only: the phase script carries the merged
+                    # env exports, the inference key included. Only
+                    # the root orchestrator invokes it.
+                    mode=0o700,
                     uid=0,
                     gid=0,
                 )
@@ -566,53 +571,31 @@ class CellaEnvironment(BaseEnvironment):
                 else ""
             )
             phase_lines.append(
-                f"mkdir -p $R/{phase.name}\n"
-                f"touch $R/{phase.name}/stdout $R/{phase.name}/stderr\n"
-                f"{budget}bash {RUNNER_DIR}/phases/{phase.name}.sh\n"
-                f"[ -f $R/{phase.name}/rc ] || echo 124 > $R/{phase.name}/rc"
+                _render_snippet(
+                    "run-phase.sh",
+                    PHASE=phase.name,
+                    BUDGET=budget,
+                    RUNNER_DIR=RUNNER_DIR,
+                ).rstrip("\n")
             )
         wire_prelude = member_prelude("eth0") if self._paired else ""
         # The verifier folds its results under /logs, so one extract
         # of /logs retrieves the reward, the test output, and the
-        # phase results together (README-cella.md §4).
-        fold = (
-            "mkdir -p /logs/titanium-result\n"
-            "cp -r $R/. /logs/titanium-result/\n"
-            if fold_results
-            else ""
+        # phase results together (README-cella.md §5).
+        fold = _render_snippet("fold-results.sh") if fold_results else ""
+        orchestrator = _render_script(
+            "orchestrate-trial.sh",
+            RESULT_ROOT=result_root,
+            WIRE_PRELUDE=wire_prelude,
+            PHASE_LINES="\n".join(phase_lines),
+            FOLD=fold,
         )
-        orchestrator = (
-            "#!/bin/bash\n"
-            "# Generated by titanium: the sealed one-shot trial's state\n"
-            "# machine. One boot runs every phase; the forced reset is\n"
-            "# the completion signal (reboot=k exits the VMM).\n"
-            f"R={result_root}\n"
-            "end() { sync; reboot -f; echo 1 > /proc/sys/kernel/sysrq; "
-            "echo b > /proc/sysrq-trigger; }\n"
-            'if [ -f "$R/done" ]; then end; fi\n'
-            f"mkdir -p $R /logs/agent /logs/verifier /logs/artifacts\n"
-            + wire_prelude
-            + "\n".join(phase_lines)
-            + "\n"
-            + fold
-            + "touch $R/done\nend\n"
-        )
-        unit = (
-            "[Unit]\n"
-            "Description=Titanium sealed one-shot trial\n"
-            "After=basic.target\n\n"
-            "[Service]\n"
-            "Type=oneshot\n"
-            "RemainAfterExit=yes\n"
-            f"ExecStart=/bin/bash {RUNNER_DIR}/orchestrator.sh\n\n"
-            "[Install]\n"
-            "WantedBy=multi-user.target\n"
-        )
+        unit = _render_script("titanium-trial.service", RUNNER_DIR=RUNNER_DIR)
         entries.append(
             GuestFile(
                 path=f"{RUNNER_DIR}/orchestrator.sh",
                 contents=orchestrator.encode(),
-                mode=0o755,
+                mode=0o700,
                 uid=0,
                 gid=0,
             )
@@ -621,7 +604,8 @@ class CellaEnvironment(BaseEnvironment):
             GuestFile(
                 path="/etc/systemd/system/titanium-trial.service",
                 contents=unit.encode(),
-                mode=0o644,
+                # systemd reads it as root; nothing else needs to.
+                mode=0o600,
                 uid=0,
                 gid=0,
             )
@@ -649,22 +633,39 @@ class CellaEnvironment(BaseEnvironment):
     def _run_sealed_locked(self, phases) -> dict[str, ExecResult]:
         if self._base_tar is None:
             raise CellaError("sealed trial before start: not running")
-        member_phases = [p for p in phases if p.name != "verify"]
-        verify_phases = [p for p in phases if p.name == "verify"]
-        # The pending uploads split by destination: the tests board the
-        # verifier, never the member -- the agent and its graders never
-        # coexist (docs/environments/CELLA.md §4). Everything else (the
-        # oracle's solution, collect.sh, the agent's files) boards the
-        # member.
+        grader_names = {"collect", "verify"}
+        member_phases = [p for p in phases if p.name not in grader_names]
+        verify_phases = [p for p in phases if p.name in grader_names]
+        # The pending uploads split by destination: the tests and
+        # collect.sh board the verifier, never the member -- the agent
+        # and its graders never coexist (docs/environments/CELLA.md
+        # §4), and collect is harness machinery the agent must not be
+        # able to read or rewrite. Everything else (the oracle's
+        # solution, the agent's files) boards the member.
         tests_prefix = str(self.env_paths.tests_dir)
-        member_entries = tuple(
-            e for e in self._pending if not e.path.startswith(tests_prefix)
-        )
-        verifier_entries = tuple(
-            e for e in self._pending if e.path.startswith(tests_prefix)
-        )
+        collect_path = RUNNER_DIR + "/collect.sh"
+
+        def _grader_bound(entry) -> bool:
+            return entry.path.startswith(tests_prefix) or entry.path == collect_path
+
+        member_entries = tuple(e for e in self._pending if not _grader_bound(e))
+        verifier_entries = tuple(e for e in self._pending if _grader_bound(e))
 
         member = _flavor_name(self.session_id)
+        # Harness ground truth, baked: the guest cannot honestly
+        # self-determine who runs it (oracle-www and agent-www look
+        # identical from inside), so titanium states it. Probes report
+        # it; verifiers branch on it strictly.
+        member_entries = member_entries + (
+            GuestFile(
+                path=RUNNER_DIR + "/task-type",
+                contents=(b"agent\n" if self._agent else b"oracle\n"),
+                mode=0o444,
+                uid=0,
+                gid=0,
+            ),
+        )
+        member_entries = member_entries + self._sudoers_entries()
         results = self._run_sealed_machine(
             name=member,
             rootfs_tar=self._base_tar,
@@ -700,6 +701,26 @@ class CellaEnvironment(BaseEnvironment):
         if not results:
             raise CellaError("the sealed trial left no results")
         return results
+
+    def _sudoers_entries(self) -> tuple:
+        """The task's own sudo grant, baked verbatim. A task that runs
+        its agent as a non-root user declares the commands that user
+        may elevate in ``environment/sudoers``, beside its Dockerfile
+        and cella.policy. The task owns the capability list; titanium
+        only places it where sudo reads it (0440 root, or sudo refuses
+        the file). No file, no elevation."""
+        sudoers = self.environment_dir / "sudoers"
+        if not sudoers.exists():
+            return ()
+        return (
+            GuestFile(
+                path="/etc/sudoers.d/titanium-agent",
+                contents=sudoers.read_bytes(),
+                mode=0o440,
+                uid=0,
+                gid=0,
+            ),
+        )
 
     def _run_sealed_machine(
         self,
@@ -1584,6 +1605,24 @@ def _shell_quote(value: str) -> str:
     import shlex
 
     return shlex.quote(value)
+
+
+_SCRIPTS_DIR = Path(__file__).parent / "scripts"
+
+
+def _render_script(name: str, **tokens: str) -> str:
+    """A checked-in guest script (``scripts/``) with its ``{{TOKENS}}``
+    filled. A fragment's shebang is for the editor; the composer drops
+    it when the fragment is inlined into a larger script."""
+    text = (_SCRIPTS_DIR / name).read_text()
+    for key, value in tokens.items():
+        text = text.replace("{{" + key + "}}", value)
+    return text
+
+
+def _render_snippet(name: str, **tokens: str) -> str:
+    """A script fragment for inlining: rendered, shebang dropped."""
+    return _render_script(name, **tokens).removeprefix("#!/bin/bash\n")
 
 
 def _tail(path: Path, lines: int = 20) -> str:

@@ -214,6 +214,18 @@ def test_verifier_orchestrator_folds_results_under_logs(tmp_path):
     assert "titanium-result" not in bare
 
 
+def test_task_owned_sudoers_bakes_verbatim_or_not_at_all(tmp_path):
+    env = _make_env(tmp_path)
+    assert env._sudoers_entries() == ()
+    grant = "agent ALL=(root) NOPASSWD: /usr/bin/apt-get\n"
+    (tmp_path / "environment" / "sudoers").write_text(grant)
+    (entry,) = env._sudoers_entries()
+    assert entry.path == "/etc/sudoers.d/titanium-agent"
+    assert entry.contents == grant.encode()
+    # sudo refuses a sudoers file that is not 0440 root:root.
+    assert (entry.mode, entry.uid, entry.gid) == (0o440, 0, 0)
+
+
 def test_verifier_result_root_avoids_the_members_marker(tmp_path):
     env = _make_env(tmp_path)
     phases = [SealedPhaseSpec(name="verify", steps=[SealedPhaseStep(command="true")])]
@@ -230,7 +242,7 @@ def test_verifier_result_root_avoids_the_members_marker(tmp_path):
     phase = next(
         e for e in files if e.path == "/titanium/phases/verify.sh"
     ).contents.decode()
-    assert phase.startswith("R=/titanium/result-verifier")
+    assert "R=/titanium/result-verifier\n" in phase
 
 
 def test_evidence_cache_resolves_by_longest_root(tmp_path):
