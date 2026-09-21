@@ -71,7 +71,11 @@ REPLY_PORT_HIGH = 50007
 TERMINATOR_GOLDEN = "terminator"
 # Guest paths: the pair CA as baked, and the system bundle the member
 # prelude folds it into.
-MEMBER_CA_PATH = "/etc/cella/pair-ca.pem"
+# A neutral, substrate-blind path and name: the CA itself is
+# observable by design (it sits in the trust bundle), but its name
+# must not say what runs the machine. The standard Debian drop-in
+# dir keeps it boring.
+MEMBER_CA_PATH = "/usr/local/share/ca-certificates/gateway-ca.crt"
 SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 
 # --- the wire codec (proto3 tags and protocol numbers) -------------------
