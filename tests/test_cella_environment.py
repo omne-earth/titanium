@@ -555,6 +555,14 @@ def test_appliance_border_judges_the_world_by_name():
     assert (C.UPSTREAM_DNS, 53, 17) in ips
     assert (term.MEMBER_WIRE_ADDRESS, C.REPLY_PORT_LOW, 6) in ips
     assert (term.MEMBER_WIRE_ADDRESS, C.REPLY_PORT_HIGH, 17) in ips
+    # The law: the reply window is eight ports, never more. Cella pins
+    # WORLD_PERMITS and the golden's port range to match; a wider
+    # grant set is dead policy.
+    assert C.REPLY_PORT_HIGH - C.REPLY_PORT_LOW + 1 == 8
+    reply_ports = {
+        g.port for g in policy.grants if g.ip == term.MEMBER_WIRE_ADDRESS
+    }
+    assert len(reply_ports) == 8
 
 
 def test_appliance_border_parses_with_no_hosts():

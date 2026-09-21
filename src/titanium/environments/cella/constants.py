@@ -63,7 +63,12 @@ WIRE_PREFIX = 24
 LISTEN_PORTS = (443, 80)
 UPSTREAM_DNS = "9.9.9.9"
 # The consistent reply port window: eight exact, nameable grants
-# instead of an unnameable ephemeral range.
+# instead of an unnameable ephemeral range. Eight is the law, not a
+# tunable: cella pins WORLD_PERMITS and the golden's
+# ip_local_port_range at 50000-50007, and titanium composes exactly
+# these eight -- a policy that grants more ports is dead policy.
+# Concurrency past eight meets the 429 gate; a client that honors
+# Retry-After degrades to pacing.
 REPLY_PORT_LOW = 50000
 REPLY_PORT_HIGH = 50007
 # The terminator golden and the pair CA it exports beside itself
