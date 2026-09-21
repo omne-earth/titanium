@@ -517,17 +517,27 @@ class CellaEnvironment(BaseEnvironment):
                     merged_env[key] = value
                 merged_env.update(self._persistent_env)
                 merged_env.update(step.env)
-                run_as = step.user if step.user is not None else self.default_user
-                if run_as is None:
-                    run_as = self._image_config.get("User") or None
-                if run_as in (None, 0, "0"):
-                    # The rung's law: the payload never runs as root by
-                    # omission -- an undeclared agent phase falls to the
-                    # baked standard user; root is a decision a task
-                    # writes down (agent.user = "root"). The harness's
-                    # own phases (setup, collect, verify) keep root as
-                    # their fallback.
-                    run_as = AGENT_USER if phase.name == "agent" else "root"
+                # The rung's law, stated as resolution order. The
+                # payload (agent phase) never runs as root by omission:
+                # step user, else the task's agent user (default_user),
+                # else the image's USER, else the baked standard user
+                # -- root is a decision a task writes down. The
+                # harness's own phases (setup, collect, verify) consult
+                # only the step's own declaration and fall to root:
+                # default_user carries the *agent's* identity and must
+                # not leak into the grader's phase.
+                if phase.name == "agent":
+                    run_as = (
+                        step.user if step.user is not None else self.default_user
+                    )
+                    if run_as is None:
+                        run_as = self._image_config.get("User") or None
+                    if run_as in (None, 0, "0"):
+                        run_as = AGENT_USER
+                else:
+                    run_as = step.user if step.user is not None else "root"
+                    if run_as in (0, "0"):
+                        run_as = "root"
                 if phase.name == "agent" and run_as != "root":
                     payload_users.add(str(run_as))
                 step_path = f"{RUNNER_DIR}/steps/{phase.name}-{index}.sh"

@@ -342,7 +342,11 @@ class Trial:
                 "sealed-oneshot environment"
             )
         agent_user = self._task.config.agent.user
-        verifier_user = self._task.config.verifier.user or agent_user
+        # No agent-user fallback here: the verifier is harness
+        # machinery, and a sealed environment resolves an undeclared
+        # verify user itself (on cella: root -- the agent's user must
+        # not leak into the grader's phase).
+        verifier_user = self._task.config.verifier.user
         for source_dir, guest_dir in spec.uploads:
             await env.upload_dir(source_dir=source_dir, target_dir=guest_dir)
         phases = [

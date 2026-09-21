@@ -218,6 +218,26 @@ def test_verifier_orchestrator_folds_results_under_logs(tmp_path):
     assert "titanium-result" not in bare
 
 
+def test_the_agents_identity_never_leaks_into_harness_phases(tmp_path):
+    # default_user carries the task's agent user; setup/collect/verify
+    # must fall to root regardless, or the grader runs as the agent
+    # (the /logs/verifier permission failure of trial 3655mtv).
+    env = _make_env(tmp_path)
+    env.default_user = "titanium"
+    env._image_config = {}
+    phases = [
+        SealedPhaseSpec(name="agent", steps=[SealedPhaseStep(command="a")]),
+        SealedPhaseSpec(name="collect", steps=[SealedPhaseStep(command="c")]),
+        SealedPhaseSpec(name="verify", steps=[SealedPhaseStep(command="v")]),
+    ]
+    files = {e.path: e for e in env._orchestrator_files(phases)}
+    agent = files["/titanium/phases/agent.sh"].contents.decode()
+    assert "runuser -u titanium -- bash /titanium/steps/agent-0.sh" in agent
+    for name in ("collect", "verify"):
+        phase = files[f"/titanium/phases/{name}.sh"].contents.decode()
+        assert f"runuser -u root -- bash /titanium/steps/{name}-0.sh" in phase
+
+
 def test_task_owned_sudoers_bakes_verbatim_or_not_at_all(tmp_path):
     env = _make_env(tmp_path)
     assert env._sudoers_entries() == ()
