@@ -1,5 +1,7 @@
-git config --global user.email "test@example.com"
-git config --global user.name "Test User"
+# --system, not --global: the build runs as root, but the payload
+# runs as the standard non-root user, who must inherit the identity.
+git config --system user.email "titanium@omne.earth"
+git config --system user.name "Titanium"
 git clone https://github.com/TheMikeMerrill/personal-site.git
 cd personal-site
 git remote rm origin
