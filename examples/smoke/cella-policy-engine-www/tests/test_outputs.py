@@ -1,4 +1,5 @@
 import json
+import pwd
 import os
 import time
 import urllib.request
@@ -18,7 +19,7 @@ def test_report_claims():
     assert r["denied_https_blocked"] is True
     assert r["resolver_is_appliance"] is True
     assert r["pid1_comm"] == "systemd"
-    assert int(r["uid"]) == 0
+    assert int(r["uid"]) == pwd.getpwnam("titanium").pw_uid
     assert int(r["nproc"]) == 1
     assert 700_000 <= int(r["mem_total_kb"]) <= 1_100_000
 

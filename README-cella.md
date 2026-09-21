@@ -62,9 +62,13 @@ The member's orchestrator writes `/titanium/result`; the verifier's
 writes `/titanium/result-verifier`, so the member's carried done
 marker cannot trip the verifier's re-entry guard.
 
-Non-root agents: every rootfs bakes the standard user `titanium` at
-image build (`useradd -m`, a no-op when the image ships it). A task
-that runs its agent as that user declares any elevation itself, in
+The payload never runs as root by omission: every rootfs bakes the
+standard user `titanium` at image build (`useradd -m`, a no-op when
+the image ships it), and an agent phase whose task declares no user
+runs as `titanium` — root is a decision a task writes down
+(`agent.user = "root"`), never inherited. The orchestrator hands the
+payload user its writable surfaces (the workdir, `/logs/agent`)
+before any phase runs. A task declares any elevation itself, in
 `environment/sudoers` beside its Dockerfile — baked verbatim to
 `/etc/sudoers.d/titanium-agent`, 0440 root. No file, no elevation.
 

@@ -1,4 +1,5 @@
 import json
+import pwd
 import os
 import time
 import urllib.request
@@ -24,7 +25,8 @@ def test_report_claims():
     assert r["resolver_address"] == "10.77.0.1"
     assert socket.gethostbyname("example.com") == "10.77.0.1"
     assert r["pid1_comm"] == "systemd"
-    assert int(r["uid"]) == 0
+    # The rung's standard payload user, never root by omission.
+    assert int(r["uid"]) == pwd.getpwnam("titanium").pw_uid
     assert int(r["nproc"]) == 1
     assert 700_000 <= int(r["mem_total_kb"]) <= 1_100_000
 

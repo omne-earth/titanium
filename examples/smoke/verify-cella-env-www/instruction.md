@@ -5,8 +5,8 @@ the machine shows:
 
 - `granted_https_ok`: whether three sequential HTTPS GETs to the
   granted name `example.com` all succeeded
-- `calls`: one entry per call, `{measured_at, secs}` — the wall
-  clock each started at and the seconds it took, as measured
+- `calls`: one entry per call, `{measured_at, secs}` — the epoch
+  seconds each started at and the seconds it took, both as numbers
 - `denied_https_blocked`: whether an HTTPS GET to the ungranted
   name `example.org` failed to complete
 - `resolver_is_gateway`: whether the granted and the ungranted name

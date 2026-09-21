@@ -170,14 +170,18 @@ def test_orchestrator_files_render_the_trial(tmp_path):
     assert "cd '/app'" in agent_phase or "cd /app" in agent_phase
     assert "export PATH=/usr/bin" in agent_phase
     assert "export K='a b'" in agent_phase
-    # Always runuser, root included: the unit has no HOME, and runuser
-    # pins the target user's.
-    assert "runuser -u root -- bash /titanium/steps/agent-0.sh" in agent_phase
+    # The rung's law: an undeclared agent step never runs as root --
+    # it falls to the baked standard user. Root is written down
+    # (agent.user = "root"), never inherited.
+    assert "runuser -u titanium -- bash /titanium/steps/agent-0.sh" in agent_phase
     assert by_path["/titanium/steps/agent-0.sh"].contents.decode() == "bash solve.sh\n"
     verify_phase = by_path["/titanium/phases/verify.sh"].contents.decode()
     # A failing step ends its phase with its rc on the record.
     assert "echo $rc > $R/verify/rc" in verify_phase
     orchestrator = by_path["/titanium/orchestrator.sh"].contents.decode()
+    # The root-created writable surfaces are handed to the payload
+    # user before any phase runs.
+    assert "chown -R titanium: /logs/agent /app" in orchestrator
     # Phase budgets are baked and enforced in-guest.
     assert "timeout -k 10 600 bash /titanium/phases/agent.sh" in orchestrator
     assert "timeout -k 10 300 bash /titanium/phases/verify.sh" in orchestrator

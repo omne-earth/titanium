@@ -1,4 +1,5 @@
 import json
+import pwd
 import os
 import socket
 from pathlib import Path
@@ -15,7 +16,8 @@ def test_report_claims():
     r = report()
     assert r["egress_tcp_denied"] is True
     assert r["pid1_comm"] == "systemd"
-    assert int(r["uid"]) == 0
+    # The rung's standard payload user, never root by omission.
+    assert int(r["uid"]) == pwd.getpwnam("titanium").pw_uid
     assert r["writable_workdir"] is True
     assert r["writable_tmp"] is True
     assert r["cpu_hypervisor"] is True

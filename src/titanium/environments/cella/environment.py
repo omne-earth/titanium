@@ -106,6 +106,7 @@ from titanium.environments.cella.buildfile import (
     prepare_build_context,
 )
 from titanium.environments.cella.constants import (
+    AGENT_USER,
     BOOT_MARGIN_SEC,
     CELLA_EXEC_TIMEOUT,
     CELLA_VERB_TIMEOUT_SEC,
@@ -506,6 +507,7 @@ class CellaEnvironment(BaseEnvironment):
         effective_cwd = self._image_config.get("WorkingDir") or "/"
         entries: list[BootEntry] = []
         phase_lines: list[str] = []
+        payload_users: set[str] = set()
         for phase in phases:
             step_blocks: list[str] = []
             for index, step in enumerate(phase.steps):
@@ -519,7 +521,15 @@ class CellaEnvironment(BaseEnvironment):
                 if run_as is None:
                     run_as = self._image_config.get("User") or None
                 if run_as in (None, 0, "0"):
-                    run_as = "root"
+                    # The rung's law: the payload never runs as root by
+                    # omission -- an undeclared agent phase falls to the
+                    # baked standard user; root is a decision a task
+                    # writes down (agent.user = "root"). The harness's
+                    # own phases (setup, collect, verify) keep root as
+                    # their fallback.
+                    run_as = AGENT_USER if phase.name == "agent" else "root"
+                if phase.name == "agent" and run_as != "root":
+                    payload_users.add(str(run_as))
                 step_path = f"{RUNNER_DIR}/steps/{phase.name}-{index}.sh"
                 # 0444: the step's runuser'd shell (possibly non-root)
                 # must read its own script; it carries the raw command
@@ -583,9 +593,19 @@ class CellaEnvironment(BaseEnvironment):
         # of /logs retrieves the reward, the test output, and the
         # phase results together (README-cella.md §5).
         fold = _render_snippet("fold-results.sh") if fold_results else ""
+        # A non-root payload owns its writable surfaces: the workdir
+        # and its log dir are root-created, so the orchestrator hands
+        # them over before any phase runs.
+        payload_dirs = "".join(
+            f"chown -R {_shell_quote(user)}: /logs/agent"
+            + (f" {_shell_quote(effective_cwd)}" if effective_cwd != "/" else "")
+            + "\n"
+            for user in sorted(payload_users)
+        )
         orchestrator = _render_script(
             "orchestrate-trial.sh",
             RESULT_ROOT=result_root,
+            PAYLOAD_DIRS=payload_dirs,
             WIRE_PRELUDE=wire_prelude,
             PHASE_LINES="\n".join(phase_lines),
             FOLD=fold,

@@ -259,8 +259,9 @@ truth (`agent` or `oracle`), baked because the guest cannot honestly
 self-determine who runs it; probes report it verbatim and verifiers
 branch on it strictly. **The tests are not aboard, and neither is
 `collect.sh`**: the member carries no grader the agent could read or
-rewrite. A task that runs its agent as a non-root user declares that
-user's sudo grant itself, command by command, in
+rewrite. The agent phase runs as `titanium` unless the task declares
+a user — root by omission does not exist on this rung. A task
+declares its user's sudo grant itself, command by command, in
 `environment/sudoers` beside its Dockerfile; titanium bakes it
 verbatim to `/etc/sudoers.d/titanium-agent` (0440 root, or sudo
 refuses the file). No file, no elevation. `build_ext4`
