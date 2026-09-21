@@ -812,6 +812,9 @@ class CellaEnvironment(BaseEnvironment):
     def _extract_state_tar(self, name: str) -> Path:
         """The machine's whole tree as one trailer-verified tar."""
         assert self._work is not None
+        # The verb boots a transient twin and destroys it on the way
+        # out; only the live mirror can catch its books.
+        self._register_mirror(f"{name}-extractor")
         dest = self._work / f"state-{name}.tar"
         with dest.open("wb") as sink:
             completed = subprocess.run(
@@ -931,6 +934,9 @@ class CellaEnvironment(BaseEnvironment):
         path; the returned path is the extracted *guest_path* inside
         *target*."""
         target.mkdir(parents=True, exist_ok=True)
+        # As in _extract_state_tar: mirror the transient twin's books
+        # while it lives, or the record shows no extractor at all.
+        self._register_mirror(f"{name}-extractor")
         completed = subprocess.run(
             [cella_bin(), "extract", name, guest_path],
             capture_output=True,
