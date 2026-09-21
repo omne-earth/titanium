@@ -157,7 +157,7 @@ decode beside it at trial end (cella's own `--dump`). Read the
 | `audit` / `audit.txt` | each verb each persona ran against this machine, `host_ns`-stamped. The trial's spine. |
 | `verdict` / `verdict.txt` | the decisions applied to this machine's crossings — what cella enforced, replayed on every thaw. |
 | `membrane-memory` / `.txt` | the standing memories planted. **Absent on a paired machine = nothing was planted**; expect it slow or wedged. |
-| `vmm.log` | boot, parks, freeze and thaw timings — and at a healthy end, `cella: guest requested shutdown`: the orchestrator's reset exiting the VMM. A vmm.log without that line is a trial that did not complete on its own. |
+| `vmm.log` | boot, parks, freeze and thaw timings — and at the end, a forensic line (`exit=` token, rip, exception state) then `cella: guest requested shutdown`. `exit=reset` = the guest reached the reset vector: the orchestrator's own end **or** a crash whose triple fault completed — the state tar's `done` marker is the discriminator. `exit=fault` = a death that never reached reset. No final lines at all = the VMM was killed from outside. |
 | `network/ledger` / `ledger.txt` | every crossing with its resolved name, bytes, and `host_ns`. Measure throughput from the gaps. |
 | `network/names` / `names.txt` | the names the appliance resolved and stamped. The fastest check of what the task reached. |
 | `manifest.json`, `uid`, `valve` | the chronicle's integrity manifest; the machine's sub-uid; the valve's final position. |
@@ -273,6 +273,6 @@ the benchmarks run the field flavor.
 | Why was a crossing refused? | the machine's `verdict.txt`, then `engine.log` for the judged name, then the task's `cella.policy` for the missing grant |
 | What did the task reach? | the appliance's `names.txt`, then `ledger.txt` for the bytes |
 | Why is it slow? | the `host_ns` gaps in `ledger.txt` (~1 ms is healthy), and whether `membrane-memory.txt` exists |
-| Did the trial complete on its own? | `cella: guest requested shutdown` at the end of the member's `vmm.log`; absent = the budget ended it |
+| Did the trial complete on its own? | the member's `vmm.log` forensic line **plus** the state tar: `exit=reset` with `titanium/result/done` present = clean; `exit=reset` without `done` = a crash that completed its triple fault; `exit=fault` = died before reset; no final lines = ended from outside (budget or kill) |
 | Which phase failed? | `exception.txt` and `result.json`; a phase's `rc` 124 is its in-guest budget |
 | What was the machine made from? | `cella-env-<id>/` — the build context and the base tar, kept for every trial |
