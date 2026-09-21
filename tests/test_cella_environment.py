@@ -506,6 +506,10 @@ def test_member_trust_bakes_the_ca_and_points_the_resolver():
     entries = {e.path: e for e in term.member_trust_entries(b"PAIRCA")}
     assert entries[C.MEMBER_CA_PATH].contents == b"PAIRCA"
     assert entries[C.MEMBER_CA_PATH].mode == 0o444
+    # TIME_WAIT reuse makes the eight-port window livable.
+    assert entries["/etc/sysctl.d/50-reply-window.conf"].contents == (
+        b"net.ipv4.tcp_tw_reuse = 1\n"
+    )
     resolv = entries["/etc/resolv.conf"].contents.decode()
     assert f"nameserver {C.APPLIANCE_WIRE_ADDRESS}\n" in resolv
     # Patience past the appliance's first-crossing freeze, or the lookup

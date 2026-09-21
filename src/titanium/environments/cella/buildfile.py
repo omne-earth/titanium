@@ -30,6 +30,7 @@ from titanium.environments.agent_setup import (
 )
 from titanium.environments.cella.constants import (
     BUILD_FILE_NAMES,
+    ENV_BAKE_LINE,
     STAGED_BUILD_FILE_NAME,
     USER_BAKE_LINE,
 )
@@ -152,7 +153,9 @@ def prepare_build_context(
     # (a task that sets a non-root USER and wants the standard user
     # must create it itself; the guard keeps that loud, not silent).
     qualified = qualify_dockerfile_froms(source_bytes.decode("utf-8"))
-    staged_build_file.write_text(qualified.rstrip("\n") + "\n" + USER_BAKE_LINE)
+    staged_build_file.write_text(
+        qualified.rstrip("\n") + "\n" + USER_BAKE_LINE + ENV_BAKE_LINE
+    )
 
     if agent_install_spec is not None:
         # write_agent_dockerfile re-reads the staged file and rewrites it in

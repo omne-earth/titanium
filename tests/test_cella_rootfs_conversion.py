@@ -607,6 +607,8 @@ def test_staging_normalizes_and_qualifies(tmp_path):
     # build time, guarded so an image that ships it already is a no-op.
     assert "useradd -m -s /bin/bash titanium" in staged
     assert staged.index("FROM") < staged.index("useradd")
+    # Paced for the eight-port reply window.
+    assert "ENV UV_CONCURRENT_DOWNLOADS=3" in staged
 
 
 def test_staging_refuses_a_leftover_context(tmp_path):

@@ -83,6 +83,19 @@ def member_trust_entries(ca_pem: bytes) -> list[BootEntry]:
             gid=0,
         ),
         GuestFile(
+            # The eight-port reply window is livable only with
+            # TIME_WAIT reuse: without it, sequential connections
+            # churn through the window and the ninth connect dies on
+            # EADDRNOTAVAIL (build-pmars' verifier, os error 99).
+            # systemd-sysctl applies this at boot -- the same fix
+            # cella made on the terminator's legs.
+            path="/etc/sysctl.d/50-reply-window.conf",
+            contents=b"net.ipv4.tcp_tw_reuse = 1\n",
+            mode=0o644,
+            uid=0,
+            gid=0,
+        ),
+        GuestFile(
             path="/etc/resolv.conf",
             # The appliance freezes once on the first reply to each of
             # the member's reply ports (the park is the freeze, before

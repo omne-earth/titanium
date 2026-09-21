@@ -133,6 +133,13 @@ USER_BAKE_LINE = (
     f"RUN id -u {AGENT_USER} >/dev/null 2>&1 || "
     f"useradd -m -s /bin/bash {AGENT_USER}\n"
 )
+
+# Paced for the eight-port reply window: a parallel fetcher that
+# opens more sockets than the window holds dies on EADDRNOTAVAIL
+# (build-pmars' verifier, os error 99). Baked as an image ENV so the
+# phase scripts export it into every step; /etc/environment would not
+# reach them (runuser's PAM stack skips pam_env).
+ENV_BAKE_LINE = "ENV UV_CONCURRENT_DOWNLOADS=3\n"
 CONVERTER_VERSION = "1"
 BOOT_LAYER_FIELD = "input_boot_layer"
 MAX_GUEST_FILE_MODE = 0o7777
