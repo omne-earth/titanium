@@ -64,9 +64,14 @@ from pathlib import Path
 from grpclib.const import Cardinality, Handler
 from grpclib.server import Server, Stream
 
+from titanium.environments.cella.constants import (
+    DECIDE_METHOD,
+    DIRECTION_OUTGOING,
+    RECORDER_KEEP_OPEN,
+    REFUSAL_WHY_NO_GRANT,
+)
 from titanium.environments.cella.policy import Policy, PolicyRecorder
 from titanium.environments.cella.wire import (
-    DIRECTION_OUTGOING,
     Decision,
     Destination,
     Event,
@@ -78,18 +83,7 @@ from titanium.environments.cella.wire import (
 
 logger = logging.getLogger(__name__)
 
-# The full method name from ``service Engine { rpc Decide ... }`` in
-# proto/cella.proto; the bridge dials exactly this.
-DECIDE_METHOD = "/cella.Engine/Decide"
 
-REFUSAL_WHY_NO_GRANT = "no cella.policy grants this crossing"
-
-# Dry-run collection plants each outgoing destination with a long window,
-# 24h like ARP and the member border: collection observes each crossing
-# once, so a remembered destination can wait live instead of freezing. The
-# window only governs freeze frequency here, never authorization -- the
-# recorder releases everything regardless.
-_RECORDER_KEEP_OPEN = 86400
 
 
 def _memory_key(destination: Destination) -> tuple:
@@ -203,7 +197,7 @@ class PolicyJudge:
                 dest is not None
                 and operation.direction == DIRECTION_OUTGOING
                 and self._memory.plant(
-                    _memory_key(dest), _RECORDER_KEEP_OPEN, time.monotonic()
+                    _memory_key(dest), RECORDER_KEEP_OPEN, time.monotonic()
                 )
             ):
                 decisions.append(
@@ -212,7 +206,7 @@ class PolicyJudge:
                         membrane_memory=MembraneMemory(
                             destination=dest,
                             skip_freeze=True,
-                            keep_open=_RECORDER_KEEP_OPEN,
+                            keep_open=RECORDER_KEEP_OPEN,
                         ),
                     )
                 )

@@ -29,8 +29,12 @@ from titanium.environments.cella.buildfile import (
     discover_build_file,
     prepare_build_context,
 )
-from titanium.environments.cella.converter import (
+from titanium.environments.cella.constants import (
     BOOT_LAYER_FIELD,
+    ROOTFS_BUILDER_IMAGE,
+    STRATEGY_ALREADY_SYSTEMD,
+)
+from titanium.environments.cella.converter import (
     ConversionError,
     FlavorIdentity,
     convert_task_to_rootfs_flavor,
@@ -59,7 +63,6 @@ from titanium.environments.cella.podman import (
     run_podman,
 )
 from titanium.environments.cella.rootfs import (
-    ROOTFS_BUILDER_IMAGE,
     RootfsBuildError,
     build_ext4,
     ensure_rootfs_builder_image,
@@ -67,7 +70,6 @@ from titanium.environments.cella.rootfs import (
     sha3_256_file,
 )
 from titanium.environments.cella.systemd_boot import (
-    STRATEGY_ALREADY_SYSTEMD,
     BuildRun,
     GuestOsInfo,
     PreparedSystemdRootfs,
@@ -197,7 +199,9 @@ def test_parse_accepts_the_list_podman_emits_and_the_bare_object():
     ],
 )
 def test_unusable_records_are_refused(raw):
-    with pytest.raises(ValueError):
+    # A wrong shape is a TypeError, a wrong value a ValueError; the
+    # refusal is what matters, not which sibling names it.
+    with pytest.raises((TypeError, ValueError)):
         parse_image_record(raw)
 
 
@@ -599,6 +603,12 @@ def test_staging_normalizes_and_qualifies(tmp_path):
     assert "docker.io/library/alpine:3.20" in staged
     assert context.source_build_file_name == "Containerfile"
     assert not context.agent_install_applied
+    # The standard non-root agent user is baked into every image, at
+    # build time, guarded so an image that ships it already is a no-op.
+    assert "useradd -m -s /bin/bash titanium" in staged
+    assert staged.index("FROM") < staged.index("useradd")
+    # Paced for the eight-port reply window.
+    assert "ENV UV_CONCURRENT_DOWNLOADS=3" in staged
 
 
 def test_staging_refuses_a_leftover_context(tmp_path):

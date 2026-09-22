@@ -20,14 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-# Docker manifest format, not podman's OCI default. `podman image inspect`
-# drops HEALTHCHECK entirely from an OCI-format image and reports it at the
-# record's top level for a docker-format one; SHELL is absent either way.
-# Building docker-format therefore makes the largest possible share of the
-# task's declared runtime semantics *visible* to whoever classifies them. A
-# field that never reaches the classifier cannot be honored or refused -- it
-# is silently ignored, which is the failure this converter exists to avoid.
-IMAGE_FORMAT = "docker"
+from titanium.environments.cella.constants import IMAGE_FORMAT
 
 
 class PodmanError(RuntimeError):
@@ -76,7 +69,8 @@ def run_podman(
                 stdout=sink,
                 stderr=subprocess.PIPE,
                 timeout=timeout_sec,
-            )
+        check=False,
+    )
         stdout = ""
         stderr = completed.stderr.decode(errors="replace")
     else:
@@ -85,7 +79,8 @@ def run_podman(
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout_sec,
-        )
+        check=False,
+    )
         stdout = completed.stdout.decode(errors="replace")
         stderr = completed.stderr.decode(errors="replace")
 
@@ -104,6 +99,7 @@ def image_exists(reference: str) -> bool:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        check=False,
     )
     return completed.returncode == 0
 
@@ -167,6 +163,7 @@ def untag_image(tag: str) -> None:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        check=False,
     )
 
 
@@ -201,4 +198,5 @@ def export_rootfs_tar(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-        )
+        check=False,
+    )

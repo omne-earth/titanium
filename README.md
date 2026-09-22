@@ -34,13 +34,39 @@ Every environment installs agents, honors per-task network allowlists, and runs 
 | **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel | KVM microVM (libkrun) | KVM micro-VM, its VMM seccomp-allowlisted and jailed by bwrap under a per-machine sub-uid + a judged network membrane |
 | **Engine** | Docker daemon | rootless Podman, no socket | Docker daemon | rootless Podman, no socket | rootless Podman, no socket | cella — no daemon, no host network object |
 | **Runtime** | runc | crun | runsc | runsc | krun | the cella VMM, direct on KVM |
-| **Kernel isolation** | none — workload syscalls hit the host kernel, seccomp-filtered | none — workload syscalls hit the host kernel, seccomp-filtered | Sentry, a userspace application kernel, absorbs the workload's syscalls | Sentry, a userspace application kernel, absorbs the workload's syscalls | a dedicated guest kernel (libkrunfw) inside a KVM VM | a dedicated guest kernel inside a KVM VM; one boot per command, with no live guest to exec into |
+| **Kernel isolation** | none — workload syscalls hit the host kernel, seccomp-filtered | none — workload syscalls hit the host kernel, seccomp-filtered | Sentry, a userspace application kernel, absorbs the workload's syscalls | Sentry, a userspace application kernel, absorbs the workload's syscalls | a dedicated guest kernel (libkrunfw) inside a KVM VM | a dedicated guest kernel inside a KVM VM; the agent's whole turn is one boot, its grader a second, with no live guest to exec into |
 | **File system isolation** | shared — the root daemon's store; the image cache and volumes persist across runs | rootless overlay in the runner's private store; bind mounts relabeled (`:z`); cleared by `make reset` | sandbox-private rootfs — the Sentry's gofer owns it; the host cannot `cp` into or out of it, so transfers run from inside | the same sandbox-private rootfs, on the runner's rootless store | the rootfs crosses virtiofs from host storage into the guest; `podman cp` stays coherent against the running guest | a private ext4 block device the guest boots; nothing from the host is mounted in, and evidence is copied out of a still machine, never a live one |
 | **A container escape lands as** | root | unprivileged user | host-side runsc processes, behind Sentry | unprivileged user, behind Sentry | unprivileged user, outside the VM | a process inside the sealed guest; the membrane still judges every frame out |
 | **Root daemon in the trust chain** | yes | no | yes | no | no | no |
 | **Runner separation** (run as a throwaway user) | — | the `titanium` user, via `make titanium-run` | — | the `titanium` user, via `make titanium-run` | the `titanium` user, via `make titanium-run` | intrinsic — cella is rootless and daemonless |
-| **Overhead** | near-native | near-native; rootless image builds cost more — pre-load images | syscall interposition tax — syscall- and I/O-heavy workloads pay most | gvisor's tax, plus a user-mode network hop (pasta) at the host edge; pre-load images | VM boot per container, virtiofs I/O, and each guest kernel's memory footprint; pre-load images | a VM boot per command and the judge round-trip; the highest of the rungs |
+| **Overhead** | near-native | near-native; rootless image builds cost more — pre-load images | syscall interposition tax — syscall- and I/O-heavy workloads pay most | gvisor's tax, plus a user-mode network hop (pasta) at the host edge; pre-load images | VM boot per container, virtiofs I/O, and each guest kernel's memory footprint; pre-load images | five VM boots per trial (member, verifier, the extractors, the appliance) and the judge round-trip on each crossing |
 | **Pre-load images** | — | `images-vendor` / `images-restore` | — | `images-vendor` / `images-restore` | `images-vendor` / `images-restore` | — the task image becomes a rootfs golden |
+
+### Infiltration Attack Surface
+
+Infiltration is the workload attacking the host through its sandbox
+boundary. Two numbers size that risk for each environment: how much
+code the workload can push bytes at, and what account the workload
+holds if that code breaks. No layer is solid. The table counts the
+code that must have the bug, not layers assumed to hold.
+
+| Environment | Code the workload can reach | Lines | Landing zone on a win |
+|---|---|---|---|
+| `cella` | the cella VMM and the KVM ioctl surface; after boot, seccomp allowlists the run loop to `KVM_RUN` plus the freeze-path reads | **2,466 lines of Rust** (1,757 code lines; the whole cella workspace is 16,680) — measured at the pinned rev, `wc -l` on `crates/cella-vmm/src` | the machine's own sub-uid, inside a bwrap jail with user, mount, pid, ipc, uts, and cgroup namespaces unshared; its filesystem reach is one machine directory plus execute-only traversal ACLs; every network frame it sends still parks at the membrane for a named verdict |
+| `krun-podman` | the libkrun VMM and the KVM ioctl surface | ~35,000 lines of Rust and C (upstream estimate, not measured here) | the `titanium` runner uid outside the VM; the VMM ran under a confined SELinux domain and a tightened seccomp profile |
+| `gvisor-podman` | the Sentry (a userspace application kernel in Go), or the host kernel through the narrowed syscall profile the Sentry itself uses | ~250,000 lines of Go (upstream estimate, not measured here) | the `runsc` sandbox process, owned by the `titanium` runner uid, still inside the seccomp filter `runsc` installs on itself |
+| `gvisor` | the same two surfaces | the same ~250,000 | the same sandbox process — but uid 0 under `dockerd` |
+| `podman` | the host kernel, through the full syscall table under a seccomp filter | not enumerable — the kernel tree is tens of millions of lines, and the reachable slice has no stable measure | the nologin `titanium` uid: its subuid range, its container storage, trial state — no login, no sudo, no keys |
+| `docker` | the host kernel, through the same filtered syscall table | the same non-enumerable kernel slice | a uid-0 process in the initial user namespace; the daemon socket it can then reach is root-equivalent |
+
+The measured number is the argument. The code a hostile guest can
+attack on the `cella` rung is three orders of magnitude smaller than
+the kernel rungs and two smaller than the Sentry — small enough that
+one person can read all of it. Both KVM rows share one irreducible
+base: KVM itself is kernel code, but its ioctl surface is narrow and
+heavily exercised. The estimates for gVisor and libkrun come from
+their upstream trees; the cella number is measured by this
+repository's pin and moves with it.
 
 ### Network
 
@@ -52,11 +78,11 @@ Network policy is enforced by a **per-trial egress proxy**, not by trust: an all
 
 ### cella
 
-The sealed-VM rung, on cella — hardware-isolated micro-VMs written directly on KVM, with no daemon, no capability, and no host network object. Each machine boots a dedicated guest kernel. A command is one boot: the machine boots, runs the command, and powers off. There is no channel into a live guest, and no exec-into.
+The sealed-VM rung, on cella — hardware-isolated micro-VMs written directly on KVM, with no daemon, no capability, and no host network object. Each machine boots a dedicated guest kernel. The trial is two sealed experiments: the member runs the agent's whole turn — setup, agent, collect — with no tests aboard, and resets; its extracted state is rebaked with the tests into a verifier machine that grades and resets. The agent and its graders never coexist. There is no channel into a live guest, and no exec-into.
 
 The border is total. Every network frame parks at a membrane for an external decision, and titanium's in-process engine judges it by resolved name. The trajectory gains what no other rung records: the chronicle of every crossing the agent attempted, the refused ones included. A task with egress uses a terminated pair, so even TLS to the world is terminated on a consented pair CA and judged by name.
 
-Time is cryogenic: a machine freezes in one instant and thaws with no gap the guest can measure, and a machine is files — it can be archived to a rock or branched into twins. The costs are explicit: one vCPU per machine, a VM boot per command, and no live exec. Choose by threat model; the full account is [docs/environments/CELLA.md](docs/environments/CELLA.md), and the operator's guide to a cella trial on disk — every folder, file, and machine suffix under `.run/` — is [README-cella.md](README-cella.md).
+Time is cryogenic: a machine freezes in one instant and thaws with no gap the guest can measure, and a machine is files — it can be archived to a rock or branched into twins. The costs are explicit: one vCPU per machine, five boots per trial, and no live exec. Results and artifacts leave the still machine through `cella extract`; titanium never mounts or edits a filesystem. Choose by threat model; the full account is [docs/environments/CELLA.md](docs/environments/CELLA.md), and the operator's guide to a cella trial on disk — every folder, file, and machine name under `.run/` — is [README-cella.md](README-cella.md).
 
 ### gvisor-podman — the default
 

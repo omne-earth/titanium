@@ -1,12 +1,13 @@
 import json
 import shlex
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
 import yaml
 
+from titanium.agents.base import SealedCommandSpec, SealedStep
 from titanium.agents.installed.base import (
     BaseInstalledAgent,
     CliFlag,
@@ -59,10 +60,10 @@ def _iso_timestamp(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, int | float):
-        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(value, tz=UTC).isoformat()
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat()
+            return datetime.fromisoformat(value).isoformat()
         except ValueError:
             return None
     return None
@@ -558,7 +559,7 @@ class MiniSweAgent(BaseInstalledAgent):
         "https://raw.githubusercontent.com/BerriAI/litellm/main/"
         "model_prices_and_context_window.json"
     )
-    _DEFAULT_PROVIDER_DOMAINS: dict[str, list[str]] = {
+    _DEFAULT_PROVIDER_DOMAINS: ClassVar[dict[str, list[str]]] = {
         "anthropic": ["api.anthropic.com"],
         "bedrock": [".amazonaws.com"],
         "deepseek": ["api.deepseek.com"],
@@ -574,7 +575,7 @@ class MiniSweAgent(BaseInstalledAgent):
 
     def __init__(
         self,
-        cost_limit: str | int | float | None = 0,
+        cost_limit: str | float | None = 0,
         reasoning_effort: str | None = None,
         model_class: str | None = "auto",
         model_kwargs: dict[str, Any] | None = None,
@@ -817,27 +818,70 @@ mini-swe-agent --help
         except Exception as e:
             self.logger.debug(f"Failed to convert trajectory to ATIF format: {e}")
 
-    @with_prompt_template
-    async def run(
-        self, instruction: str, environment: BaseEnvironment, context: AgentContext
-    ) -> None:
-        augmented_instruction = instruction
-        if self.mcp_servers:
-            mcp_info = "\n\nMCP Servers:\nThe following MCP servers are available for this task.\n"
-            for s in self.mcp_servers:
-                if s.transport == "stdio":
-                    args_str = " ".join(s.args)
-                    mcp_info += f"- {s.name}: stdio transport, command: {s.command} {args_str}\n"
-                else:
-                    mcp_info += f"- {s.name}: {s.transport} transport, url: {s.url}\n"
-            augmented_instruction = instruction + mcp_info
-
+    def sealed_command_spec(
+        self, instruction: str, environment: BaseEnvironment
+    ) -> SealedCommandSpec | None:
+        """The run as bake-time steps for a sealed-oneshot rung: the
+        config write, then the agent invocation — the same commands
+        :meth:`run` execs, stated up front. The install itself is
+        baked into the image (``preinstall_agents``), so no install
+        steps appear here. The prompt template renders here explicitly:
+        the ``with_prompt_template`` decorator is async-only."""
+        instruction = self.render_instruction(instruction)
+        augmented_instruction = self._augment_instruction(instruction)
         escaped_instruction = shlex.quote(augmented_instruction)
-
         run_model_name = self._run_model_name
         if not run_model_name or "/" not in run_model_name:
             raise ValueError("Model name must be in the format provider/model_name")
+        env = self._build_run_env()
+        cli_flags = self.build_cli_flags()
+        extra_flags = (cli_flags + " ") if cli_flags else ""
+        steps: list[SealedStep] = []
+        custom_config_path = None
+        if self._config_yaml:
+            custom_config_path = "/tmp/mswea-config/custom.yaml"
+            heredoc_marker = f"MSWEA_CONFIG_EOF_{uuid.uuid4().hex[:8]}"
+            steps.append(
+                SealedStep(
+                    command=(
+                        f"mkdir -p /tmp/mswea-config\n"
+                        f"cat > '{custom_config_path}' << '{heredoc_marker}'\n"
+                        f"{self._config_yaml}\n"
+                        f"{heredoc_marker}\n"
+                    ),
+                    env=dict(env),
+                )
+            )
+        config_flags = self._build_config_flags(custom_config_path=custom_config_path)
+        steps.append(
+            SealedStep(
+                command=(
+                    '. "$HOME/.local/bin/env"; '
+                    f"mini-swe-agent --yolo --model={run_model_name} "
+                    f"--task={escaped_instruction} "
+                    f"--output={self._mini_swe_agent_trajectory_path} {extra_flags}"
+                    f"{config_flags}"
+                    f"--exit-immediately 2>&1 </dev/null "
+                    f"| tee /logs/agent/mini-swe-agent.txt"
+                ),
+                env=dict(env),
+            )
+        )
+        return SealedCommandSpec(steps=tuple(steps))
 
+    def _augment_instruction(self, instruction: str) -> str:
+        if not self.mcp_servers:
+            return instruction
+        mcp_info = "\n\nMCP Servers:\nThe following MCP servers are available for this task.\n"
+        for s in self.mcp_servers:
+            if s.transport == "stdio":
+                args_str = " ".join(s.args)
+                mcp_info += f"- {s.name}: stdio transport, command: {s.command} {args_str}\n"
+            else:
+                mcp_info += f"- {s.name}: {s.transport} transport, url: {s.url}\n"
+        return instruction + mcp_info
+
+    def _build_run_env(self) -> dict[str, str]:
         env = self.build_process_env(
             {
                 "LITELLM_LOCAL_MODEL_COST_MAP": "true",
@@ -845,7 +889,6 @@ mini-swe-agent --help
                 "MSWEA_COST_TRACKING": "ignore_errors",  # Ignore unknown model costs
             }
         )
-
         if self._get_env("MSWEA_API_KEY"):
             env["MSWEA_API_KEY"] = self._get_env("MSWEA_API_KEY") or ""
         else:
@@ -864,12 +907,23 @@ mini-swe-agent --help
                     f"Unable to determine API key for model {self.model_name}: {e}. "
                     "Please set MSWEA_API_KEY environment variable as fallback"
                 )
-
-        # Pass through common API base configurations if present
         if self._get_env("OPENAI_API_BASE"):
             env["OPENAI_API_BASE"] = self._get_env("OPENAI_API_BASE") or ""
         if self._get_env("OPENAI_BASE_URL"):
             env["OPENAI_BASE_URL"] = self._get_env("OPENAI_BASE_URL") or ""
+        return env
+
+    @with_prompt_template
+    async def run(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        escaped_instruction = shlex.quote(self._augment_instruction(instruction))
+
+        run_model_name = self._run_model_name
+        if not run_model_name or "/" not in run_model_name:
+            raise ValueError("Model name must be in the format provider/model_name")
+
+        env = self._build_run_env()
 
         cli_flags = self.build_cli_flags()
         extra_flags = (cli_flags + " ") if cli_flags else ""

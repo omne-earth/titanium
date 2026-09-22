@@ -38,75 +38,35 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from titanium.environments.cella import config
 from titanium.environments.cella.boot_layer import BootEntry, GuestFile
-
-# The wire's pair-0 convention: the appliance is the member's gateway.
-APPLIANCE_WIRE_ADDRESS = "10.77.0.1"
-MEMBER_WIRE_ADDRESS = "10.77.0.2"
-_WIRE_PREFIX = 24
-
-# The ports the appliance terminates on: TLS by SNI, plain HTTP by
-# Host, on any of them. 443 carries the agent's inference and every
-# https fetch; 80 carries apt's plain-HTTP mirrors.
-LISTEN_PORTS = (443, 80)
-
-# The real resolver the appliance asks upstream. The names live at the
-# appliance; this is where it turns them into addresses.
-UPSTREAM_DNS = "9.9.9.9"
+from titanium.environments.cella.constants import (
+    APPLIANCE_HOST_KEEP_OPEN,
+    APPLIANCE_WIRE_ADDRESS,
+    ARP_KEEP_OPEN,
+    MEMBER_CA_PATH,
+    MEMBER_KEEP_OPEN,
+    MEMBER_WIRE_ADDRESS,
+    REPLY_PORT_HIGH,
+    REPLY_PORT_LOW,
+    REPLY_WINDOW_KEEP_OPEN,
+    RESOLVER_ATTEMPTS,
+    RESOLVER_TIMEOUT_SEC,
+    SYSTEM_CA_BUNDLE,
+    TERMINATOR_GOLDEN,
+    UPSTREAM_DNS,
+    UPSTREAM_DNS_KEEP_OPEN,
+    WIRE_PREFIX,
+)
 
 # The consistent reply port window (docs/integration/MEMBRANE-MEMORY.md,
 # "The consistent reply port"): the member pins its ephemeral range to a
-# narrow, agreed window, and the appliance grants that window as exact
-# destinations -- so the appliance's replies toward the member never
-# freeze on an unnameable ephemeral port. Eight ports is the concurrency
-# budget (the 4-tuple still demuxes each flow).
-REPLY_PORT_LOW = 50000
-REPLY_PORT_HIGH = 50007
 
-# The terminator golden and the pair CA it exports beside itself
-# (scripts/init/cella.sh builds both, one per host).
-TERMINATOR_GOLDEN = "terminator"
 
-# Guest paths: where the appliance reads its config, and where the
-# member carries the pair CA and points its resolver.
-TERMINATOR_CONF_PATH = "/etc/cella-terminator.conf"
-MEMBER_CA_PATH = "/etc/cella/pair-ca.pem"
-SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 
 
 def pair_ca_path(home: Path) -> Path:
     """Where the terminator golden's build exported the pair CA."""
     return home / ".cella" / "rootfs" / TERMINATOR_GOLDEN / "ca.pem"
-
-
-def terminator_golden_rootfs(home: Path) -> Path:
-    """The terminator golden's rootfs ext4, the appliance's template."""
-    return home / ".cella" / "rootfs" / TERMINATOR_GOLDEN / "rootfs.ext4"
-
-
-def terminator_conf_text() -> str:
-    """The appliance's ``/etc/cella-terminator.conf``: constant across
-    trials (the wire address is the pair-0 gateway, the resolver and the
-    listen ports are fixed), so one baked flavor serves every trial."""
-    listen = ",".join(str(p) for p in LISTEN_PORTS)
-    return (
-        f"wire_ip={APPLIANCE_WIRE_ADDRESS}\n"
-        f"upstream_dns={UPSTREAM_DNS}\n"
-        f"listen={listen}\n"
-    )
-
-
-def terminator_conf_entry() -> GuestFile:
-    """The conf as a boot-layer entry, injected into a copy of the
-    terminator golden to make titanium's appliance flavor."""
-    return GuestFile(
-        path=TERMINATOR_CONF_PATH,
-        contents=terminator_conf_text().encode(),
-        mode=0o644,
-        uid=0,
-        gid=0,
-    )
 
 
 def member_trust_entries(ca_pem: bytes) -> list[BootEntry]:
@@ -123,6 +83,19 @@ def member_trust_entries(ca_pem: bytes) -> list[BootEntry]:
             gid=0,
         ),
         GuestFile(
+            # The eight-port reply window is livable only with
+            # TIME_WAIT reuse: without it, sequential connections
+            # churn through the window and the ninth connect dies on
+            # EADDRNOTAVAIL (build-pmars' verifier, os error 99).
+            # systemd-sysctl applies this at boot -- the same fix
+            # cella made on the terminator's legs.
+            path="/etc/sysctl.d/50-reply-window.conf",
+            contents=b"net.ipv4.tcp_tw_reuse = 1\n",
+            mode=0o644,
+            uid=0,
+            gid=0,
+        ),
+        GuestFile(
             path="/etc/resolv.conf",
             # The appliance freezes once on the first reply to each of
             # the member's reply ports (the park is the freeze, before
@@ -132,8 +105,8 @@ def member_trust_entries(ca_pem: bytes) -> list[BootEntry]:
             # delivered -- the member never reaches the world at all.
             contents=(
                 f"nameserver {APPLIANCE_WIRE_ADDRESS}\n"
-                f"options timeout:{config.RESOLVER_TIMEOUT_SEC} "
-                f"attempts:{config.RESOLVER_ATTEMPTS} single-request\n"
+                f"options timeout:{RESOLVER_TIMEOUT_SEC} "
+                f"attempts:{RESOLVER_ATTEMPTS} single-request\n"
             ).encode(),
             mode=0o644,
             uid=0,
@@ -148,7 +121,7 @@ def wire_up_commands(interface: str, address: str) -> str:
     world nics only), and provisioning guarantees iproute2."""
     return (
         f"ip link set {interface} up || true\n"
-        f"ip addr replace {address}/{_WIRE_PREFIX} dev {interface} || true\n"
+        f"ip addr replace {address}/{WIRE_PREFIX} dev {interface} || true\n"
     )
 
 
@@ -212,11 +185,11 @@ def member_policy_text() -> str:
         "# The member border (appended by titanium): the wire plane's\n"
         "# ARP and the appliance. The member's only peer is its\n"
         "# terminator; the world names are judged at the appliance.\n"
-        f"release outgoing arp (keep_open={config.ARP_KEEP_OPEN}) (skip_freeze=true)\n"
+        f"release outgoing arp (keep_open={ARP_KEEP_OPEN}) (skip_freeze=true)\n"
         "release incoming arp\n"
-        + _round_trip(f"{gw}:443", "tcp", config.MEMBER_KEEP_OPEN)
-        + _round_trip(f"{gw}:80", "tcp", config.MEMBER_KEEP_OPEN)
-        + _round_trip(f"{gw}:53", "udp", config.MEMBER_KEEP_OPEN)
+        + _round_trip(f"{gw}:443", "tcp", MEMBER_KEEP_OPEN)
+        + _round_trip(f"{gw}:80", "tcp", MEMBER_KEEP_OPEN)
+        + _round_trip(f"{gw}:53", "udp", MEMBER_KEEP_OPEN)
     )
 
 
@@ -233,9 +206,9 @@ def appliance_border_policy_text(world_hosts: list[str]) -> str:
             "# judged by the resolved name. ARP, the upstream resolver,\n"
             "# the member's reply window, and each allowed world host.\n"
         ),
-        f"release outgoing arp (keep_open={config.ARP_KEEP_OPEN}) (skip_freeze=true)\n",
+        f"release outgoing arp (keep_open={ARP_KEEP_OPEN}) (skip_freeze=true)\n",
         "release incoming arp\n",
-        _round_trip(f"{UPSTREAM_DNS}:53", "udp", config.UPSTREAM_DNS_KEEP_OPEN),
+        _round_trip(f"{UPSTREAM_DNS}:53", "udp", UPSTREAM_DNS_KEEP_OPEN),
         (
             "# The member's reply window (the consistent reply port): the\n"
             "# member pins its ephemeral ports to this range, so a crossing\n"
@@ -248,12 +221,12 @@ def appliance_border_policy_text(world_hosts: list[str]) -> str:
         for proto in ("tcp", "udp"):
             lines.append(
                 f"release outgoing {MEMBER_WIRE_ADDRESS}:{port}/{proto} "
-                f"(keep_open={config.REPLY_WINDOW_KEEP_OPEN}) (skip_freeze=true)\n"
+                f"(keep_open={REPLY_WINDOW_KEEP_OPEN}) (skip_freeze=true)\n"
             )
             lines.append(f"release incoming {MEMBER_WIRE_ADDRESS}:{port}/{proto}\n")
     if world_hosts:
         lines.append("# The allowed world hosts, by name.\n")
         for host in world_hosts:
-            lines.append(_round_trip(f"{host}:443", "tcp", config.APPLIANCE_HOST_KEEP_OPEN))
-            lines.append(_round_trip(f"{host}:80", "tcp", config.APPLIANCE_HOST_KEEP_OPEN))
+            lines.append(_round_trip(f"{host}:443", "tcp", APPLIANCE_HOST_KEEP_OPEN))
+            lines.append(_round_trip(f"{host}:80", "tcp", APPLIANCE_HOST_KEEP_OPEN))
     return "".join(lines)

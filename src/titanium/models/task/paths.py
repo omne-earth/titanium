@@ -59,15 +59,15 @@ class TaskPaths:
         return self.task_dir / self.CONFIG_FILENAME
 
     @property
-    def pre_artifacts_path(self) -> Path:
-        """Path to the optional pre_artifacts.sh script.
+    def collect_script_path(self) -> Path:
+        """Path to the optional collect script (``collect.sh``).
 
         When present, the trial runs it inside the agent environment after the
         agent finishes and immediately before artifact collection, so the task
         can materialize artifacts from the agent's work (e.g. capture the
         change set as /logs/artifacts/model.patch for a separate verifier).
         """
-        return self.task_dir / "pre_artifacts.sh"
+        return self.task_dir / "collect.sh"
 
     @property
     def environment_dir(self) -> Path:

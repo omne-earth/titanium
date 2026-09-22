@@ -13,13 +13,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from titanium.environments.base import ExecResult
 from titanium.models.task.config import TaskOS
-from titanium.models.trial.config import TaskConfig as TrialTaskConfig
 from titanium.models.trial.config import (
     AgentConfig,
     EnvironmentConfig,
     TrialConfig,
     VerifierConfig,
 )
+from titanium.models.trial.config import TaskConfig as TrialTaskConfig
 from titanium.models.trial.paths import EnvironmentPaths
 from titanium.models.trial.result import AgentInfo
 from titanium.trial.trial import Trial
@@ -72,6 +72,7 @@ def _make_env(mounted: bool) -> AsyncMock:
     env = AsyncMock()
     env.default_user = None
     env.capabilities.mounted = mounted
+    env.capabilities.sealed_oneshot = False
     env.task_os = TaskOS.LINUX
     env.env_paths = EnvironmentPaths()
     env.exec.return_value = ExecResult(stdout="/", stderr="", return_code=0)

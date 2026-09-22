@@ -1,5 +1,6 @@
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from titanium.environments.base import BaseEnvironment
@@ -9,6 +10,38 @@ from titanium.models.agent.network import NetworkAllowlist
 from titanium.models.task.config import MCPServerConfig
 from titanium.models.trial.result import AgentInfo, ModelInfo
 from titanium.utils.logger import logger as global_logger
+
+
+@dataclass(frozen=True)
+class SealedStep:
+    """One in-guest step of a sealed phase: a command, its process
+    environment, and the user it runs as. Steps within one phase run
+    in order inside the same boot — a step is free, only a boot costs."""
+
+    command: str
+    env: dict[str, str] = field(default_factory=dict)
+    user: str | None = None
+    """Guest user; ``None`` means the task's agent user."""
+
+
+@dataclass(frozen=True)
+class SealedCommandSpec:
+    """The agent's whole run as bake-time inputs, for a sealed-oneshot
+    environment (``EnvironmentCapabilities.sealed_oneshot``).
+
+    A sealed environment takes no exec after boot, so an agent that
+    supports it must state its run up front: the directories to bake
+    in, and the ordered steps the guest orchestrator runs as the agent
+    phase. Agents that cannot state their run this way return ``None``
+    from :meth:`BaseAgent.sealed_command_spec` and cannot run on a
+    sealed rung.
+    """
+
+    steps: tuple[SealedStep, ...]
+    """The agent phase, in order. The last step is the payload."""
+
+    uploads: tuple[tuple[Path, str], ...] = ()
+    """Host directories to bake, as ``(source_dir, guest_dir)`` pairs."""
 
 
 class BaseAgent(ABC):
@@ -101,6 +134,20 @@ class BaseAgent(ABC):
         The import path of the agent. Formatted as 'some.import.path:AgentClass'.
         """
         return f"{cls.__module__}:{cls.__name__}"
+
+    def sealed_command_spec(
+        self, instruction: str, environment: BaseEnvironment
+    ) -> SealedCommandSpec | None:
+        """The agent's run as bake-time inputs, or ``None``.
+
+        A sealed-oneshot environment (``capabilities.sealed_oneshot``)
+        calls this instead of :meth:`setup`/:meth:`run`: the returned
+        uploads are baked into the guest and the command runs as the
+        agent phase of the guest orchestrator. ``None`` (the default)
+        means this agent cannot state its run up front and does not
+        support sealed rungs.
+        """
+        return None
 
     @abstractmethod
     async def setup(self, environment: BaseEnvironment) -> None:

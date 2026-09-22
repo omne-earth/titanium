@@ -21,6 +21,10 @@ from grpclib.client import Channel
 from grpclib.const import Cardinality
 from grpclib.server import Server
 
+from titanium.environments.cella.constants import (
+    DIRECTION_INCOMING,
+    ETHERTYPE_ARP,
+)
 from titanium.environments.cella.engine import (
     DECIDE_METHOD,
     REFUSAL_WHY_NO_GRANT,
@@ -39,8 +43,6 @@ from titanium.environments.cella.policy import (
     grant_for,
 )
 from titanium.environments.cella.wire import (
-    DIRECTION_INCOMING,
-    ETHERTYPE_ARP,
     Decision,
     Destination,
     Event,

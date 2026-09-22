@@ -28,25 +28,24 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from titanium.environments.cella.constants import (
+    DIRECTION_OUTGOING,
+    I32_WIRE_TYPE,
+    I64_WIRE_TYPE,
+    LEN_WIRE_TYPE,
+    VARINT_WIRE_TYPE,
+)
+
 # proto3 wire types. Groups (3 and 4) predate proto3 and cannot appear
 # in bytes produced from cella.proto; meeting one means the frame is not
 # a cella message at all, so the decoder refuses rather than guesses.
-_VARINT = 0
-_I64 = 1
-_LEN = 2
-_SGROUP = 3
-_EGROUP = 4
-_I32 = 5
 
 # Operation.Direction: which way the crossing faces.
-DIRECTION_OUTGOING = 0
-DIRECTION_INCOMING = 1
 
 # Named because the vocabulary speaks ethertypes and ARP is the one a
 # policy is most likely to reason about. The allow_internet engine
 # grants it nothing: whether ARP ever rides free is a per-task
 # cella.policy decision, not a constant's.
-ETHERTYPE_ARP = 0x0806
 
 
 class WireError(ValueError):
@@ -92,12 +91,12 @@ def _varint_field(field_number: int, value: int) -> bytes:
     """One varint field, omitted at its proto3 default of zero."""
     if value == 0:
         return b""
-    return _tag(field_number, _VARINT) + _encode_varint(value)
+    return _tag(field_number, VARINT_WIRE_TYPE) + _encode_varint(value)
 
 
 def _len_field(field_number: int, payload: bytes) -> bytes:
     """One length-delimited field (bytes, string, embedded message)."""
-    return _tag(field_number, _LEN) + _encode_varint(len(payload)) + payload
+    return _tag(field_number, LEN_WIRE_TYPE) + _encode_varint(len(payload)) + payload
 
 
 def _bytes_field(field_number: int, payload: bytes) -> bytes:
@@ -122,18 +121,18 @@ def _iter_fields(buf: bytes) -> Iterator[tuple[int, int | bytes]]:
         wire_type = key & 0x07
         if field_number == 0:
             raise WireError("field number 0 is not valid protobuf")
-        if wire_type == _VARINT:
+        if wire_type == VARINT_WIRE_TYPE:
             value, pos = _decode_varint(buf, pos)
             yield field_number, value
-        elif wire_type == _LEN:
+        elif wire_type == LEN_WIRE_TYPE:
             length, pos = _decode_varint(buf, pos)
             if pos + length > len(buf):
                 raise WireError("truncated length-delimited field")
             yield field_number, buf[pos : pos + length]
             pos += length
-        elif wire_type == _I64:
+        elif wire_type == I64_WIRE_TYPE:
             pos += 8
-        elif wire_type == _I32:
+        elif wire_type == I32_WIRE_TYPE:
             pos += 4
         else:
             raise WireError(f"unsupported wire type {wire_type}")

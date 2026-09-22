@@ -35,11 +35,8 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from titanium.environments.cella.constants import MAX_GUEST_FILE_MODE
 from titanium.environments.cella.image_config import ImageRecord
-
-# Every bit a POSIX mode can carry: setuid, setgid, sticky, and the three
-# permission triads. Not a policy about which of them any entry should use.
-MAX_GUEST_FILE_MODE = 0o7777
 
 
 class BootLayerError(ValueError):

@@ -101,7 +101,7 @@ def parse_image_record(raw: Any) -> ImageRecord:
         record = raw
 
     if not isinstance(record, Mapping):
-        raise ValueError(
+        raise TypeError(
             f"Image inspect record is {type(record).__name__}, not an object."
         )
 
@@ -122,7 +122,7 @@ def parse_image_record(raw: Any) -> ImageRecord:
     config = record.get("Config")
     if not isinstance(config, Mapping):
         found = type(config).__name__ if "Config" in record else "absent"
-        raise ValueError(
+        raise TypeError(
             f"Image inspect record's 'Config' is {found}, not an object. The "
             "image's declared runtime semantics are unreadable; refusing "
             "rather than treating it as an image that declared nothing."

@@ -28,13 +28,13 @@ from titanium.environments.agent_setup import (
     qualify_dockerfile_froms,
     write_agent_dockerfile,
 )
+from titanium.environments.cella.constants import (
+    BUILD_FILE_NAMES,
+    ENV_BAKE_LINE,
+    STAGED_BUILD_FILE_NAME,
+    USER_BAKE_LINE,
+)
 from titanium.models.agent.install import AgentInstallSpec
-
-# Podman accepts either name. A task ships one.
-BUILD_FILE_NAMES = ("Dockerfile", "Containerfile")
-
-# The name every staged context uses, whatever the task called it.
-STAGED_BUILD_FILE_NAME = "Dockerfile"
 
 
 class BuildFileError(ValueError):
@@ -146,7 +146,16 @@ def prepare_build_context(
             staged_original.unlink()
 
     staged_build_file = context_dir / STAGED_BUILD_FILE_NAME
-    staged_build_file.write_text(qualify_dockerfile_froms(source_bytes.decode("utf-8")))
+    # The standard non-root agent user is baked here, in the image
+    # build, so it is a real passwd entry with a home directory by the
+    # time the tar exports -- never an ext4 or tar edit. Appended
+    # before any agent install, so it runs under the task's own USER
+    # (a task that sets a non-root USER and wants the standard user
+    # must create it itself; the guard keeps that loud, not silent).
+    qualified = qualify_dockerfile_froms(source_bytes.decode("utf-8"))
+    staged_build_file.write_text(
+        qualified.rstrip("\n") + "\n" + USER_BAKE_LINE + ENV_BAKE_LINE
+    )
 
     if agent_install_spec is not None:
         # write_agent_dockerfile re-reads the staged file and rewrites it in
