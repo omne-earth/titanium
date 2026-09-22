@@ -9,6 +9,7 @@ from titanium.environments.base import BaseEnvironment
 from titanium.environments.docker.docker import DockerEnvironment
 from titanium.environments.factory import EnvironmentFactory
 from titanium.environments.gvisor.environment import GVisorEnvironment
+from titanium.environments.krun.podman import KrunPodmanEnvironment
 from titanium.models.environment_type import EnvironmentType
 from titanium.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
 from titanium.models.trial.config import EnvironmentConfig, OnCompletion
@@ -66,8 +67,11 @@ async def test_complete_archive_calls_archive():
 
 
 @pytest.mark.asyncio
-async def test_gvisor_archive_is_explicitly_unsupported():
-    environment = object.__new__(GVisorEnvironment)
+async def test_krun_archive_is_explicitly_unsupported():
+    # krun inherits from the gVisor family but opts out: `podman stop`
+    # reaches only the VMM, so the guest state an archive would promise
+    # does not survive.
+    environment = object.__new__(KrunPodmanEnvironment)
 
     with pytest.raises(NotImplementedError):
         await environment.archive(delete=True)
@@ -99,10 +103,17 @@ def _create(tmp_path, env_type, on_completion):
     )
 
 
-ARCHIVE_CAPABLE = [EnvironmentType.DOCKER, EnvironmentType.PODMAN]
-ARCHIVE_UNSUPPORTED = [
+# The Compose-managed rungs: the sandbox runtime changes how the guest
+# executes, not how the container is kept, so all four archive the same way.
+ARCHIVE_CAPABLE = [
+    EnvironmentType.DOCKER,
+    EnvironmentType.PODMAN,
     EnvironmentType.GVISOR,
     EnvironmentType.GVISOR_PODMAN,
+]
+# krun hard-kills its VMM and cella manages its own machines, so neither
+# inherits the family's archive.
+ARCHIVE_UNSUPPORTED = [
     EnvironmentType.KRUN_PODMAN,
     EnvironmentType.CELLA,
 ]
@@ -167,9 +178,10 @@ def test_cella_kwarg_on_completion_is_independent(tmp_path):
 def test_archive_capability_is_declared_not_inferred_from_defining_archive():
     from titanium.environments.factory import _supports_archive
 
-    # gVisor DEFINES archive -- to refuse it -- so "defines archive" cannot be
+    # krun DEFINES archive -- to refuse it -- so "defines archive" cannot be
     # the capability test; the declared flag is.
-    assert hasattr(GVisorEnvironment, "archive")
+    assert hasattr(KrunPodmanEnvironment, "archive")
     assert _supports_archive(DockerEnvironment)
-    assert not _supports_archive(GVisorEnvironment)
+    assert _supports_archive(GVisorEnvironment)
+    assert not _supports_archive(KrunPodmanEnvironment)
     assert not _supports_archive(BaseEnvironment)

@@ -1,5 +1,6 @@
 import traceback
 from datetime import datetime
+from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -56,6 +57,12 @@ class AgentInfo(BaseModel):
     version: str
     model_info: ModelInfo | None = None
 
+#for a specific case
+class EnvironmentCompletionResult(BaseModel):
+    status: Literal["succeeded", "failed"]
+    error: ExceptionInfo | None = None
+    archive_path: str | None = None
+
 
 class StepResult(BaseModel):
     step_name: str
@@ -87,6 +94,7 @@ class TrialResult(BaseModel):
     verifier: TimingInfo | None = None
     n_agent_steps: int | None = None
     step_results: list[StepResult] | None = None
+    environment_completion: EnvironmentCompletionResult | None = None
 
     def agent_step_count(self) -> int | None:
         if self.n_agent_steps is not None:

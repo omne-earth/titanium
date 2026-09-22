@@ -424,6 +424,19 @@ class PodmanEnvironment(DockerEnvironment):
 
     # -------------------------------------------------------------- container
 
+    def _engine_command_name(self) -> str:
+        return self.podman_bin
+
+    def _engine_env(self) -> dict[str, str]:
+        return self._compose_env()
+
+    async def _archive_container_id(self) -> str | None:
+        """podman-compose ignores the service argument, so resolve by label."""
+        try:
+            return await self.resolve_container("main")
+        except RuntimeError:
+            return None
+
     async def resolve_container(self, service: str = "main") -> str:
         """Container ID for *service*, resolved by label rather than name so it
         survives podman-compose's naming convention changing."""

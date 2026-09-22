@@ -713,3 +713,84 @@ def test_placement_still_refuses_symlink_components(tmp_path):
     link.symlink_to(real)
     with pytest.raises(RuntimeError, match="unsafe directory component"):
         safe_place_file(staged, link / "report.json")
+
+
+# ---------------------------------------------------------------------------
+# Archive (--on-completion archive)
+# ---------------------------------------------------------------------------
+
+
+def test_gvisor_podman_inherits_the_family_archive(tmp_path):
+    # Podman drives the same Compose lifecycle, so the flavor archives
+    # through the family implementation rather than one of its own.
+    env = _make_env(tmp_path)
+
+    assert env.SUPPORTS_ARCHIVE is True
+    assert type(env).archive is GVisorEnvironment.archive
+
+
+def test_gvisor_podman_archive_exports_through_podman(tmp_path, monkeypatch):
+    import asyncio
+    import io
+    import tarfile
+    from pathlib import Path as _Path
+
+    env = _make_env(tmp_path)
+
+    async def fake_snapshot():
+        upper_path = env.trial_paths.archive_dir / "rootfs-upper.tar"
+        upper_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with tarfile.open(upper_path, "w:"):
+            pass
+
+    monkeypatch.setattr(env, "_capture_upper_archive", fake_snapshot)
+
+    commands: list[list[str]] = []
+    engine_calls: list[list[str]] = []
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("app/result.txt")
+        info.size = 4
+        tar.addfile(info, io.BytesIO(b"done"))
+    tar_bytes = buffer.getvalue()
+
+    async def fake_compose(command, check=True, timeout_sec=None):
+        commands.append(list(command))
+        from titanium.environments.base import ExecResult
+
+        return ExecResult(stdout="", return_code=0)
+
+    async def fake_engine(args, timeout_sec=None):
+        engine_calls.append(list(args))
+        from titanium.environments.base import ExecResult
+
+        if args and args[0] == "inspect":
+            return ExecResult(stdout="exited", return_code=0)
+        if args and args[0] == "export":
+            _Path(args[2]).write_bytes(tar_bytes)
+        return ExecResult(stdout="", return_code=0)
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(env, "_run_docker_compose_command", fake_compose)
+    monkeypatch.setattr(env, "_run_engine_command", fake_engine)
+    monkeypatch.setattr(env, "prepare_logs_for_host", lambda: noop())
+    monkeypatch.setattr(
+        env, "_compose_container_id", lambda service, **kw: _resolved("deadbeef")
+    )
+
+    asyncio.run(env.archive(delete=True))
+
+    # The podman flavor exports through its own engine binary, then reclaims.
+    assert env._engine_command_name() == env._engine_cli
+    assert [c for c in engine_calls if c and c[0] == "export"]
+    assert ["stop"] in commands
+    assert any(command and command[0] == "down" for command in commands)
+    assert (env.trial_paths.archive_dir / "environment.tar").is_file()
+
+
+async def _resolved(value):
+    return value

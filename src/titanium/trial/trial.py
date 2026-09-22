@@ -37,11 +37,13 @@ from titanium.models.task.verifier_mode import (
 )
 from titanium.models.trial.config import (
     ArtifactConfig,
+    OnCompletion,
     ServiceVolumeConfig,
     TrialConfig,
 )
 from titanium.models.trial.paths import TrialPaths
 from titanium.models.trial.result import (
+    EnvironmentCompletionResult,
     ExceptionInfo,
     StepResult,
     TimingInfo,
@@ -480,34 +482,69 @@ class Trial:
         )
 
     async def _stop_agent_environment(self, *, keep_images: bool = False) -> None:
-        # keep_images: a separate-mode verifier environment may build FROM the
-        # agent image (tests/Dockerfile), so the pre-verification stop must not
-        # `down --rmi` it — fatal for local-only images, a gratuitous re-pull
-        # for registry-backed ones.
         if self._is_agent_environment_stopped:
             return
+
+        is_archive = (
+            self.config.environment.on_completion == OnCompletion.ARCHIVE
+        )
 
         try:
             await asyncio.shield(
                 self._environment.complete(
                     delete=self.config.environment.delete and not keep_images,
-                    on_completion=self.config.environment.on_completion
+                    on_completion=self.config.environment.on_completion,
                 )
             )
+
+            # We only reach this point if complete() returned successfully.
+            if is_archive:
+                self.result.environment_completion = EnvironmentCompletionResult(
+                    status="succeeded",
+                    archive_path="archive/environment.tar",
+                )
+
             self._is_agent_environment_stopped = True
+
         except asyncio.CancelledError:
+            # Keep your existing cancellation handling here.
+            # Do not record success: shield() does not prove completion
+            # finished before this caller was cancelled.
             self._is_agent_environment_stopped = True
             logger.warning(
                 f"Cleanup interrupted for {self.config.trial_name}, "
                 "but environment stop is shielded and will complete"
             )
+
         except Exception as e:
             self._is_agent_environment_stopped = True
-            logger.warning(
-                f"Warning: Environment cleanup failed for {self.config.trial_name}: {e}"
+
+            logger.error(
+                f"Environment cleanup failed for {self.config.trial_name}: {e}"
             )
+
+            self._append_cleanup_failure(e)
+
+            if is_archive:
+                self.result.environment_completion = EnvironmentCompletionResult(
+                    status="failed",
+                    error=ExceptionInfo.from_exception(e),
+                )
+
             if self.result.exception_info is None:
                 self.result.exception_info = ExceptionInfo.from_exception(e)
+
+    def _append_cleanup_failure(self, error: BaseException) -> None:
+        path = self._trial_paths.exception_message_path
+        entry = (
+            f"\n--- environment cleanup failed: {type(error).__name__}: "
+            f"{error} ---\n{traceback.format_exc()}"
+        )
+        try:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(entry)
+        except OSError as exc:
+            logger.warning(f"Could not record the cleanup failure: {exc}")
 
     async def _cleanup_and_finalize(self) -> None:
         await self._stop_agent_environment()

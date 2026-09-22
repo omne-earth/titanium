@@ -35,6 +35,14 @@ _TRANSFER_TAR_TEMPLATE = ".hb-transfer-{uuid}.tar.gz"
 _ENV_TRANSFER_TAR_DIR = PurePosixPath("/tmp")
 
 
+class ArchiveError(RuntimeError):
+    """The environment could not be archived.
+
+    Raised instead of reporting a completed archive: callers must be able to
+    tell a published artifact from a failed export.
+    """
+
+
 class HealthcheckError(RuntimeError):
     pass
 

@@ -522,3 +522,18 @@ def test_undeclared_resources_emit_no_annotations(tmp_path):
 
 def test_runsc_flavor_emits_no_annotations():
     assert GVisorPodmanEnvironment._main_annotations(object()) is None
+
+
+def test_krun_does_not_inherit_the_gvisor_family_archive(tmp_path):
+    """krun opts out of the archive its parent class supports.
+
+    `podman stop` reaches only the VMM, so the guest is hard-killed and
+    what would remain is not an archive of the trial.
+    """
+    import asyncio
+
+    env = _make_env(tmp_path)
+
+    assert env.SUPPORTS_ARCHIVE is False
+    with pytest.raises(NotImplementedError, match="does not support"):
+        asyncio.run(env.archive(delete=True))

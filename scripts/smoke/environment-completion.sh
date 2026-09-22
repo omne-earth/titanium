@@ -11,16 +11,16 @@
 #   titanium run --on-completion archive   (with delete still enabled)
 #       -> EnvironmentConfig.on_completion = archive
 #       -> BaseEnvironment.complete()
-#       -> DockerEnvironment.archive()   compose stop
-#       -> the trial's own container is still there, exited
+#       -> DockerEnvironment.archive()   compose stop, engine export, validate
+#       -> trial_dir/archive/environment.tar carries the guest filesystem;
+#          the container is reclaimed once the tar reads back
 #
-# The proof is host-side: after each trial this asks the container engine
-# what actually exists, filtered on that trial's exact Compose project label.
-# Titanium's own logs and config are never evidence here, so an archive that
-# only reports success still fails this smoke.
+# The proof is independent of Titanium: the task writes a known file into the
+# guest, and this reads the exported tar with `tar` to confirm the file and
+# its contents were captured. An archive that only reports success fails here.
 #
-# The agent is `nop` and verification is disabled, so nothing here depends on
-# a model or on the task being solved.
+# The agent is `oracle`, which runs the task's solution script verbatim, and
+# verification is disabled, so nothing depends on a model.
 #
 #   exit 0  the proof passed
 #   exit 1  the proof failed -- a real regression
@@ -35,7 +35,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 
 ENGINE="${TITANIUM_SMOKE_ENGINE:-docker}"
 ENV_NAME="${TITANIUM_SMOKE_ENV:-docker}"
-TASK="${TITANIUM_SMOKE_TASK:-$ROOT/examples/tasks/hello-world}"
+TASK="${TITANIUM_SMOKE_TASK:-$ROOT/examples/smoke/archive-marker}"
 TITANIUM="$ROOT/.venv/bin/titanium"
 PY="$ROOT/.venv/bin/python"
 
@@ -44,6 +44,12 @@ PY="$ROOT/.venv/bin/python"
 PROJECT_LABEL="com.docker.compose.project"
 SERVICE_LABEL="com.docker.compose.service"
 AGENT_SERVICE="main"
+# A sandbox flavor must still be a sandbox after it is archived. Empty for
+# the plain engines, whose runtime the smoke makes no claim about.
+case "$ENV_NAME" in
+    gvisor | gvisor-podman) EXPECTED_RUNTIME="runsc" ;;
+    *) EXPECTED_RUNTIME="" ;;
+esac
 
 RUN_ID="lifecycle-$(date +%s)-$$"
 WORK=""
@@ -103,7 +109,8 @@ cleanup() {
     done
     remove_project "$PRESERVED_PROJECT"
     PRESERVED_PROJECT=""
-    [ -n "$WORK" ] && [ -d "$WORK" ] && rm -rf "$WORK"
+    # The work directory is kept: it holds the exported tar this smoke exists
+    # to produce. Only engine resources are reclaimed here.
 }
 trap cleanup EXIT
 
@@ -120,8 +127,9 @@ note "titanium env: $ENV_NAME"
 note "task:        $TASK"
 note "run id:      $RUN_ID"
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/titanium-completion-smoke.XXXXXX")" \
-    || skip "could not create a work directory"
+WORK="$ROOT/.run/environment-completion/$(date +%Y%m%d_%H%M%S)-$$"
+mkdir -p "$WORK" || skip "could not create a work directory"
+note "work dir:    $WORK (kept: the exported tar is the artifact)"
 
 # Every container the engine already holds for *any* Compose project. A
 # container found later must not be one of these: that is what keeps a stale
@@ -169,7 +177,7 @@ run_trial() {
     JOB_DIR="$jobs_dir/$RUN_ID-$case_name"
     SMOKE_JOB_DIRS+=("$JOB_DIR")
     "$TITANIUM" run \
-        --agent nop \
+        --agent oracle \
         --env "$ENV_NAME" \
         --path "$TASK" \
         --jobs-dir "$jobs_dir" \
@@ -217,32 +225,56 @@ note "running a real trial with --on-completion archive ..."
 CASE_START_EPOCH="$(date +%s)"
 run_trial archive --on-completion archive
 ARCHIVE_RC="$TRIAL_RC"
+ARCHIVE_TRIAL_DIR="$(find "$JOB_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | head -1)"
 ARCHIVE_PROJECT="$(project_for_job_dir "$JOB_DIR")"
 
-if [ -z "$ARCHIVE_PROJECT" ]; then
+if [ -z "$ARCHIVE_PROJECT" ] || [ -z "$ARCHIVE_TRIAL_DIR" ]; then
     tail -20 "$WORK/archive.log"
     fail "the archive trial produced no trial directory under $JOB_DIR"
 fi
 PRESERVED_PROJECT="$ARCHIVE_PROJECT"
 
-ARCHIVE_ID="$(agent_container_for_project "$ARCHIVE_PROJECT")"
-ARCHIVE_COUNT="$(echo "$ARCHIVE_ID" | grep -c .)"
-ARCHIVE_STATE=""
-ARCHIVE_CREATED=""
-ARCHIVE_LABEL=""
-if [ "$ARCHIVE_COUNT" = "1" ]; then
-    ARCHIVE_STATE="$("$ENGINE" inspect -f '{{.State.Status}}' "$ARCHIVE_ID" 2>/dev/null)"
-    ARCHIVE_CREATED="$("$ENGINE" inspect -f '{{.Created}}' "$ARCHIVE_ID" 2>/dev/null)"
-    ARCHIVE_LABEL="$("$ENGINE" inspect -f "{{index .Config.Labels \"$PROJECT_LABEL\"}}" "$ARCHIVE_ID" 2>/dev/null)"
+ARCHIVE_DIR="$ARCHIVE_TRIAL_DIR/archive"
+ARCHIVE_TAR="$ARCHIVE_DIR/environment.tar"
+ARCHIVE_META="$ARCHIVE_DIR/archive.json"
+ARCHIVE_LEFTOVER="$(containers_for_project "$ARCHIVE_PROJECT")"
+ARCHIVE_LEFTOVER_COUNT="$(echo "$ARCHIVE_LEFTOVER" | grep -c .)"
+
+MARKER_IN_TAR="no"
+MARKER_CONTENT=""
+MOUNTS_IN_TAR="unknown"
+META_TRIAL=""
+META_ENGINE=""
+META_RUNTIME=""
+if [ -f "$ARCHIVE_TAR" ]; then
+    # Independent inspection: read the tar directly, not through the engine.
+    if MARKER_TEXT="$(tar -xOf "$ARCHIVE_TAR" app/archive-marker.txt 2>/dev/null)"; then
+        MARKER_IN_TAR="yes"
+        MARKER_CONTENT="${MARKER_TEXT%%$'\n'*}"
+    fi
+    # Bind mounts are excluded from a native export by design.
+    if tar -tf "$ARCHIVE_TAR" 2>/dev/null | grep -q "^logs/agent/."; then
+        MOUNTS_IN_TAR="yes"
+    else
+        MOUNTS_IN_TAR="no"
+    fi
+fi
+if [ -f "$ARCHIVE_META" ]; then
+    META_TRIAL="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("trial",""))' "$ARCHIVE_META" 2>/dev/null)"
+    META_ENGINE="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("engine",""))' "$ARCHIVE_META" 2>/dev/null)"
+    META_RUNTIME="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("runtime") or "")' "$ARCHIVE_META" 2>/dev/null)"
 fi
 
 echo "  CASE: archive+delete"
 echo "  project/session: $ARCHIVE_PROJECT"
 echo "  trial rc: $ARCHIVE_RC"
-echo "  matching container: ${ARCHIVE_ID:-<none>} (count $ARCHIVE_COUNT)"
-echo "  engine state: ${ARCHIVE_STATE:-<none>}"
-echo "  created: ${ARCHIVE_CREATED:-<none>}"
-echo "  expected: present + stopped"
+echo "  exported tar: ${ARCHIVE_TAR}"
+echo "  tar exists: $([ -f "$ARCHIVE_TAR" ] && echo yes || echo no)"
+echo "  guest marker in tar: $MARKER_IN_TAR ($MARKER_CONTENT)"
+echo "  mounted /logs in tar: $MOUNTS_IN_TAR (expected no)"
+echo "  metadata trial/engine/runtime: ${META_TRIAL:-<none>} / ${META_ENGINE:-<none>} / ${META_RUNTIME:-<none>}${EXPECTED_RUNTIME:+ (expected runtime $EXPECTED_RUNTIME)}"
+echo "  containers after archive: $ARCHIVE_LEFTOVER_COUNT"
+echo "  expected: valid tar containing the marker, container reclaimed"
 
 ARCHIVE_OK=1
 if [ "$ARCHIVE_RC" -ne 0 ]; then
@@ -250,37 +282,41 @@ if [ "$ARCHIVE_RC" -ne 0 ]; then
     check_failed "the archive trial exited $ARCHIVE_RC"
     ARCHIVE_OK=0
 fi
-# present: archive must win over the still-enabled delete.
-if [ "$ARCHIVE_COUNT" != "1" ]; then
-    check_failed "expected exactly 1 '$AGENT_SERVICE' container for $ARCHIVE_PROJECT, found $ARCHIVE_COUNT"
+if [ ! -f "$ARCHIVE_TAR" ]; then
+    check_failed "no exported tar at $ARCHIVE_TAR"
     ARCHIVE_OK=0
 fi
-# stopped, not merely existing: a still-running container is not an archive.
-if [ -n "$ARCHIVE_STATE" ] && [ "$ARCHIVE_STATE" = "running" ]; then
-    check_failed "the preserved container is still running"
-    ARCHIVE_OK=0
-elif [ -n "$ARCHIVE_STATE" ] && [ "$ARCHIVE_STATE" != "exited" ] && [ "$ARCHIVE_STATE" != "created" ]; then
-    check_failed "the preserved container is in state '$ARCHIVE_STATE', expected exited"
+if [ -f "$ARCHIVE_DIR/environment.tar.partial" ]; then
+    check_failed "a partial export was left behind: the artifact was published unvalidated"
     ARCHIVE_OK=0
 fi
-# this run's container, not a survivor of an earlier one.
-if [ -n "$ARCHIVE_ID" ] && echo "$PRE_EXISTING_IDS" | grep -qx "$ARCHIVE_ID"; then
-    check_failed "the container existed before this smoke started -- stale, not archived"
+# the guest's own write must be inside the tar, with its content intact.
+if [ "$MARKER_IN_TAR" != "yes" ]; then
+    check_failed "the guest-written marker is not in the exported tar"
+    ARCHIVE_OK=0
+elif [ "$MARKER_CONTENT" != "archived-guest-state" ]; then
+    check_failed "marker content is '$MARKER_CONTENT', expected 'archived-guest-state'"
     ARCHIVE_OK=0
 fi
-if [ -n "$ARCHIVE_CREATED" ]; then
-    created_epoch="$(date -d "$ARCHIVE_CREATED" +%s 2>/dev/null || echo 0)"
-    if [ "$created_epoch" -lt "$CASE_START_EPOCH" ]; then
-        check_failed "the container predates this case ($ARCHIVE_CREATED) -- stale, not archived"
-        ARCHIVE_OK=0
-    fi
-fi
-# the identity is the exact project of this trial, not a fuzzy name match.
-if [ -n "$ARCHIVE_LABEL" ] && [ "$ARCHIVE_LABEL" != "$ARCHIVE_PROJECT" ]; then
-    check_failed "container project label '$ARCHIVE_LABEL' != this trial's '$ARCHIVE_PROJECT'"
+# the tar is this trial's, not another run's.
+if [ -n "$META_TRIAL" ] && [ "$META_TRIAL" != "$(basename "$ARCHIVE_TRIAL_DIR")" ]; then
+    check_failed "metadata trial '$META_TRIAL' != this trial '$(basename "$ARCHIVE_TRIAL_DIR")'"
+    ARCHIVE_OK=0
+elif [ -z "$META_TRIAL" ]; then
+    check_failed "no archive metadata at $ARCHIVE_META"
     ARCHIVE_OK=0
 fi
-# the teardown case must not have preserved anything under its own project.
+# sandbox identity is recorded with the artifact, since the container is gone.
+if [ -n "$EXPECTED_RUNTIME" ] && [ "$META_RUNTIME" != "$EXPECTED_RUNTIME" ]; then
+    check_failed "archive metadata runtime is '${META_RUNTIME:-none}', expected '$EXPECTED_RUNTIME'"
+    ARCHIVE_OK=0
+fi
+# the tar is the artifact, so the container is reclaimed like any other trial.
+if [ "$ARCHIVE_LEFTOVER_COUNT" != "0" ]; then
+    check_failed "the archive left $ARCHIVE_LEFTOVER_COUNT container(s) behind after a successful export"
+    ARCHIVE_OK=0
+fi
+# the cases must be independent.
 if [ "$ARCHIVE_PROJECT" = "$TEARDOWN_PROJECT" ]; then
     check_failed "both cases used the same project -- the cases are not independent"
     ARCHIVE_OK=0
