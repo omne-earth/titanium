@@ -28,7 +28,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from titanium.environments.base import ExecResult
+from titanium.environments.base import ArchiveError, ExecResult
 from titanium.environments.capabilities import (
     EnvironmentCapabilities,
     EnvironmentResourceCapabilities,
@@ -59,6 +59,8 @@ def _which_compose(name: str) -> str | None:
 
 class PodmanEnvironment(DockerEnvironment):
     """DockerEnvironment with the container runtime CLI swapped for Podman."""
+
+    SUPPORTS_ARCHIVE: bool = True
 
     @staticmethod
     def type() -> str:
@@ -186,6 +188,40 @@ class PodmanEnvironment(DockerEnvironment):
             raise SystemExit(
                 f"`{podman} info` timed out — first run may be initialising "
                 "storage. Run it manually once, then retry."
+            )
+
+    @classmethod
+    def archive_preflight(cls) -> None:
+        """Require the archive engine to be rootless before trial creation."""
+        podman = os.environ.get("TITANIUM_PODMAN_BIN", "podman")
+
+        try:
+            result = subprocess.run(
+                [
+                    podman,
+                    "info",
+                    "--format",
+                    "{{.Host.Security.Rootless}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+            )
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            raise SystemExit(
+                "Cannot verify that Podman is rootless for "
+                "on_completion=archive; refusing to start the trial."
+            ) from exc
+
+        if result.stdout.strip().lower() != "true":
+            raise SystemExit(
+                "on_completion=archive requires rootless Podman; "
+                "refusing privileged/rootful archive operations."
             )
 
     # ---------------------------------------------------- limit verification
@@ -392,6 +428,32 @@ class PodmanEnvironment(DockerEnvironment):
                 f"Stderr: {result.stderr}."
             )
         return result
+
+    async def _assert_rootless_archive_runtime(self) -> None:
+        """Defensively re-check rootless mode before archive operations."""
+        result = await self._run_engine_command(
+            [
+                "info",
+                "--format",
+                "{{.Host.Security.Rootless}}",
+            ],
+            timeout_sec=30,
+        )
+
+        rootless = (result.stdout or "").strip().lower()
+
+        if result.return_code != 0 or rootless != "true":
+            detail = (result.stderr or result.stdout or "").strip()
+            suffix = f": {detail}" if detail else ""
+
+            raise ArchiveError(
+                "Environment archiving requires rootless Podman; "
+                f"refusing privileged/rootful archive operations{suffix}"
+            )
+
+    async def archive(self, *, delete: bool) -> None:
+        await self._assert_rootless_archive_runtime()
+        await self._archive_container_filesystem(delete=delete)
 
     async def _podman(
         self, args: list[str], check: bool = True, timeout_sec: int | None = None

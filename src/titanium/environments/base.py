@@ -570,6 +570,11 @@ class BaseEnvironment(ABC):
     # that overrides `archive` only to refuse it still does not support it.
     SUPPORTS_ARCHIVE: bool = False
 
+    @classmethod
+    def archive_preflight(cls) -> None:
+        """Validate archive-specific host requirements before trial creation."""
+        return
+
     async def complete(
         self,
         *,

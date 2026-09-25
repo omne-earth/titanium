@@ -1,5 +1,6 @@
 """Tests for the common environment completion lifecycle."""
 
+import subprocess
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,7 +10,10 @@ from titanium.environments.base import BaseEnvironment
 from titanium.environments.docker.docker import DockerEnvironment
 from titanium.environments.factory import EnvironmentFactory
 from titanium.environments.gvisor.environment import GVisorEnvironment
+from titanium.environments.gvisor.podman import GVisorPodmanEnvironment
 from titanium.environments.krun.podman import KrunPodmanEnvironment
+from titanium.environments.podman import podman as podman_module
+from titanium.environments.podman.podman import PodmanEnvironment
 from titanium.models.environment_type import EnvironmentType
 from titanium.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
 from titanium.models.trial.config import EnvironmentConfig, OnCompletion
@@ -103,19 +107,19 @@ def _create(tmp_path, env_type, on_completion):
     )
 
 
-# The Compose-managed rungs: the sandbox runtime changes how the guest
-# executes, not how the container is kept, so all four archive the same way.
+# Rootless Podman-family rungs: archive is restricted to these, because
+# a rootless engine export is the only supported capture path.
 ARCHIVE_CAPABLE = [
-    EnvironmentType.DOCKER,
     EnvironmentType.PODMAN,
-    EnvironmentType.GVISOR,
     EnvironmentType.GVISOR_PODMAN,
 ]
-# krun hard-kills its VMM and cella manages its own machines, so neither
-# inherits the family's archive.
+# krun hard-kills its VMM, cella manages its own machines, and rootful
+# Docker (with or without gVisor) is excluded from archiving outright.
 ARCHIVE_UNSUPPORTED = [
     EnvironmentType.KRUN_PODMAN,
     EnvironmentType.CELLA,
+    EnvironmentType.DOCKER,
+    EnvironmentType.GVISOR
 ]
 
 
@@ -175,13 +179,103 @@ def test_cella_kwarg_on_completion_is_independent(tmp_path):
     assert environment._on_completion == "archive"
 
 
+# krun DEFINES archive -- to refuse it -- so "defines archive" cannot be
+# the capability test; the declared flag is.
 def test_archive_capability_is_declared_not_inferred_from_defining_archive():
     from titanium.environments.factory import _supports_archive
 
-    # krun DEFINES archive -- to refuse it -- so "defines archive" cannot be
-    # the capability test; the declared flag is.
     assert hasattr(KrunPodmanEnvironment, "archive")
-    assert _supports_archive(DockerEnvironment)
-    assert _supports_archive(GVisorEnvironment)
+
+    assert not _supports_archive(DockerEnvironment)
+    assert _supports_archive(PodmanEnvironment)
+    assert not _supports_archive(GVisorEnvironment)
+    assert _supports_archive(GVisorPodmanEnvironment)
     assert not _supports_archive(KrunPodmanEnvironment)
     assert not _supports_archive(BaseEnvironment)
+
+
+# ---------------------------------------------------------------------------
+# Archive preflight: rootless Podman is a precondition, checked before build
+# ---------------------------------------------------------------------------
+
+
+def _podman_info(rootless: str):
+    """Answer only the rootless query `archive_preflight` issues."""
+
+    def fake_run(command, **kwargs):
+        assert command[1:] == [
+            "info",
+            "--format",
+            "{{.Host.Security.Rootless}}",
+        ]
+        return subprocess.CompletedProcess(
+            command, 0, stdout=f"{rootless}\n", stderr=""
+        )
+
+    return fake_run
+
+
+def _silence_host_preflight(monkeypatch):
+    """Keep the ordinary host preflight off a real engine in unit tests."""
+    monkeypatch.setattr(
+        PodmanEnvironment, "preflight", classmethod(lambda cls: None)
+    )
+    monkeypatch.setattr(
+        GVisorPodmanEnvironment, "preflight", classmethod(lambda cls: None)
+    )
+
+
+@pytest.mark.parametrize("env_type", ARCHIVE_CAPABLE)
+def test_archive_preflight_accepts_rootless_podman(env_type, monkeypatch):
+    monkeypatch.setattr(podman_module.subprocess, "run", _podman_info("true"))
+    _silence_host_preflight(monkeypatch)
+
+    EnvironmentFactory.run_preflight(
+        type=env_type, completion_policy=OnCompletion.ARCHIVE
+    )
+
+
+@pytest.mark.parametrize("env_type", ARCHIVE_CAPABLE)
+def test_archive_preflight_refuses_rootful_podman(env_type, monkeypatch):
+    monkeypatch.setattr(podman_module.subprocess, "run", _podman_info("false"))
+    _silence_host_preflight(monkeypatch)
+
+    with pytest.raises(SystemExit, match="requires rootless Podman"):
+        EnvironmentFactory.run_preflight(
+            type=env_type, completion_policy=OnCompletion.ARCHIVE
+        )
+
+
+@pytest.mark.parametrize("env_type", ARCHIVE_CAPABLE)
+def test_rootful_archive_never_creates_an_environment(
+    tmp_path, env_type, monkeypatch
+):
+    # The refusal lands before the environment exists, so nothing is built
+    # for a policy the host cannot honor.
+    monkeypatch.setattr(podman_module.subprocess, "run", _podman_info("false"))
+    _silence_host_preflight(monkeypatch)
+
+    with pytest.raises(SystemExit, match="requires rootless Podman"):
+        _create(tmp_path, env_type, OnCompletion.ARCHIVE)
+
+
+@pytest.mark.parametrize("env_type", ARCHIVE_CAPABLE)
+def test_teardown_preflight_is_not_rootless_gated(env_type, monkeypatch):
+    # Ordinary teardown must keep working on a rootful host: the rootless
+    # requirement belongs to archiving alone.
+    asked = []
+
+    def fake_run(command, **kwargs):
+        asked.append(list(command))
+        return subprocess.CompletedProcess(
+            command, 0, stdout="false\n", stderr=""
+        )
+
+    monkeypatch.setattr(podman_module.subprocess, "run", fake_run)
+    _silence_host_preflight(monkeypatch)
+
+    EnvironmentFactory.run_preflight(
+        type=env_type, completion_policy=OnCompletion.TEARDOWN
+    )
+
+    assert asked == []

@@ -338,7 +338,7 @@ note "done"
 
 step "verdict"
 if [ "$FAILURES" -eq 0 ]; then
-    pass "on_completion=teardown tore down, on_completion=archive preserved a stopped container"
+    pass "on_completion=teardown tore down, on_completion=archive exported the filesystem and reclaimed the container"
     echo
     echo "OVERALL: PASS"
     exit 0

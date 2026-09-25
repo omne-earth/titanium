@@ -112,6 +112,9 @@ def _reject_unsupported_archive(
     if completion_policy != OnCompletion.ARCHIVE:
         return
     if _supports_archive(env_class):
+        archive_preflight = getattr(env_class, "archive_preflight", None)
+        if archive_preflight is not None:
+            archive_preflight()
         return
 
     supported = sorted(

@@ -2145,9 +2145,8 @@ async def _noop():
     return None
 
 
-def test_gvisor_declares_archive_support():
-    # gVisor rides the Docker family's export; only the runtime differs.
-    assert GVisorEnvironment.SUPPORTS_ARCHIVE is True
+def test_docker_backed_gvisor_does_not_declare_archive_support():
+    assert GVisorEnvironment.SUPPORTS_ARCHIVE is False
     assert GVisorEnvironment.archive is not DockerEnvironment.archive
 
 

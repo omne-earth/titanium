@@ -120,8 +120,8 @@ class DockerEnvironmentEnvVars(BaseModel):
 
 
 class DockerEnvironment(BaseEnvironment):
-    # Archive is the stopped Compose container itself (see `archive`).
-    SUPPORTS_ARCHIVE: bool = True
+    # Rootful Docker is intentionally excluded from environment archiving.
+    SUPPORTS_ARCHIVE: bool = False
 
     _DOCKER_COMPOSE_BASE_PATH = COMPOSE_BASE_PATH
     _DOCKER_COMPOSE_BUILD_PATH = COMPOSE_BUILD_PATH
@@ -789,6 +789,13 @@ class DockerEnvironment(BaseEnvironment):
         pass
 
     async def archive(self, *, delete: bool) -> None:
+        """Refuse archiving through the rootful Docker backend."""
+        raise NotImplementedError(
+            "DockerEnvironment does not support environment archiving; "
+            "on_completion=archive is restricted to rootless Podman-family environments"
+        )
+
+    async def _archive_container_filesystem(self, *, delete: bool) -> None:
         """Export the trial's filesystem to a tar, then reclaim the container.
 
         The container is only removed once the tar exists and has been read

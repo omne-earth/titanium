@@ -1,4 +1,4 @@
-"""Tests for reading and classifying gVisor upper-layer tar entries."""
+"""Tests for gVisor upper-layer classification and rootfs archive merging."""
 
 import tarfile
 import io
@@ -107,6 +107,7 @@ def test_archive_root_must_be_a_directory():
 
     assert classify_upper_member(member) == (".", "root")
 
+
 def _file(name: str) -> tarfile.TarInfo:
     """Make a regular-file entry for a tiny merge example."""
     entry = tarfile.TarInfo(name)
@@ -122,7 +123,7 @@ def _directory(name: str) -> tarfile.TarInfo:
 
 
 def _whiteout(name: str) -> tarfile.TarInfo:
-    """Make the deletion marker observed in our real gVisor snapshot."""
+    """Make the deletion marker a gVisor upper-layer snapshot emits."""
     entry = tarfile.TarInfo(name)
     entry.type = tarfile.CHRTYPE
     entry.devmajor = 0
@@ -218,6 +219,7 @@ def test_merge_replacing_directory_with_file_removes_old_children():
     assert result == {
         "app/old-dir": ("upper", replacement),
     }
+
 
 def test_selected_filesystem_rejects_file_with_child():
     parent = tarfile.TarInfo("app/config.txt")
@@ -317,6 +319,7 @@ def test_selected_filesystem_accepts_hardlink_to_regular_file():
         "app/copy": ("upper", link),
     })
 
+
 def _add_regular(archive, name, contents, *, mode=0o644):
     """Add an actual file, including its bytes, to a test tar."""
     data = contents.encode("utf-8")
@@ -335,7 +338,7 @@ def _add_directory(archive, name, *, mode=0o755):
 
 
 def _add_whiteout(archive, name):
-    """Add the deletion-marker format observed in our gVisor probe."""
+    """Add the deletion-marker format a gVisor upper-layer tar uses."""
     member = tarfile.TarInfo(name)
     member.type = tarfile.CHRTYPE
     member.devmajor = 0
@@ -370,12 +373,12 @@ def _read_regular(archive, name):
 
 
 # ---------------------------------------------------------------------------
-# GROUP A — These should PASS with your current writer.
+# GROUP A — Core merge behavior and archive-content regression tests.
 # ---------------------------------------------------------------------------
 
 
 def test_real_tar_add_modify_delete_and_normalize(tmp_path):
-    """The exact add/modify/delete pattern from our successful gVisor probe."""
+    """The add/modify/delete pattern a real gVisor upper layer produces."""
     base_path = tmp_path / "base.tar"
     upper_path = tmp_path / "upper.tar"
     output_path = tmp_path / "merged.tar"
@@ -571,19 +574,10 @@ def test_real_tar_rejects_duplicate_normalized_paths(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# GROUP B — Known safety questions. These tests are EXPECTED TO FAIL
-# with the current writer.
-#
-# XFAIL = the test exposed a known missing protection.
-# XPASS = the test unexpectedly passed; investigate whether the
-# implementation already handles that case.
+# GROUP B — Writer safety and hardlink regression tests.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="Current writer overwrites an existing output path",
-    strict=False,
-)
 def test_output_must_not_overwrite_existing_file(tmp_path):
     """A merger should not destroy an artifact that already exists."""
     base_path = tmp_path / "base.tar"
@@ -608,10 +602,6 @@ def test_output_must_not_overwrite_existing_file(tmp_path):
     )
 
 
-@pytest.mark.xfail(
-    reason="Current writer does not prevent output_path from equaling an input",
-    strict=False,
-)
 def test_output_must_not_destroy_base_input(tmp_path):
     """Writing the result over base.tar can destroy the source data."""
     base_path = tmp_path / "base.tar"
@@ -639,10 +629,6 @@ def test_output_must_not_destroy_base_input(tmp_path):
     )
 
 
-@pytest.mark.xfail(
-    reason="Current writer leaves its output behind when writing fails",
-    strict=False,
-)
 def test_failed_write_must_not_leave_partial_output(tmp_path, monkeypatch):
     """Simulate a write failure after the first output entry."""
     base_path = tmp_path / "base.tar"
@@ -681,10 +667,6 @@ def test_failed_write_must_not_leave_partial_output(tmp_path, monkeypatch):
     )
 
 
-@pytest.mark.xfail(
-    reason="Current writer does not independently verify the completed tar",
-    strict=False,
-)
 def test_writer_must_detect_missing_output_entry(tmp_path, monkeypatch):
     """Simulate a writer silently omitting one selected entry."""
     base_path = tmp_path / "base.tar"
@@ -720,12 +702,8 @@ def test_writer_must_detect_missing_output_entry(tmp_path, monkeypatch):
         merge_rootfs_archives(base_path, upper_path, output_path)
 
 
-@pytest.mark.xfail(
-    reason="Current writer does not resolve cross-layer hardlink semantics",
-    strict=False,
-)
 def test_cross_layer_hardlink_requires_explicit_handling(tmp_path):
-    """A base hardlink's target may be replaced by the upper layer."""
+    """Cross-layer hardlinks are rejected rather than silently rebound."""
     base_path = tmp_path / "base.tar"
     upper_path = tmp_path / "upper.tar"
     output_path = tmp_path / "merged.tar"
@@ -741,17 +719,12 @@ def test_cross_layer_hardlink_requires_explicit_handling(tmp_path):
     with tarfile.open(upper_path, "w:") as archive:
         _add_regular(archive, "./app/original.txt", "NEW")
 
-    # We have not established whether the old hardlink should retain
-    # OLD bytes or refer to the NEW upper-layer version. Until that
-    # semantics question is settled, fail rather than silently guess.
+    # Replacing a base-layer hardlink target from the upper layer can change
+    # what the link means. Reject that case rather than silently guessing.
     with pytest.raises(ArchiveError):
         merge_rootfs_archives(base_path, upper_path, output_path)
 
 
-@pytest.mark.xfail(
-    reason="Current writer does not order hardlink targets before hardlinks",
-    strict=False,
-)
 def test_hardlink_target_must_precede_link_in_output(tmp_path):
     """A tar hardlink should not precede the entry holding its file data."""
     base_path = tmp_path / "base.tar"

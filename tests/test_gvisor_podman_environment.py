@@ -721,12 +721,21 @@ def test_placement_still_refuses_symlink_components(tmp_path):
 
 
 def test_gvisor_podman_inherits_the_family_archive(tmp_path):
-    # Podman drives the same Compose lifecycle, so the flavor archives
-    # through the family implementation rather than one of its own.
+    # The flavor adds its own archive override to assert rootless mode before
+    # GVisorEnvironment captures rootfs-upper; the override delegates to the
+    # family implementation rather than replacing it.
     env = _make_env(tmp_path)
 
     assert env.SUPPORTS_ARCHIVE is True
-    assert type(env).archive is GVisorEnvironment.archive
+    assert type(env).archive is GVisorPodmanEnvironment.archive
+
+    delegate = next(
+        klass.archive
+        for klass in type(env).__mro__[1:]
+        if "archive" in klass.__dict__
+    )
+
+    assert delegate is GVisorEnvironment.archive
 
 
 def test_gvisor_podman_archive_exports_through_podman(tmp_path, monkeypatch):
@@ -766,6 +775,8 @@ def test_gvisor_podman_archive_exports_through_podman(tmp_path, monkeypatch):
         engine_calls.append(list(args))
         from titanium.environments.base import ExecResult
 
+        if args and args[0] == "info":
+            return ExecResult(stdout="true\n", return_code=0)
         if args and args[0] == "inspect":
             return ExecResult(stdout="exited", return_code=0)
         if args and args[0] == "export":
@@ -790,6 +801,33 @@ def test_gvisor_podman_archive_exports_through_podman(tmp_path, monkeypatch):
     assert ["stop"] in commands
     assert any(command and command[0] == "down" for command in commands)
     assert (env.trial_paths.archive_dir / "environment.tar").is_file()
+
+
+def test_rootful_check_runs_before_upper_layer_capture(tmp_path, monkeypatch):
+    # The rootless assertion gates runsc tar: a privileged host must never
+    # reach the gVisor upper-layer capture at all.
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from titanium.environments.base import ArchiveError
+
+    env = _make_env(tmp_path)
+
+    async def refuse():
+        raise ArchiveError(
+            "Environment archiving requires rootless Podman; "
+            "refusing privileged/rootful archive operations"
+        )
+
+    capture = AsyncMock()
+
+    monkeypatch.setattr(env, "_assert_rootless_archive_runtime", refuse)
+    monkeypatch.setattr(env, "_capture_upper_archive", capture)
+
+    with pytest.raises(ArchiveError, match="requires rootless Podman"):
+        asyncio.run(env.archive(delete=True))
+
+    capture.assert_not_awaited()
 
 
 async def _resolved(value):

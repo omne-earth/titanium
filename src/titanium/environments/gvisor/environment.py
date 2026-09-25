@@ -1,7 +1,7 @@
 """A first-class gVisor environment, selected with ``--env gvisor``.
 
 ``GVisorEnvironment`` subclasses :class:`~titanium.environments.docker.docker.DockerEnvironment`
-because this slice still uses the Docker CLI, Docker Compose, Docker build
+because this environment still uses the Docker CLI, Docker Compose, Docker build
 behaviour, Docker exec behaviour, the Docker service lifecycle and Docker
 networking primitives. Only what is genuinely different under gVisor is
 overridden; no part of the Docker lifecycle is duplicated, and
@@ -430,12 +430,15 @@ class GVisorEnvironment(DockerEnvironment):
             await self._teardown_preserving(start_exc)
             raise
 
-    # The sandbox runtime changes how the guest executes, not how the engine
-    # exports a container filesystem, so this family archives through the same
-    # implementation as the Docker family it rides on.
-    SUPPORTS_ARCHIVE: bool = True
+    # Archive mechanics live here for reuse by gVisor-Podman, which captures and
+    # merges the gVisor upper layer. Docker-backed gVisor does not support archive.
+    SUPPORTS_ARCHIVE: bool = False
 
-    #so that we dont have to remove the overlay2
+    # Merge the gVisor upper layer into the engine export without changing
+    # the sandbox's existing overlay filesystem semantics.
+
+    # so that we dont have to remove the overlay2
+
     async def _finalize_archive_tar(self, partial_path: Path) -> None:
         upper_path = self.trial_paths.archive_dir / "rootfs-upper.tar"
         merged_path = self.trial_paths.archive_dir / "rootfs-merged.tar"
@@ -523,7 +526,7 @@ class GVisorEnvironment(DockerEnvironment):
         # verification on a sandbox that is on its way out.
         self._stopping = True
         try:
-            await self._capture_upper_archive() #pause
+            await self._capture_upper_archive()
             await super().archive(delete=delete)
         finally:
             self._cleanup_staging()

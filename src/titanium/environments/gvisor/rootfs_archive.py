@@ -265,7 +265,6 @@ def select_merged_members(
     for path, member in upper.items():
 
         _, action = classify_upper_member(member)
-        #action = classify_upper_member(member)[1]
 
         if action == "root" or action == "replace":
             selected[path] = ("upper", member)
@@ -314,7 +313,7 @@ def merge_rootfs_archives(
                 source="upper",
             )
 
-            #Apply your file-selection rules.
+            # Apply the file-selection rules.
             selected = select_merged_members(
                 base_members,
                 upper_members,
@@ -339,7 +338,6 @@ def merge_rootfs_archives(
                 raise ArchiveError(f"Archive output already exists: {output_path}")
 
             # Write the selected entries into output_path.
-            # with tarfile.open(output_path, mode="x:") as output_archive:
             with _new_output_tar(output_path) as output_archive:
                 for path, (source, member) in sorted(
                     selected.items(),
