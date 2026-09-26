@@ -3,16 +3,16 @@ import logging
 from pathlib import Path
 
 from titanium.environments.base import BaseEnvironment
-from titanium.utils.scripts import (
-    build_execution_command,
-    needs_chmod,
-    quote_shell_arg,
-)
 from titanium.models.task.task import Task
 from titanium.models.trial.paths import TrialPaths
 from titanium.models.verifier.result import VerifierResult
 from titanium.utils.env import resolve_env_vars
 from titanium.utils.logger import logger as global_logger
+from titanium.utils.scripts import (
+    build_execution_command,
+    needs_chmod,
+    quote_shell_arg,
+)
 
 
 class AddTestsDirError(Exception):
@@ -133,6 +133,19 @@ class Verifier:
         Returns:
             (VerifierResult): The result of the verifier.
         """
+        steps = await self.prepare()
+        for command, env, user in steps:
+            await self._environment.exec(command=command, env=env, user=user)
+        return await self.collect()
+
+    async def prepare(self) -> list[tuple[str, dict | None, str | None]]:
+        """Resolve and upload the tests, and state the verify commands.
+
+        Returns the steps as ``(command, env, user)`` -- for
+        :meth:`verify` to exec, or for a sealed-oneshot rung to bake
+        into its guest orchestrator (the tests upload either way; a
+        sealed environment queues uploads for the bake).
+        """
         await self._environment.set_phase("verify")
         env_paths = self._environment.env_paths
         task_os = self._task.config.environment.os
@@ -182,23 +195,24 @@ class Verifier:
             task_os=task_os,
         )
 
+        steps: list[tuple[str, dict | None, str | None]] = []
         if needs_chmod(test_script_path):
-            await self._environment.exec(
-                command=f"chmod +x {quote_shell_arg(test_script_path, task_os)}",
-                user="root",
+            steps.append(
+                (f"chmod +x {quote_shell_arg(test_script_path, task_os)}", None, "root")
             )
-
         # Runs as ``environment.default_user``, which the caller must set to the
         # effective verifier user (step-level override or task-level fallback).
-        await self._environment.exec(
-            command=command,
-            env=env,
-        )
+        steps.append((command, env, None))
+        return steps
 
+    async def collect(self) -> VerifierResult:
+        """Download the verifier's output and parse the reward -- the
+        read side of :meth:`verify`, after the test commands ran (by
+        exec, or inside a sealed guest)."""
         if not self._environment.capabilities.mounted:
             try:
                 await self._environment.download_dir(
-                    source_dir=str(env_paths.verifier_dir),
+                    source_dir=str(self._environment.env_paths.verifier_dir),
                     target_dir=self._trial_paths.verifier_dir,
                 )
             except Exception as e:

@@ -1,0 +1,4 @@
+# The task's own capability grant: building pMARS from Debian source
+# needs the package manager, a sources.list append, and the install
+# into /usr/local/bin. Everything else runs unprivileged.
+titanium ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/tee, /usr/bin/install

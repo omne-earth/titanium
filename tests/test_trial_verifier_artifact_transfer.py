@@ -72,6 +72,7 @@ def _make_env(mounted: bool) -> AsyncMock:
     env = AsyncMock()
     env.default_user = None
     env.capabilities.mounted = mounted
+    env.capabilities.sealed_oneshot = False
     env.task_os = TaskOS.LINUX
     env.env_paths = EnvironmentPaths()
     env.exec.return_value = ExecResult(stdout="/", stderr="", return_code=0)

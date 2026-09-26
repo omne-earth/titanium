@@ -42,6 +42,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from titanium.environments.cella.constants import (
+    GUEST_INIT_PATH,
+    MAX_SYMLINK_HOPS,
+    OS_RELEASE_CANDIDATES,
+    OS_RELEASE_KEYS,
+    STRATEGY_ALREADY_SYSTEMD,
+    SYSTEMD_BINARY_CANDIDATES,
+)
 from titanium.environments.cella.image_config import parse_image_record
 from titanium.environments.cella.podman import (
     build_image,
@@ -50,28 +58,6 @@ from titanium.environments.cella.podman import (
     new_build_tag,
     untag_image,
 )
-
-#: Where the kernel looks for PID 1. Not a choice: it is the path Linux
-#: executes when no ``init=`` is on the command line.
-GUEST_INIT_PATH = "/sbin/init"
-
-#: Paths a systemd implementation is known to occupy. Order is the order they
-#: are tried. On a usr-merged guest both resolve to the same file, which is
-#: why the bootable check compares *resolved* paths rather than these.
-SYSTEMD_BINARY_CANDIDATES = ("/usr/lib/systemd/systemd", "/lib/systemd/systemd")
-
-#: Read in this order; the first one present wins. Both are the same file on
-#: most distros, and `/etc` is allowed to be a symlink into `/usr/lib`.
-OS_RELEASE_CANDIDATES = ("/etc/os-release", "/usr/lib/os-release")
-
-#: The strategy recorded when the source filesystem needed nothing done to it.
-STRATEGY_ALREADY_SYSTEMD = "already-systemd"
-
-#: Linux's own ``ELOOP`` threshold. A chain longer than this is a loop for
-#: every practical purpose, and the guest's kernel would refuse it too.
-MAX_SYMLINK_HOPS = 40
-
-_OS_RELEASE_KEYS = ("ID", "ID_LIKE", "VERSION_ID", "PRETTY_NAME")
 
 
 class SystemdBootError(RuntimeError):
@@ -415,7 +401,7 @@ def _parse_os_release(raw: bytes) -> dict[str, str]:
             continue
         key, separator, value = stripped.partition("=")
         key = key.strip()
-        if not separator or key not in _OS_RELEASE_KEYS:
+        if not separator or key not in OS_RELEASE_KEYS:
             continue
         found[key] = _unquote(key, value.strip(), lineno)
     return found

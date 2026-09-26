@@ -48,26 +48,21 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from titanium.environments.cella.wire import (
+from titanium.environments.cella.constants import (
     DIRECTION_INCOMING,
+    ETHERTYPE_NAMES,
+    ETHERTYPE_NUMBERS,
+    POLICY_DIRECTIONS,
+    POLICY_HEADER,
+    POLICY_VERBS,
+    PROTO_NAMES,
+    PROTO_NUMBERS,
+    WINDOW_UNITS,
+)
+from titanium.environments.cella.wire import (
     Destination,
     MembraneMemory,
     Operation,
-)
-
-_VERBS = ("release", "refuse")
-_DIRECTIONS = ("outgoing", "incoming")
-_PROTO_NAMES = {6: "tcp", 17: "udp"}
-_PROTO_NUMBERS = {"tcp": 6, "udp": 17}
-_ETHERTYPE_NAMES = {0x0806: "arp", 0x86DD: "ipv6"}
-_ETHERTYPE_NUMBERS = {"arp": 0x0806, "ipv6": 0x86DD}
-_WINDOW_UNITS = {"s": 1, "m": 60, "h": 3600}
-
-HEADER = (
-    "# cella.policy — the crossings this task is granted.\n"
-    "# <release|refuse> <incoming|outgoing> <destination> (key=value)*\n"
-    '# keys: keep_open=<90s|5m|24h> skip_freeze=true reason="..."\n'
-    "# '*' matches any ip or any port. Everything not granted is refused.\n"
 )
 
 
@@ -85,8 +80,8 @@ def _format_window(seconds: int) -> str:
 def _parse_window(value: str, lineno: int) -> int:
     raw = value
     unit = 1
-    if value and value[-1] in _WINDOW_UNITS:
-        unit = _WINDOW_UNITS[value[-1]]
+    if value and value[-1] in WINDOW_UNITS:
+        unit = WINDOW_UNITS[value[-1]]
         value = value[:-1]
     try:
         seconds = int(value) * unit
@@ -225,10 +220,10 @@ class Grant:
 
     def line(self) -> str:
         if self.ethertype != 0:
-            dest = _ETHERTYPE_NAMES.get(self.ethertype, f"0x{self.ethertype:04x}")
+            dest = ETHERTYPE_NAMES.get(self.ethertype, f"0x{self.ethertype:04x}")
         else:
             port = "*" if self.port == 0 else str(self.port)
-            proto = _PROTO_NAMES.get(self.proto, str(self.proto))
+            proto = PROTO_NAMES.get(self.proto, str(self.proto))
             dest = f"{self.host or self.ip}:{port}/{proto}"
         parts = [self.verb, self.direction, dest]
         if self.keep_open > 0:
@@ -290,8 +285,8 @@ def _looks_like_ipv4(text: str) -> bool:
 
 def _parse_destination(spec: str, lineno: int) -> dict:
     if ":" not in spec:
-        if spec in _ETHERTYPE_NUMBERS:
-            return {"ethertype": _ETHERTYPE_NUMBERS[spec]}
+        if spec in ETHERTYPE_NUMBERS:
+            return {"ethertype": ETHERTYPE_NUMBERS[spec]}
         try:
             ethertype = int(spec, 16) if spec.startswith("0x") else int(spec)
         except ValueError as exc:
@@ -342,8 +337,8 @@ def _parse_destination(spec: str, lineno: int) -> dict:
             raise PolicyError(
                 f"cella.policy line {lineno}: port {port} is out of range."
             )
-    if proto_word in _PROTO_NUMBERS:
-        proto = _PROTO_NUMBERS[proto_word]
+    if proto_word in PROTO_NUMBERS:
+        proto = PROTO_NUMBERS[proto_word]
     else:
         try:
             proto = int(proto_word)
@@ -362,7 +357,7 @@ def _parse_destination(spec: str, lineno: int) -> dict:
 def _parse_grant(line: str, lineno: int) -> Grant:
     keys = dict(_KEY_RE.findall(line))
     head = _KEY_RE.sub("", line).split()
-    if len(head) != 3 or head[0] not in _VERBS or head[1] not in _DIRECTIONS:
+    if len(head) != 3 or head[0] not in POLICY_VERBS or head[1] not in POLICY_DIRECTIONS:
         raise PolicyError(
             f"cella.policy line {lineno}: want "
             f"'<release|refuse> <incoming|outgoing> <destination> (key=value)*', "
@@ -457,7 +452,7 @@ class Policy:
         return cls.parse(text)
 
     def render(self) -> str:
-        lines = [HEADER]
+        lines = [POLICY_HEADER]
         lines += sorted(grant.line() for grant in set(self.grants))
         return "\n".join(lines) + "\n"
 

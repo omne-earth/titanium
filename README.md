@@ -34,13 +34,39 @@ Every environment installs agents, honors per-task network allowlists, and runs 
 | **Isolation** | namespaces + seccomp | namespaces + seccomp | gVisor (Sentry) kernel | gVisor (Sentry) kernel | KVM microVM (libkrun) | KVM micro-VM, its VMM seccomp-allowlisted and jailed by bwrap under a per-machine sub-uid + a judged network membrane |
 | **Engine** | Docker daemon | rootless Podman, no socket | Docker daemon | rootless Podman, no socket | rootless Podman, no socket | cella — no daemon, no host network object |
 | **Runtime** | runc | crun | runsc | runsc | krun | the cella VMM, direct on KVM |
-| **Kernel isolation** | none — workload syscalls hit the host kernel, seccomp-filtered | none — workload syscalls hit the host kernel, seccomp-filtered | Sentry, a userspace application kernel, absorbs the workload's syscalls | Sentry, a userspace application kernel, absorbs the workload's syscalls | a dedicated guest kernel (libkrunfw) inside a KVM VM | a dedicated guest kernel inside a KVM VM; one boot per command, with no live guest to exec into |
+| **Kernel isolation** | none — workload syscalls hit the host kernel, seccomp-filtered | none — workload syscalls hit the host kernel, seccomp-filtered | Sentry, a userspace application kernel, absorbs the workload's syscalls | Sentry, a userspace application kernel, absorbs the workload's syscalls | a dedicated guest kernel (libkrunfw) inside a KVM VM | a dedicated guest kernel inside a KVM VM; the agent's whole turn is one boot, its grader a second, with no live guest to exec into |
 | **File system isolation** | shared — the root daemon's store; the image cache and volumes persist across runs | rootless overlay in the runner's private store; bind mounts relabeled (`:z`); cleared by `make reset` | sandbox-private rootfs — the Sentry's gofer owns it; the host cannot `cp` into or out of it, so transfers run from inside | the same sandbox-private rootfs, on the runner's rootless store | the rootfs crosses virtiofs from host storage into the guest; `podman cp` stays coherent against the running guest | a private ext4 block device the guest boots; nothing from the host is mounted in, and evidence is copied out of a still machine, never a live one |
 | **A container escape lands as** | root | unprivileged user | host-side runsc processes, behind Sentry | unprivileged user, behind Sentry | unprivileged user, outside the VM | a process inside the sealed guest; the membrane still judges every frame out |
 | **Root daemon in the trust chain** | yes | no | yes | no | no | no |
 | **Runner separation** (run as a throwaway user) | — | the `titanium` user, via `make titanium-run` | — | the `titanium` user, via `make titanium-run` | the `titanium` user, via `make titanium-run` | intrinsic — cella is rootless and daemonless |
-| **Overhead** | near-native | near-native; rootless image builds cost more — pre-load images | syscall interposition tax — syscall- and I/O-heavy workloads pay most | gvisor's tax, plus a user-mode network hop (pasta) at the host edge; pre-load images | VM boot per container, virtiofs I/O, and each guest kernel's memory footprint; pre-load images | a VM boot per command and the judge round-trip; the highest of the rungs |
+| **Overhead** | near-native | near-native; rootless image builds cost more — pre-load images | syscall interposition tax — syscall- and I/O-heavy workloads pay most | gvisor's tax, plus a user-mode network hop (pasta) at the host edge; pre-load images | VM boot per container, virtiofs I/O, and each guest kernel's memory footprint; pre-load images | five VM boots per trial (member, verifier, the extractors, the appliance) and the judge round-trip on each crossing |
 | **Pre-load images** | — | `images-vendor` / `images-restore` | — | `images-vendor` / `images-restore` | `images-vendor` / `images-restore` | — the task image becomes a rootfs golden |
+
+### Infiltration Attack Surface
+
+Infiltration is the workload attacking the host through its sandbox
+boundary. Two numbers size that risk for each environment: how much
+code the workload can push bytes at, and what account the workload
+holds if that code breaks. No layer is solid. The table counts the
+code that must have the bug, not layers assumed to hold.
+
+| Environment | Code the workload can reach | Lines | Landing zone on a win |
+|---|---|---|---|
+| `cella` | the cella VMM and the KVM ioctl surface; after boot, seccomp allowlists the run loop to `KVM_RUN` plus the freeze-path reads | **2,466 lines of Rust** (1,757 code lines; the whole cella workspace is 16,680) — measured at the pinned rev, `wc -l` on `crates/cella-vmm/src` | the machine's own sub-uid, inside a bwrap jail with user, mount, pid, ipc, uts, and cgroup namespaces unshared; its filesystem reach is one machine directory plus execute-only traversal ACLs; every network frame it sends still parks at the membrane for a named verdict |
+| `krun-podman` | the libkrun VMM and the KVM ioctl surface | ~35,000 lines of Rust and C (upstream estimate, not measured here) | the `titanium` runner uid outside the VM; the VMM ran under a confined SELinux domain and a tightened seccomp profile |
+| `gvisor-podman` | the Sentry (a userspace application kernel in Go), or the host kernel through the narrowed syscall profile the Sentry itself uses | ~250,000 lines of Go (upstream estimate, not measured here) | the `runsc` sandbox process, owned by the `titanium` runner uid, still inside the seccomp filter `runsc` installs on itself |
+| `gvisor` | the same two surfaces | the same ~250,000 | the same sandbox process — but uid 0 under `dockerd` |
+| `podman` | the host kernel, through the full syscall table under a seccomp filter | not enumerable — the kernel tree is tens of millions of lines, and the reachable slice has no stable measure | the nologin `titanium` uid: its subuid range, its container storage, trial state — no login, no sudo, no keys |
+| `docker` | the host kernel, through the same filtered syscall table | the same non-enumerable kernel slice | a uid-0 process in the initial user namespace; the daemon socket it can then reach is root-equivalent |
+
+The measured number is the argument. The code a hostile guest can
+attack on the `cella` rung is three orders of magnitude smaller than
+the kernel rungs and two smaller than the Sentry — small enough that
+one person can read all of it. Both KVM rows share one irreducible
+base: KVM itself is kernel code, but its ioctl surface is narrow and
+heavily exercised. The estimates for gVisor and libkrun come from
+their upstream trees; the cella number is measured by this
+repository's pin and moves with it.
 
 ### Network
 
@@ -52,11 +78,11 @@ Network policy is enforced by a **per-trial egress proxy**, not by trust: an all
 
 ### cella
 
-The sealed-VM rung, on cella — hardware-isolated micro-VMs written directly on KVM, with no daemon, no capability, and no host network object. Each machine boots a dedicated guest kernel. A command is one boot: the machine boots, runs the command, and powers off. There is no channel into a live guest, and no exec-into.
+The sealed-VM rung, on cella — hardware-isolated micro-VMs written directly on KVM, with no daemon, no capability, and no host network object. Each machine boots a dedicated guest kernel. The trial is two sealed experiments: the member runs the agent's whole turn — setup, agent, collect — with no tests aboard, and resets; its extracted state is rebaked with the tests into a verifier machine that grades and resets. The agent and its graders never coexist. There is no channel into a live guest, and no exec-into.
 
 The border is total. Every network frame parks at a membrane for an external decision, and titanium's in-process engine judges it by resolved name. The trajectory gains what no other rung records: the chronicle of every crossing the agent attempted, the refused ones included. A task with egress uses a terminated pair, so even TLS to the world is terminated on a consented pair CA and judged by name.
 
-Time is cryogenic: a machine freezes in one instant and thaws with no gap the guest can measure, and a machine is files — it can be archived to a rock or branched into twins. The costs are explicit: one vCPU per machine, a VM boot per command, and no live exec. Choose by threat model; the full account is [docs/environments/CELLA.md](docs/environments/CELLA.md), and the operator's guide to a cella trial on disk — every folder, file, and machine suffix under `.run/` — is [README-cella.md](README-cella.md).
+Time is cryogenic: a machine freezes in one instant and thaws with no gap the guest can measure, and a machine is files — it can be archived to a rock or branched into twins. The costs are explicit: one vCPU per machine, five boots per trial, and no live exec. Results and artifacts leave the still machine through `cella extract`; titanium never mounts or edits a filesystem. Choose by threat model; the full account is [docs/environments/CELLA.md](docs/environments/CELLA.md), and the operator's guide to a cella trial on disk — every folder, file, and machine name under `.run/` — is [README-cella.md](README-cella.md).
 
 ### gvisor-podman — the default
 
@@ -91,10 +117,10 @@ Then prove the whole chain end to end:
 ```bash
 cp .secrets.template .secrets   # fill in OPENROUTER_MODEL and OPENROUTER_API_KEY
 make smoke-cella-all            # the whole cella rung: rootfs acceptance, the policy-engine probes, and the bench + verify tasks under a real agent
-make smoke-env                  # runs the podman, gvisor, gvisor-podman, and krun-podman smokes
+make smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman   # the four container smokes, in sequence
 ```
 
-`make BACKEND=claude smoke-env` uses the `claude-code` agent instead of `mini-swe-agent`. It authenticates with `ANTHROPIC_API_KEY` from your environment or `.secrets`.
+`make BACKEND=claude smoke-<env>` uses the `claude-code` agent instead of `mini-swe-agent`. It authenticates with `ANTHROPIC_API_KEY` from your environment or `.secrets`.
 
 ## Run
 
@@ -151,13 +177,18 @@ make collect    # archive artifacts only; shelve a campaign without deprovisioni
 ```bash
 .archive/2026-08-27__00-08-33/
 ├── .run/            # jobs, trial output, reports, staged smoke tasks
-├── .tasks/          # the cloned datasets
-└── .pytest_cache/   # any other untracked artifact dot-folder
+└── .logs/           # the per-target make run logs
 ```
+
+Each dot-folder's *contents* move, mirrored under the same structure;
+the folder itself stays in place, emptied, so recipes that expect
+`.run/jobs` to exist need not recreate it. Not swept: `.tasks` (the
+cloned task sources — slow to re-clone, not a run artifact) and
+`.pytest_cache` (a tool cache `make clean` owns).
 
 Not collected: `.git/` and `.archive/` (structural), `.venv/` (rebuilt byte-equivalent by `make sync`), `.secrets`, and any dot-folder holding tracked files (`.github/` is source, not artifact). It then deprovisions the host (runner user, both sandbox runtimes' registrations and digest pins, the runsc binaries), cleans the checkout back to fresh-clone equivalence, and asserts the result. It keeps `.secrets`, `.archive`, your tracked edits, distro packages, and the operator's docker-group grant. `make collect` also works on its own, to shelve a finished campaign. `make clean` drops repo-local caches only.
 
-The recommended validation cycle for a runtime change is: `make reset` → `make bootstrap` → `make smoke-env`.
+The recommended validation cycle for a runtime change is: `make reset` → `make bootstrap` → the four container smokes (`make smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman`).
 
 ### Image supply: vendor and restore
 
@@ -214,12 +245,12 @@ make smoke-cella-all      # everything below, plus the rootfs acceptance proof
 make smoke-cella-integration  # the four policy-engine probes, oracle, deterministic
 make smoke-cella          # the bench + verify tasks under cella, with a real agent
 make smoke-podman         # one environment, three trials
-make smoke-env            # the four container environments, one tmux session
-make run-attach           # watch a running smoke session
+make smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman
+                          # the four container environments, in sequence
 make reset                # deprovision; verify the clean slate
 ```
 
-For a runtime change, run the full cycle: `make reset` → `make init` → `make smoke-env` → inspect the job results under `.run/jobs/`. Unit tests gate every smoke target, and the podman-family smokes run as the `titanium` runner automatically.
+For a runtime change, run the full cycle: `make reset` → `make init` → the four container smokes → inspect the job results under `.run/jobs/`. Each smoke tees its output to `.logs/<run>/<target>.log`, so a backgrounded run keeps a durable, greppable record. Unit tests gate every smoke target, and the podman-family smokes run as the `titanium` runner automatically.
 
 ### Oracle runs
 
@@ -262,7 +293,7 @@ Isolation is only as good as its trust chain, so Titanium verifies rather than a
 - **Network policy is topology.** Egress rides the per-trial proxy on an `internal` network, or does not exist at all — never a firewall rule the workload could race.
 - **Escapes land in a throwaway.** On a provisioned host the whole run executes as the nologin `titanium` user; the krun VMM additionally runs under a tightened seccomp profile and a confined SELinux domain; and each cella machine runs jailed as its own sub-uid, so even a VMM escape lands in an account that owns one machine directory.
 - **Teardown is fail-closed.** Cleanup discovers resources by exact project label and refuses to report clean while any remain.
-- **The proof re-runs.** `make smoke-env` and the per-environment oracles re-verify the whole chain on demand; the per-environment documents record every relaxation, its blast radius, and the measurements behind it.
+- **The proof re-runs.** The per-environment smokes and oracles re-verify the whole chain on demand; the per-environment documents record every relaxation, its blast radius, and the measurements behind it.
 
 **The boundary** is containment of untrusted agent code plus privilege separation. For the gvisor family it is a *shared kernel* behind a gVisor application kernel — not a VM boundary. For `krun-podman` it is exactly a hypervisor boundary: a KVM microVM per container, at the price of the host's KVM subsystem in the trust chain. For `cella` it is the hypervisor boundary plus a total network border: every frame is judged outside the machine, and the chronicle records what was refused. None is formally verified. The per-environment protections, the relaxations made to run trials, the blast radius of each, and the avenues still open are documented in [`docs/environments/`](docs/environments/).
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Titanium sealed one-shot trial
+After=basic.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash {{RUNNER_DIR}}/orchestrator.sh
+
+[Install]
+WantedBy=multi-user.target

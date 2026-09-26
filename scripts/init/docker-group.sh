@@ -5,7 +5,7 @@
 set -uo pipefail
 
 if docker ps >/dev/null 2>&1; then
-  echo "init complete — try: make smoke-env BACKEND=openrouter"
+  echo "init complete — try: make smoke-podman BACKEND=openrouter"
   exit 0
 fi
 
@@ -18,7 +18,7 @@ if id -nG "$USER" | grep -qw docker; then
       y | Y) sudo reboot ;;
     esac
   fi
-  echo "reboot when ready, then: make smoke-env BACKEND=openrouter"
+  echo "reboot when ready, then: make smoke-podman BACKEND=openrouter"
   exit 0
 fi
 

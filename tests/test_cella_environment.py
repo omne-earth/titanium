@@ -40,6 +40,7 @@ from pathlib import Path
 
 import pytest
 
+from titanium.environments.base import SealedPhaseSpec, SealedPhaseStep
 from titanium.environments.cella.environment import (
     CellaEnvironment,
     _flavor_name,
@@ -100,14 +101,19 @@ def test_dry_run_accepts_the_string_forms(tmp_path):
     assert env._policy_path() == environment_dir / "cella.policy"
 
 
-def test_flavor_names_are_safe_and_distinct():
-    name = _flavor_name("Task__Trial!weird name", 3)
+def test_flavor_names_are_safe_and_within_the_extractor_budget():
+    name = _flavor_name("Task__Trial!weird name")
     # The machine-name contract is the strict one: lowercase letters,
-    # digits, and dashes only.
-    assert name == "titanium-task-trial-weird-name-c0003"
+    # digits, and dashes only. No harness prefix, no cycle counter:
+    # one boot runs the whole trial, so the session id alone names it.
+    assert name == "task-trial-weird-name"
     assert validate_flavor_name(name) == name
     assert all(c.islower() or c.isdigit() or c == "-" for c in name)
-    assert _flavor_name("t", 1) != _flavor_name("t", 2)
+    # cella caps machine names at 64 and `cella extract` appends
+    # `-extractor` (10); the longest name this can produce -- the
+    # 40-char session cap -- must fit.
+    longest = _flavor_name("x" * 100)
+    assert len(longest) + len("-extractor") <= 64
 
 
 @pytest.mark.asyncio
@@ -140,36 +146,161 @@ async def test_upload_dir_walks_and_preserves_links(tmp_path):
     assert link.target == "test.sh"
 
 
-def test_job_files_render_the_cycle(tmp_path):
+def test_orchestrator_files_render_the_trial(tmp_path):
     env = _make_env(tmp_path)
     env._image_config = {"WorkingDir": "/app", "Env": ["PATH=/usr/bin"]}
-    files = env._job_files("bash solve.sh", None, {"K": "a b"}, None)
+    phases = [
+        SealedPhaseSpec(
+            name="agent",
+            steps=[SealedPhaseStep(command="bash solve.sh", env={"K": "a b"})],
+            timeout_sec=600,
+        ),
+        SealedPhaseSpec(
+            name="verify",
+            steps=[
+                SealedPhaseStep(command="chmod +x /tests/test.sh", user="root"),
+                SealedPhaseStep(command="bash /tests/test.sh"),
+            ],
+            timeout_sec=300,
+        ),
+    ]
+    files = env._orchestrator_files(phases)
     by_path = {entry.path: entry for entry in files}
-    command = by_path["/titanium/command.sh"].contents.decode()
-    assert command == "bash solve.sh\n"
-    job = by_path["/titanium/job.sh"].contents.decode()
-    assert "cd /app" in job
-    assert "export PATH=/usr/bin" in job
-    assert "export K='a b'" in job
-    # rc is written last, after the outputs are synced: its presence
-    # is the host's completion signal, so it must prove the rest.
-    assert "echo $rc > /titanium/result/rc" in job
-    assert job.index("sync") < job.index("echo $rc")
-    assert "systemctl poweroff" in job
-    # Always runuser, root included: the systemd job has no HOME, and
-    # runuser pins the target user's.
-    assert "runuser -u root -- bash /titanium/command.sh" in job
-    unit = by_path["/etc/systemd/system/titanium-exec.service"].contents.decode()
-    assert "ExecStart=/bin/bash /titanium/job.sh" in unit
-    wants = by_path["/etc/systemd/system/multi-user.target.wants/titanium-exec.service"]
-    assert wants.target == "../titanium-exec.service"
+    agent_phase = by_path["/titanium/phases/agent.sh"].contents.decode()
+    assert "cd '/app'" in agent_phase or "cd /app" in agent_phase
+    assert "export PATH=/usr/bin" in agent_phase
+    assert "export K='a b'" in agent_phase
+    # The rung's law: an undeclared agent step never runs as root --
+    # it falls to the baked standard user. Root is written down
+    # (agent.user = "root"), never inherited.
+    assert "runuser -u titanium -- bash /titanium/steps/agent-0.sh" in agent_phase
+    assert by_path["/titanium/steps/agent-0.sh"].contents.decode() == "bash solve.sh\n"
+    verify_phase = by_path["/titanium/phases/verify.sh"].contents.decode()
+    # A failing step ends its phase with its rc on the record.
+    assert "echo $rc > $R/verify/rc" in verify_phase
+    orchestrator = by_path["/titanium/orchestrator.sh"].contents.decode()
+    # The root-created writable surfaces are handed to the payload
+    # user before any phase runs.
+    assert "chown -R titanium: /logs/agent /app" in orchestrator
+    # Phase budgets are baked and enforced in-guest.
+    assert "timeout -k 10 600 bash /titanium/phases/agent.sh" in orchestrator
+    assert "timeout -k 10 300 bash /titanium/phases/verify.sh" in orchestrator
+    # A phase killed by its budget still leaves an rc.
+    assert "[ -f $R/agent/rc ] || echo 124 > $R/agent/rc" in orchestrator
+    # The forced reset is the completion signal, and a re-boot that
+    # did not exit the VMM resets again off the done marker.
+    assert "reboot -f" in orchestrator
+    assert orchestrator.index('if [ -f "$R/done" ]') < orchestrator.index("mkdir -p $R ")
+    unit = by_path["/etc/systemd/system/titanium-trial.service"].contents.decode()
+    assert "ExecStart=/bin/bash /titanium/orchestrator.sh" in unit
+    wants = by_path[
+        "/etc/systemd/system/multi-user.target.wants/titanium-trial.service"
+    ]
+    assert wants.target == "../titanium-trial.service"
 
 
-def test_job_files_drop_privilege_when_asked(tmp_path):
+def test_verifier_orchestrator_folds_results_under_logs(tmp_path):
     env = _make_env(tmp_path)
-    files = env._job_files("id", None, None, "agent")
-    job = next(e for e in files if e.path == "/titanium/job.sh").contents.decode()
-    assert "runuser -u agent -- bash /titanium/command.sh" in job
+    phases = [SealedPhaseSpec(name="verify", steps=[SealedPhaseStep(command="true")])]
+    folded = next(
+        e
+        for e in env._orchestrator_files(phases, fold_results=True)
+        if e.path == "/titanium/orchestrator.sh"
+    ).contents.decode()
+    # One extract of /logs must retrieve the phase results too.
+    assert "cp -r $R/. /logs/titanium-result/" in folded
+    assert folded.index("cp -r $R/.") < folded.index("touch $R/done")
+    bare = next(
+        e
+        for e in env._orchestrator_files(phases)
+        if e.path == "/titanium/orchestrator.sh"
+    ).contents.decode()
+    assert "titanium-result" not in bare
+
+
+def test_the_agents_identity_never_leaks_into_harness_phases(tmp_path):
+    # default_user carries the task's agent user; setup/collect/verify
+    # must fall to root regardless, or the grader runs as the agent
+    # (the /logs/verifier permission failure of trial 3655mtv).
+    env = _make_env(tmp_path)
+    env.default_user = "titanium"
+    env._image_config = {}
+    phases = [
+        SealedPhaseSpec(name="agent", steps=[SealedPhaseStep(command="a")]),
+        SealedPhaseSpec(name="collect", steps=[SealedPhaseStep(command="c")]),
+        SealedPhaseSpec(name="verify", steps=[SealedPhaseStep(command="v")]),
+    ]
+    files = {e.path: e for e in env._orchestrator_files(phases)}
+    agent = files["/titanium/phases/agent.sh"].contents.decode()
+    assert "runuser -u titanium -- bash /titanium/steps/agent-0.sh" in agent
+    for name in ("collect", "verify"):
+        phase = files[f"/titanium/phases/{name}.sh"].contents.decode()
+        assert f"runuser -u root -- bash /titanium/steps/{name}-0.sh" in phase
+
+
+def test_task_owned_sudoers_bakes_verbatim_or_not_at_all(tmp_path):
+    env = _make_env(tmp_path)
+    assert env._sudoers_entries() == ()
+    grant = "agent ALL=(root) NOPASSWD: /usr/bin/apt-get\n"
+    (tmp_path / "environment" / "sudoers").write_text(grant)
+    (entry,) = env._sudoers_entries()
+    assert entry.path == "/etc/sudoers.d/titanium-agent"
+    assert entry.contents == grant.encode()
+    # sudo refuses a sudoers file that is not 0440 root:root.
+    assert (entry.mode, entry.uid, entry.gid) == (0o440, 0, 0)
+
+
+def test_verifier_result_root_avoids_the_members_marker(tmp_path):
+    env = _make_env(tmp_path)
+    phases = [SealedPhaseSpec(name="verify", steps=[SealedPhaseStep(command="true")])]
+    files = env._orchestrator_files(
+        phases, fold_results=True, result_dir="/titanium/result-verifier"
+    )
+    orch = next(
+        e for e in files if e.path == "/titanium/orchestrator.sh"
+    ).contents.decode()
+    # Its own root and marker: the member's carried /titanium/result/done
+    # must not fire the re-entry guard.
+    assert "R=/titanium/result-verifier" in orch
+    assert "/titanium/result/done" not in orch
+    phase = next(
+        e for e in files if e.path == "/titanium/phases/verify.sh"
+    ).contents.decode()
+    assert "R=/titanium/result-verifier\n" in phase
+
+
+def test_evidence_cache_resolves_by_longest_root(tmp_path):
+    env = _make_env(tmp_path)
+    state = tmp_path / "state"
+    (state / "logs" / "agent").mkdir(parents=True)
+    (state / "logs" / "agent" / "old.txt").write_text("member era")
+    verifier_logs = tmp_path / "vlogs"
+    (verifier_logs / "verifier").mkdir(parents=True)
+    (verifier_logs / "verifier" / "reward.txt").write_text("1")
+    env._evidence_cache = {"/": state, "/logs": verifier_logs}
+    # The verifier's /logs overlays the member's tree.
+    assert (
+        env._evidence_cache_dir("/logs/verifier") == verifier_logs / "verifier"
+    )
+    # Anything outside /logs still reads from the member's state.
+    assert env._evidence_cache_dir("/app") == state / "app"
+    with pytest.raises(FileNotFoundError):
+        empty = _make_env(tmp_path / "e")
+        empty._evidence_cache_dir("/app")
+
+
+def test_orchestrator_steps_drop_privilege_when_asked(tmp_path):
+    env = _make_env(tmp_path)
+    phases = [
+        SealedPhaseSpec(
+            name="agent", steps=[SealedPhaseStep(command="id", user="agent")]
+        )
+    ]
+    files = env._orchestrator_files(phases)
+    phase = next(
+        e for e in files if e.path == "/titanium/phases/agent.sh"
+    ).contents.decode()
+    assert "runuser -u agent -- bash /titanium/steps/agent-0.sh" in phase
 
 
 def _state_tar(tmp_path, entries) -> Path:
@@ -355,25 +486,32 @@ async def test_chronicle_preservation_skips_absent_files(tmp_path, monkeypatch):
 # appliance, replacing the tinyproxy router.
 # ---------------------------------------------------------------------------
 
+from titanium.environments.cella import constants as C
 from titanium.environments.cella import terminator as term
 
 
-def test_the_terminator_conf_is_constant_and_complete():
-    conf = term.terminator_conf_text()
-    assert f"wire_ip={term.APPLIANCE_WIRE_ADDRESS}" in conf
-    assert f"upstream_dns={term.UPSTREAM_DNS}" in conf
-    assert "listen=443,80" in conf
-    entry = term.terminator_conf_entry()
-    assert entry.path == "/etc/cella-terminator.conf"
-    assert entry.contents.decode() == conf
+def test_the_constants_match_the_goldens_boot_defaults():
+    # The appliance boots the terminator golden directly; its init
+    # writes /etc/cella-terminator.conf at boot from these defaults
+    # (cella scripts/build/rootfs-terminator.sh). Titanium injects
+    # nothing -- these constants must equal the golden's defaults, or
+    # the borders titanium composes judge a different appliance than
+    # the one that boots.
+    assert C.APPLIANCE_WIRE_ADDRESS == "10.77.0.1"
+    assert C.UPSTREAM_DNS == "9.9.9.9"
+    assert tuple(C.LISTEN_PORTS) == (443, 80)
 
 
 def test_member_trust_bakes_the_ca_and_points_the_resolver():
     entries = {e.path: e for e in term.member_trust_entries(b"PAIRCA")}
-    assert entries[term.MEMBER_CA_PATH].contents == b"PAIRCA"
-    assert entries[term.MEMBER_CA_PATH].mode == 0o444
+    assert entries[C.MEMBER_CA_PATH].contents == b"PAIRCA"
+    assert entries[C.MEMBER_CA_PATH].mode == 0o444
+    # TIME_WAIT reuse makes the eight-port window livable.
+    assert entries["/etc/sysctl.d/50-reply-window.conf"].contents == (
+        b"net.ipv4.tcp_tw_reuse = 1\n"
+    )
     resolv = entries["/etc/resolv.conf"].contents.decode()
-    assert f"nameserver {term.APPLIANCE_WIRE_ADDRESS}\n" in resolv
+    assert f"nameserver {C.APPLIANCE_WIRE_ADDRESS}\n" in resolv
     # Patience past the appliance's first-crossing freeze, or the lookup
     # times out before the frozen reply is thawed.
     assert "timeout:30" in resolv
@@ -383,14 +521,14 @@ def test_member_prelude_trusts_the_pair_and_pins_the_reply_window():
     prelude = term.member_prelude("eth0")
     assert f"ip addr replace {term.MEMBER_WIRE_ADDRESS}/24 dev eth0" in prelude
     # The pair CA is folded into the system bundle the native clients read.
-    assert f"cat {term.MEMBER_CA_PATH} >> {term.SYSTEM_CA_BUNDLE}" in prelude
+    assert f"cat {C.MEMBER_CA_PATH} >> {C.SYSTEM_CA_BUNDLE}" in prelude
     # And Python's TLS is pointed at that bundle, so the agent's certifi-based
     # inference client trusts the appliance's minted leaf, not just curl/git.
-    assert f"export SSL_CERT_FILE={term.SYSTEM_CA_BUNDLE}" in prelude
-    assert f"export REQUESTS_CA_BUNDLE={term.SYSTEM_CA_BUNDLE}" in prelude
+    assert f"export SSL_CERT_FILE={C.SYSTEM_CA_BUNDLE}" in prelude
+    assert f"export REQUESTS_CA_BUNDLE={C.SYSTEM_CA_BUNDLE}" in prelude
     # The ephemeral range is pinned to the appliance's granted reply window.
     assert (
-        f"echo '{term.REPLY_PORT_LOW} {term.REPLY_PORT_HIGH}' "
+        f"echo '{C.REPLY_PORT_LOW} {C.REPLY_PORT_HIGH}' "
         "> /proc/sys/net/ipv4/ip_local_port_range" in prelude
     )
 
@@ -398,7 +536,7 @@ def test_member_prelude_trusts_the_pair_and_pins_the_reply_window():
 def test_member_policy_reaches_only_the_appliance():
     policy = Policy.parse(term.member_policy_text())
     lines = {g.line() for g in policy.grants}
-    gw = term.APPLIANCE_WIRE_ADDRESS
+    gw = C.APPLIANCE_WIRE_ADDRESS
     # Every member hop is 24h: the plumbing to the appliance should never
     # re-freeze mid-run (the window governs freeze frequency, not reach).
     assert f"release outgoing {gw}:443/tcp (keep_open=24h) (skip_freeze=true)" in lines
@@ -418,9 +556,17 @@ def test_appliance_border_judges_the_world_by_name():
     assert ("astral.sh", 443) in host_grants
     # The upstream resolver and the member's reply window are present.
     ips = {(g.ip, g.port, g.proto) for g in policy.grants if not g.host}
-    assert (term.UPSTREAM_DNS, 53, 17) in ips
-    assert (term.MEMBER_WIRE_ADDRESS, term.REPLY_PORT_LOW, 6) in ips
-    assert (term.MEMBER_WIRE_ADDRESS, term.REPLY_PORT_HIGH, 17) in ips
+    assert (C.UPSTREAM_DNS, 53, 17) in ips
+    assert (term.MEMBER_WIRE_ADDRESS, C.REPLY_PORT_LOW, 6) in ips
+    assert (term.MEMBER_WIRE_ADDRESS, C.REPLY_PORT_HIGH, 17) in ips
+    # The law: the reply window is eight ports, never more. Cella pins
+    # WORLD_PERMITS and the golden's port range to match; a wider
+    # grant set is dead policy.
+    assert C.REPLY_PORT_HIGH - C.REPLY_PORT_LOW + 1 == 8
+    reply_ports = {
+        g.port for g in policy.grants if g.ip == term.MEMBER_WIRE_ADDRESS
+    }
+    assert len(reply_ports) == 8
 
 
 def test_appliance_border_parses_with_no_hosts():

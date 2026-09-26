@@ -30,6 +30,15 @@ class EnvironmentCapabilities(BaseModel):
     docker_compose: bool = False
     """Whether the environment can run Docker Compose task environments."""
 
+    sealed_oneshot: bool = False
+    """Whether the environment runs the whole trial as one sealed boot.
+
+    A sealed-oneshot environment takes every input at bake time (the
+    agent's command spec, the tests, the uploads) and runs the phases
+    in-guest under its own orchestrator; the trial flow must not issue
+    per-phase execs. Requires an agent that exposes ``command_spec()``.
+    """
+
 
 class EnvironmentResourceCapabilities(BaseModel):
     cpu_limit: bool = False

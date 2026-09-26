@@ -9,7 +9,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from pathlib import Path, PurePath, PurePosixPath
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel
 
@@ -51,6 +51,34 @@ class ExecResult(BaseModel):
     stdout: str | None = None
     stderr: str | None = None
     return_code: int
+
+
+class SealedPhaseStep(BaseModel):
+    """One in-guest step of a sealed phase: command, env, user."""
+
+    command: str
+    env: dict[str, str] = {}
+    user: str | None = None
+
+
+class SealedPhaseSpec(BaseModel):
+    """One trial phase of a sealed-oneshot run, stated at bake time.
+
+    ``run_sealed_trial`` takes the whole trial as an ordered list of
+    these: the guest orchestrator runs each phase's steps in order,
+    inside one boot, under the phase's own budget. A failing step ends
+    its phase; later phases still run (the trial grades whatever the
+    payload left, exactly as the exec model did).
+    """
+
+    name: str
+    """The trial phase: ``setup``, ``agent``, ``collect``, or ``verify``."""
+
+    steps: list[SealedPhaseStep] = []
+
+    timeout_sec: float | None = None
+    """The phase budget, enforced in-guest; ``None`` means unbounded
+    within the trial's total budget."""
 
 
 class BaseEnvironment(ABC):
@@ -319,7 +347,7 @@ class BaseEnvironment(ABC):
         chmod_dirs: Sequence[EnvironmentPath] | None = None,
     ) -> str:
         """Build a shell command that resets environment directories."""
-        q = lambda p: quote_shell_arg(p, self.task_os)  # noqa: E731
+        q = lambda p: quote_shell_arg(p, self.task_os)
 
         if self.task_os == TaskOS.WINDOWS:
             commands = [
@@ -343,7 +371,7 @@ class BaseEnvironment(ABC):
         chmod: bool = True,
     ) -> str:
         """Build a shell command that empties directories without replacing roots."""
-        q = lambda p: quote_shell_arg(p, self.task_os)  # noqa: E731
+        q = lambda p: quote_shell_arg(p, self.task_os)
 
         if self.task_os == TaskOS.WINDOWS:
             commands: list[str] = []
@@ -431,7 +459,7 @@ class BaseEnvironment(ABC):
         """Target operating system declared by the task's [environment].os field."""
         return self.task_env_config.os
 
-    _LEGACY_CAPABILITY_ATTRS: dict[str, str] = {
+    _LEGACY_CAPABILITY_ATTRS: ClassVar[dict[str, str]] = {
         "supports_gpus": "gpus",
         "can_disable_internet": "disable_internet",
         "is_mounted": "mounted",
@@ -597,6 +625,21 @@ class BaseEnvironment(ABC):
         conversion). Mounted environments (Docker on Linux) need to chown files
         written by the in-container agent user; other environments are no-ops.
         """
+
+    async def run_sealed_trial(
+        self, phases: Sequence[SealedPhaseSpec]
+    ) -> dict[str, ExecResult]:
+        """Run the whole trial as one sealed boot (``sealed_oneshot``).
+
+        Every input is already baked (uploads queued before this call
+        enter the boot layer); the guest orchestrator runs the phases
+        in order and the machine ends itself. Returns one ExecResult
+        per phase name that ran. Only environments declaring
+        ``capabilities.sealed_oneshot`` implement this.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not run sealed one-shot trials"
+        )
 
     async def set_phase(self, phase: str) -> None:
         """Announce the trial phase now beginning: ``setup``, ``agent``,

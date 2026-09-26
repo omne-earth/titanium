@@ -30,7 +30,14 @@ def fs_total_kb():
     s = os.statvfs("/")
     return s.f_frsize * s.f_blocks // 1024
 
+def task_type():
+    try:
+        return open("/titanium/task-type").read().strip()
+    except OSError:
+        return "unknown"
+
 r = {
+    "task_type": task_type(),
     "egress_tcp_denied": egress_tcp_denied(),
     "net_interfaces": probe(lambda: sorted(os.listdir("/sys/class/net")), []),
     "pid1_comm": probe(lambda: open("/proc/1/comm").read().strip(), ""),

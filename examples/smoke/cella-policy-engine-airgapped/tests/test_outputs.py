@@ -1,4 +1,5 @@
 import json
+import pwd
 import os
 import socket
 from pathlib import Path
@@ -14,7 +15,7 @@ def report():
 def test_report_claims():
     r = report()
     assert r["egress_tcp_denied"] is True
-    assert int(r["uid"]) == 0
+    assert int(r["uid"]) == pwd.getpwnam("titanium").pw_uid
     assert r["writable_workdir"] is True
     assert r["writable_tmp"] is True
     assert r["cpu_hypervisor"] is True

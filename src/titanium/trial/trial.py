@@ -5,10 +5,9 @@ import logging
 import shlex
 import shutil
 import traceback
-from collections.abc import Sequence
-from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from tenacity import (
     retry,
@@ -18,7 +17,11 @@ from tenacity import (
 )
 
 from titanium.agents.installed.base import BaseInstalledAgent, NonZeroAgentExitCodeError
-from titanium.environments.base import HealthcheckError
+from titanium.environments.base import (
+    HealthcheckError,
+    SealedPhaseSpec,
+    SealedPhaseStep,
+)
 from titanium.environments.factory import EnvironmentFactory
 from titanium.models.agent.context import AgentContext
 from titanium.models.task.config import (
@@ -51,13 +54,13 @@ from titanium.models.trial.result import (
 )
 from titanium.models.verifier.result import VerifierResult
 from titanium.trial.artifact_handler import ArtifactHandler
-from titanium.trial.hooks import TrialEvent, TrialHookEvent
 from titanium.trial.execution import (
     AgentSetupTimeoutError,
     AgentTimeoutError,
     EnvironmentStartTimeoutError,
     TrialExecution,
 )
+from titanium.trial.hooks import TrialEvent, TrialHookEvent
 from titanium.utils.logger import logger
 from titanium.verifier.verifier import Verifier
 
@@ -288,7 +291,7 @@ class Trial:
         await self._invoke_hooks(TrialEvent.ENVIRONMENT_START)
 
         self.result.environment_setup = TimingInfo(
-            started_at=datetime.now(timezone.utc)
+            started_at=datetime.now(UTC)
         )
 
         try:
@@ -296,20 +299,20 @@ class Trial:
                 force_build=self.config.environment.force_build
             )
         finally:
-            self.result.environment_setup.finished_at = datetime.now(timezone.utc)
+            self.result.environment_setup.finished_at = datetime.now(UTC)
 
     async def _setup_agent(self) -> None:
-        self.result.agent_setup = TimingInfo(started_at=datetime.now(timezone.utc))
+        self.result.agent_setup = TimingInfo(started_at=datetime.now(UTC))
         try:
             await self._execution.setup_agent()
         finally:
-            self.result.agent_setup.finished_at = datetime.now(timezone.utc)
+            self.result.agent_setup.finished_at = datetime.now(UTC)
 
     async def _execute_agent(self) -> None:
         await self._environment.set_phase("agent")
         await self._invoke_hooks(TrialEvent.AGENT_START)
 
-        self.result.agent_execution = TimingInfo(started_at=datetime.now(timezone.utc))
+        self.result.agent_execution = TimingInfo(started_at=datetime.now(UTC))
 
         try:
             self.result.agent_result = AgentContext()
@@ -319,17 +322,121 @@ class Trial:
                 context=self.result.agent_result,
             )
         finally:
-            self.result.agent_execution.finished_at = datetime.now(timezone.utc)
+            self.result.agent_execution.finished_at = datetime.now(UTC)
+
+    async def _run_sealed(self) -> None:
+        """The sealed one-shot flow (``capabilities.sealed_oneshot``).
+
+        Every input is baked -- the agent's command spec, the task's
+        collect script, the verifier's tests -- and one boot runs the
+        phases in-guest (docs/environments/CELLA.md, "The sealed
+        one-shot trial"). The phase results map back onto the trial the
+        way the exec model's exceptions did: a timed-out agent phase
+        records the timeout, a nonzero agent phase records the exit
+        code, and grading proceeds against whatever the payload left.
+        """
+        env = self._environment
+        spec = self._agent.sealed_command_spec(self._task.instruction, env)
+        if spec is None:
+            raise RuntimeError(
+                f"agent {self._agent.name()!r} states no sealed command spec; "
+                "only agents implementing sealed_command_spec run on a "
+                "sealed-oneshot environment"
+            )
+        agent_user = self._task.config.agent.user
+        # No agent-user fallback here: the verifier is harness
+        # machinery, and a sealed environment resolves an undeclared
+        # verify user itself (on cella: root -- the agent's user must
+        # not leak into the grader's phase).
+        verifier_user = self._task.config.verifier.user
+        for source_dir, guest_dir in spec.uploads:
+            await env.upload_dir(source_dir=source_dir, target_dir=guest_dir)
+        phases = [
+            SealedPhaseSpec(
+                name="agent",
+                steps=[
+                    SealedPhaseStep(
+                        command=step.command,
+                        env=step.env,
+                        user=step.user if step.user is not None else agent_user,
+                    )
+                    for step in spec.steps
+                ],
+                timeout_sec=env.agent_timeout_sec,
+            )
+        ]
+        collect_script = self._task.paths.collect_script_path
+        if collect_script.exists():
+            target = "/titanium/collect.sh"
+            await env.upload_file(source_path=collect_script, target_path=target)
+            phases.append(
+                SealedPhaseSpec(
+                    name="collect",
+                    steps=[SealedPhaseStep(command=f"bash {target}", user="root")],
+                    timeout_sec=300,
+                )
+            )
+        self._sealed_verifier = None
+        if not self.config.verifier.disable:
+            self._sealed_verifier = Verifier(
+                task=self._task,
+                trial_paths=self._trial_paths,
+                environment=env,
+                override_env=self.config.verifier.env or None,
+                logger=self._logger,
+            )
+            verify_steps = await self._sealed_verifier.prepare()
+            phases.append(
+                SealedPhaseSpec(
+                    name="verify",
+                    steps=[
+                        SealedPhaseStep(
+                            command=command,
+                            env=step_env or {},
+                            user=user if user is not None else verifier_user,
+                        )
+                        for command, step_env, user in verify_steps
+                    ],
+                    timeout_sec=env.verifier_timeout_sec,
+                )
+            )
+        await env.set_phase("trial")
+        await self._invoke_hooks(TrialEvent.AGENT_START)
+        self.result.agent_execution = TimingInfo(started_at=datetime.now(UTC))
+        self.result.agent_result = AgentContext()
+        try:
+            results = await env.run_sealed_trial(phases)
+        finally:
+            self.result.agent_execution.finished_at = datetime.now(UTC)
+        agent_result = results.get("agent")
+        if agent_result is None:
+            raise RuntimeError("the sealed trial left no agent-phase result")
+        if agent_result.return_code != 0:
+            self._trial_paths.agent_dir.mkdir(parents=True, exist_ok=True)
+            (self._trial_paths.agent_dir / "exit-code.txt").write_text(
+                str(agent_result.return_code)
+            )
+            exc: Exception = (
+                AgentTimeoutError(
+                    f"the agent phase hit its {env.agent_timeout_sec}s budget"
+                )
+                if agent_result.return_code == 124
+                else NonZeroAgentExitCodeError(
+                    f"the agent phase exited {agent_result.return_code}"
+                )
+            )
+            self.result.exception_info = ExceptionInfo.from_exception(exc)
+            self._trial_paths.exception_message_path.write_text(str(exc))
 
     async def _run_verification(self) -> None:
         await self._invoke_hooks(TrialEvent.VERIFICATION_START)
 
-        self.result.verifier = TimingInfo(started_at=datetime.now(timezone.utc))
+        self.result.verifier = TimingInfo(started_at=datetime.now(UTC))
 
         try:
             await self._verify_with_retry()
         finally:
-            self.result.verifier.finished_at = datetime.now(timezone.utc)
+            self.result.verifier.finished_at = datetime.now(UTC)
 
     @retry(
         reraise=True,
@@ -343,7 +450,7 @@ class Trial:
                 self._verify_once(step_cfg=None),
                 timeout=self._verifier_timeout_sec,
             )
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             raise VerifierTimeoutError(
                 f"Verifier execution timed out after {
                     self._verifier_timeout_sec
@@ -362,6 +469,15 @@ class Trial:
             step_cfg,
         )
         if separate_env_config is None:
+            if self._environment.capabilities.sealed_oneshot:
+                # The verify phase already ran inside the sealed boot;
+                # only the read side remains.
+                if self._sealed_verifier is None:
+                    raise RuntimeError(
+                        "sealed trial verification requested but no "
+                        "verify phase was baked"
+                    )
+                return await self._sealed_verifier.collect()
             verifier = Verifier(
                 task=self._task,
                 trial_paths=self._trial_paths,
@@ -551,7 +667,7 @@ class Trial:
     async def _cleanup_and_finalize(self) -> None:
         await self._stop_agent_environment()
 
-        self.result.finished_at = datetime.now(timezone.utc)
+        self.result.finished_at = datetime.now(UTC)
         self.result.n_agent_steps = self.result.agent_step_count()
 
         self._trial_paths.result_path.write_text(self.result.model_dump_json(indent=4))
@@ -668,7 +784,7 @@ class Trial:
             specific_multiplier=self.config.agent_timeout_multiplier,
         )
 
-        step_result.agent_execution = TimingInfo(started_at=datetime.now(timezone.utc))
+        step_result.agent_execution = TimingInfo(started_at=datetime.now(UTC))
         try:
             step_result.agent_result = AgentContext()
             await self._invoke_hooks(TrialEvent.AGENT_START)
@@ -680,10 +796,10 @@ class Trial:
                 ),
                 timeout=timeout,
             )
-        except (asyncio.TimeoutError, NonZeroAgentExitCodeError) as e:
+        except (TimeoutError, NonZeroAgentExitCodeError) as e:
             step_result.exception_info = ExceptionInfo.from_exception(e)
         finally:
-            step_result.agent_execution.finished_at = datetime.now(timezone.utc)
+            step_result.agent_execution.finished_at = datetime.now(UTC)
 
     async def _verify_step(
         self,
@@ -706,7 +822,7 @@ class Trial:
             specific_multiplier=self.config.verifier_timeout_multiplier,
         )
 
-        step_result.verifier = TimingInfo(started_at=datetime.now(timezone.utc))
+        step_result.verifier = TimingInfo(started_at=datetime.now(UTC))
         try:
             await self._invoke_hooks(TrialEvent.VERIFICATION_START)
             # Separate-mode verification runs in its own environment; the agent
@@ -731,7 +847,7 @@ class Trial:
             if step_result.exception_info is None:
                 step_result.exception_info = ExceptionInfo.from_exception(e)
         finally:
-            step_result.verifier.finished_at = datetime.now(timezone.utc)
+            step_result.verifier.finished_at = datetime.now(UTC)
 
     async def _run_steps(self) -> None:
         """Execute multi-step flow: iterate through each step sequentially."""
@@ -782,7 +898,7 @@ class Trial:
                     target_dir=self._trial_paths.agent_dir,
                 )
                 self._maybe_populate_agent_context(step_result.agent_result)
-                await self._run_pre_artifacts_script()
+                await self._run_collect_script()
                 await self._maybe_upload_agent_logs()
 
                 # Collect artifacts from the agent environment before
@@ -852,8 +968,8 @@ class Trial:
         # rmdir any that are now empty (safe: rmdir raises on non-empty).
         self._trial_paths.cleanup_empty_mount_dirs()
 
-    async def _run_pre_artifacts_script(self) -> None:
-        """Run the task's optional ``pre_artifacts.sh`` in the agent environment.
+    async def _run_collect_script(self) -> None:
+        """Run the task's optional collect script in the agent environment.
 
         Runs after the agent finishes and immediately before artifact
         collection so the task can materialize artifacts from the agent's work
@@ -862,7 +978,7 @@ class Trial:
         capture simply yields no artifact, which downstream grading treats as
         an empty submission.
         """
-        script = self._task.paths.pre_artifacts_path
+        script = self._task.paths.collect_script_path
         if not script.exists():
             return
         await self._environment.set_phase("collect")
@@ -877,11 +993,11 @@ class Trial:
             )
             if result.return_code != 0:
                 self._logger.warning(
-                    f"pre_artifacts.sh exited {result.return_code}"
+                    f"collect script exited {result.return_code}"
                 )
         except Exception:
             self._logger.warning(
-                "pre_artifacts.sh failed to run; continuing without it",
+                "the collect script failed to run; continuing without it",
                 exc_info=True,
             )
 
@@ -943,7 +1059,7 @@ class Trial:
             trial_name=self.config.trial_name,
             task_name=self._task.name,
             task_id=self.config.task.get_task_id(),
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             config=self.config,
             task_checksum=self._task.checksum,
             trial_uri=self._trial_paths.trial_dir.expanduser().resolve().as_uri(),
@@ -951,17 +1067,34 @@ class Trial:
             source=self.config.task.source,
         )
 
+        self._sealed_verifier: Verifier | None = None
+
         await self._invoke_hooks(TrialEvent.START)
 
         try:
             await self._setup_environment()
             await self._environment.run_healthcheck()
             self._environment.default_user = self._task.config.agent.user
-            await self._setup_agent()
+            if not self._environment.capabilities.sealed_oneshot:
+                # A sealed rung takes no exec: the agent's setup is baked
+                # (preinstall) and its run arrives as a command spec.
+                await self._setup_agent()
             self._result.agent_info = self._agent.to_agent_info()
             try:
                 if self._task.has_steps:
+                    if self._environment.capabilities.sealed_oneshot:
+                        raise RuntimeError(
+                            "multi-step tasks are not supported on a "
+                            "sealed-oneshot environment yet"
+                        )
                     await self._run_steps()
+                elif self._environment.capabilities.sealed_oneshot:
+                    await self._run_sealed()
+                    await self._maybe_download_logs(
+                        source_dir=self._environment.env_paths.agent_dir.as_posix(),
+                        target_dir=self._trial_paths.agent_dir,
+                    )
+                    self._maybe_populate_agent_context(self.result.agent_result)
                 else:
                     try:
                         await self._execute_agent()
@@ -989,8 +1122,11 @@ class Trial:
             # so a separate verifier environment can receive them. Multi-step
             # trials collect artifacts per-step inside _run_steps.
             if not self._task.has_steps:
-                await self._run_pre_artifacts_script()
-                await self._maybe_upload_agent_logs()
+                if not self._environment.capabilities.sealed_oneshot:
+                    # On a sealed rung the collect script ran in-guest as
+                    # its own phase, and no upload can follow the boot.
+                    await self._run_collect_script()
+                    await self._maybe_upload_agent_logs()
                 await self._collect_artifacts()
 
                 if (
