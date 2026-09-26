@@ -788,19 +788,18 @@ class DockerEnvironment(BaseEnvironment):
         """Allow a runtime to complete its export before validation."""
         pass
 
-    async def archive(self, *, delete: bool) -> None:
+    async def archive(self) -> None:
         """Refuse archiving through the rootful Docker backend."""
         raise NotImplementedError(
             "DockerEnvironment does not support environment archiving; "
             "on_completion=archive is restricted to rootless Podman-family environments"
         )
 
-    async def _archive_container_filesystem(self, *, delete: bool) -> None:
-        """Export the trial's filesystem to a tar, then reclaim the container.
+    async def _archive_container_filesystem(self) -> None:
+        """Export the trial's filesystem to a validated tar artifact.
 
-        The container is only removed once the tar exists and has been read
-        back: on any failure it is left in place, because it is then the only
-        copy of the state the archive was asked to keep.
+        On any failure the container is left in place, because it is then the
+        only copy of the state the archive was asked to keep.
         """
         await self.prepare_logs_for_host()
 
@@ -860,11 +859,6 @@ class DockerEnvironment(BaseEnvironment):
             f"Archived {self.session_id} to {final_path} "
             f"({entries} entries, {final_path.stat().st_size} bytes)"
         )
-
-        # The tar is the artifact, so the container is reclaimed like any
-        # other completed trial's.
-        await self._down(delete)
-        self._cleanup_resources_compose_file()
 
     def _write_archive_metadata(
         self, tar_path: Path, container_id: str, entries: int

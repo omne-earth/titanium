@@ -516,7 +516,7 @@ class GVisorEnvironment(DockerEnvironment):
                     f"Could not unpause gVisor container: {unpause.stderr}"
                 )
 
-    async def archive(self, *, delete: bool) -> None:
+    async def archive(self) -> None:
         """Export this trial's filesystem, then clean up the staging mounts.
 
         The staging tree is a host-side transfer buffer, removed here exactly
@@ -527,7 +527,7 @@ class GVisorEnvironment(DockerEnvironment):
         self._stopping = True
         try:
             await self._capture_upper_archive()
-            await super().archive(delete=delete)
+            await super().archive()
         finally:
             self._cleanup_staging()
 

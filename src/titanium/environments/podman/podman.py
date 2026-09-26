@@ -451,9 +451,9 @@ class PodmanEnvironment(DockerEnvironment):
                 f"refusing privileged/rootful archive operations{suffix}"
             )
 
-    async def archive(self, *, delete: bool) -> None:
+    async def archive(self) -> None:
         await self._assert_rootless_archive_runtime()
-        await self._archive_container_filesystem(delete=delete)
+        await self._archive_container_filesystem()
 
     async def _podman(
         self, args: list[str], check: bool = True, timeout_sec: int | None = None

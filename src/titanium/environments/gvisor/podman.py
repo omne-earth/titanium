@@ -272,11 +272,11 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
 
     # -- archive ------------------------------------------------------------
 
-    async def archive(self, *, delete: bool) -> None:
+    async def archive(self) -> None:
         # Check before GVisorEnvironment captures rootfs-upper: privileged
         # archive operations must not reach runsc tar.
         await self._assert_rootless_archive_runtime()
-        await super().archive(delete=delete)
+        await super().archive()
 
     # -- ownership ----------------------------------------------------------
 

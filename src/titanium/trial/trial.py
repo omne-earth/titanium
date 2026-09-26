@@ -490,14 +490,16 @@ class Trial:
         )
 
         try:
+            if is_archive:
+                await asyncio.shield(self._environment.archive())
+
             await asyncio.shield(
-                self._environment.complete(
-                    delete=self.config.environment.delete and not keep_images,
-                    on_completion=self.config.environment.on_completion,
+                self._environment.stop(
+                    delete=self.config.environment.delete and not keep_images
                 )
             )
 
-            # We only reach this point if complete() returned successfully.
+            # We only reach this point if environment completion returned successfully.
             if is_archive:
                 self.result.environment_completion = EnvironmentCompletionResult(
                     status="succeeded",

@@ -793,13 +793,14 @@ def test_gvisor_podman_archive_exports_through_podman(tmp_path, monkeypatch):
         env, "_compose_container_id", lambda service, **kw: _resolved("deadbeef")
     )
 
-    asyncio.run(env.archive(delete=True))
+    asyncio.run(env.archive())
 
-    # The podman flavor exports through its own engine binary, then reclaims.
+    # The podman flavor exports through its own engine binary and publishes
+    # the tar. Reclamation is `stop(delete=...)`, not the archive's to do.
     assert env._engine_command_name() == env._engine_cli
     assert [c for c in engine_calls if c and c[0] == "export"]
     assert ["stop"] in commands
-    assert any(command and command[0] == "down" for command in commands)
+    assert not any(command and command[0] == "down" for command in commands)
     assert (env.trial_paths.archive_dir / "environment.tar").is_file()
 
 
@@ -825,7 +826,7 @@ def test_rootful_check_runs_before_upper_layer_capture(tmp_path, monkeypatch):
     monkeypatch.setattr(env, "_capture_upper_archive", capture)
 
     with pytest.raises(ArchiveError, match="requires rootless Podman"):
-        asyncio.run(env.archive(delete=True))
+        asyncio.run(env.archive())
 
     capture.assert_not_awaited()
 

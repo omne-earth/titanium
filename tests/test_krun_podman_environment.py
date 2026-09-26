@@ -536,4 +536,4 @@ def test_krun_does_not_inherit_the_gvisor_family_archive(tmp_path):
 
     assert env.SUPPORTS_ARCHIVE is False
     with pytest.raises(NotImplementedError, match="does not support"):
-        asyncio.run(env.archive(delete=True))
+        asyncio.run(env.archive())

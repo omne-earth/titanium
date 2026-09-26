@@ -173,7 +173,7 @@ class KrunPodmanEnvironment(GVisorPodmanEnvironment):
         self._mailbox_seq = itertools.count()
         self._mailbox_lock = asyncio.Lock()
 
-    async def archive(self, *, delete: bool) -> None:
+    async def archive(self) -> None:
         """Refuse archiving: see ``SUPPORTS_ARCHIVE`` above."""
         raise NotImplementedError(
             f"{type(self).__name__} does not support environment archiving"

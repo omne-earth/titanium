@@ -2158,7 +2158,7 @@ def test_gvisor_archive_removes_the_staging_mounts(tmp_path, monkeypatch):
 
     monkeypatch.setattr(env, "_capture_upper_archive", fake_snapshot)
 
-    async def fake_super_archive(self, *, delete):
+    async def fake_super_archive(self):
         return None
 
     monkeypatch.setattr(DockerEnvironment, "archive", fake_super_archive)
@@ -2166,7 +2166,7 @@ def test_gvisor_archive_removes_the_staging_mounts(tmp_path, monkeypatch):
     env._stage_out.mkdir(parents=True, exist_ok=True)
     (env._stage_in / "uploaded.txt").write_text("transfer buffer")
 
-    asyncio.run(env.archive(delete=True))
+    asyncio.run(env.archive())
 
     assert not env._stage_in.exists()
     assert not env._stage_out.exists()
@@ -2175,7 +2175,7 @@ def test_gvisor_archive_removes_the_staging_mounts(tmp_path, monkeypatch):
 def test_gvisor_archive_cleans_staging_even_when_export_fails(tmp_path, monkeypatch):
     env = make_gvisor_env(tmp_path)
 
-    async def failing_archive(self, delete):
+    async def failing_archive(self):
         raise ArchiveError("export failed")
 
     monkeypatch.setattr(DockerEnvironment, "archive", failing_archive)
@@ -2183,7 +2183,7 @@ def test_gvisor_archive_cleans_staging_even_when_export_fails(tmp_path, monkeypa
     env._stage_out.mkdir(parents=True, exist_ok=True)
 
     with pytest.raises(ArchiveError):
-        asyncio.run(env.archive(delete=True))
+        asyncio.run(env.archive())
 
     assert not env._stage_in.exists()
 
@@ -2197,12 +2197,12 @@ def test_gvisor_archive_does_not_reenter_verification(tmp_path, monkeypatch):
 
     monkeypatch.setattr(env, "_capture_upper_archive", fake_snapshot)
 
-    async def fake_super_archive(self, *, delete):
+    async def fake_super_archive(self):
         return None
 
     monkeypatch.setattr(DockerEnvironment, "archive", fake_super_archive)
 
-    asyncio.run(env.archive(delete=True))
+    asyncio.run(env.archive())
 
     assert env._stopping is True
 

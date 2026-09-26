@@ -3,8 +3,9 @@
 Every engine call is a double: these run without a real container engine.
 What they pin is the contract -- which engine binary is invoked, which
 container is exported, that the tar is validated before it is published,
-that the container is only reclaimed after a successful export, and that
-a failure is raised rather than reported as a completed archive.
+that the archive itself never reclaims the environment (`stop(delete=...)`
+owns that), and that a failure is raised rather than reported as a
+completed archive.
 
 Docker retains shared export mechanics for Podman reuse, but Docker itself
 does not expose environment archiving.
@@ -173,7 +174,7 @@ def test_docker_archive_is_refused_directly():
         NotImplementedError,
         match="restricted to rootless Podman-family environments",
     ):
-        asyncio.run(env.archive(delete=True))
+        asyncio.run(env.archive())
 
 
 def test_docker_helper_resolves_main_including_stopped(tmp_path, monkeypatch):
@@ -223,7 +224,7 @@ def test_podman_resolves_main_by_label(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_archive_stops_then_exports_then_reclaims(tmp_path, monkeypatch):
+def test_archive_stops_then_exports_without_reclaiming(tmp_path, monkeypatch):
     env = _environment(tmp_path)
     calls = _stub(
         env,
@@ -231,17 +232,11 @@ def test_archive_stops_then_exports_then_reclaims(tmp_path, monkeypatch):
         tar=_tar_bytes(),
     )
 
-    asyncio.run(env.archive(delete=True))
+    asyncio.run(env.archive())
 
-    # Execution stops before the snapshot; the container is reclaimed after.
+    # Execution stops before the snapshot so the export is taken against a
+    # filesystem that is not changing underneath it.
     assert calls["compose"][0] == ["stop"]
-    assert calls["compose"][-1] == [
-        "down",
-        "--rmi",
-        "all",
-        "--volumes",
-        "--remove-orphans",
-    ]
 
     export = [
         call
@@ -251,7 +246,15 @@ def test_archive_stops_then_exports_then_reclaims(tmp_path, monkeypatch):
 
     assert len(export) == 1
     assert export[0][-1] == MAIN_ID
-    assert calls["compose"].index(["stop"]) == 0
+
+    # ... and the archive publishes the artifact and stops there. Reclaiming
+    # the environment belongs to `stop(delete=...)`, which the trial calls
+    # after the archive: `archive()` must never own the deletion itself.
+    assert not any(
+        call and call[0] == "down"
+        for call in calls["compose"]
+    )
+    assert (env.trial_paths.archive_dir / ARCHIVE_TAR_NAME).is_file()
 
 
 def test_archive_publishes_a_readable_tar(tmp_path, monkeypatch):
@@ -263,7 +266,7 @@ def test_archive_publishes_a_readable_tar(tmp_path, monkeypatch):
         tar=_tar_bytes(("app/result.txt",)),
     )
 
-    asyncio.run(env.archive(delete=True))
+    asyncio.run(env.archive())
 
     tar_path = (
         env.trial_paths.archive_dir
@@ -291,7 +294,7 @@ def test_archive_writes_metadata(tmp_path, monkeypatch):
         tar=_tar_bytes(),
     )
 
-    asyncio.run(env.archive(delete=True))
+    asyncio.run(env.archive())
 
     metadata = json.loads(
         (
@@ -322,7 +325,7 @@ def test_archive_metadata_records_no_environment_variables(
         tar=_tar_bytes(),
     )
 
-    asyncio.run(env.archive(delete=True))
+    asyncio.run(env.archive())
 
     metadata = json.loads(
         (
@@ -361,7 +364,7 @@ def test_archive_is_stored_outside_the_mounted_directories(
         tar=_tar_bytes(),
     )
 
-    asyncio.run(env.archive(delete=True))
+    asyncio.run(env.archive())
 
     archive_dir = env.trial_paths.archive_dir
 
@@ -398,7 +401,7 @@ def test_export_failure_raises_and_keeps_the_container(
         ArchiveError,
         match="export exited 1",
     ):
-        asyncio.run(env.archive(delete=True))
+        asyncio.run(env.archive())
 
     assert not any(
         call and call[0] == "down"
@@ -432,7 +435,7 @@ def test_corrupt_tar_raises_and_keeps_the_container(
         ArchiveError,
         match="could not be read back",
     ):
-        asyncio.run(env.archive(delete=True))
+        asyncio.run(env.archive())
 
     assert not any(
         call and call[0] == "down"
@@ -468,7 +471,7 @@ def test_empty_tar_is_rejected(tmp_path, monkeypatch):
         ArchiveError,
         match="could not be read back",
     ):
-        asyncio.run(env.archive(delete=True))
+        asyncio.run(env.archive())
 
 
 def test_missing_main_container_raises(
@@ -488,7 +491,7 @@ def test_missing_main_container_raises(
         ArchiveError,
         match="no 'main' container",
     ):
-        asyncio.run(env.archive(delete=True))
+        asyncio.run(env.archive())
 
     assert not any(
         call and call[0] == "down"
@@ -513,7 +516,7 @@ def test_still_running_container_is_not_exported(
         ArchiveError,
         match="still running",
     ):
-        asyncio.run(env.archive(delete=True))
+        asyncio.run(env.archive())
 
     assert not any(
         call and call[0] == "export"
@@ -612,7 +615,7 @@ def test_rootful_podman_archive_is_refused_before_export(
         ArchiveError,
         match="requires rootless Podman",
     ):
-        asyncio.run(env.archive(delete=True))
+        asyncio.run(env.archive())
 
     assert calls["compose"] == []
     assert not any(

@@ -16,7 +16,6 @@ from titanium.models.task.config import TaskOS
 from titanium.models.trial.config import (
     AgentConfig,
     EnvironmentConfig,
-    OnCompletion,
     TrialConfig,
     VerifierConfig,
 )
@@ -81,16 +80,6 @@ def _make_env(mounted: bool) -> AsyncMock:
     env.empty_dirs.return_value = None
     env.start.return_value = None
     env.stop.return_value = None
-
-    # The trial ends an environment through `complete`, which dispatches to
-    # `stop` or `archive`. The double keeps that dispatch so these tests still
-    # observe the teardown they assert on.
-    async def complete(*, delete: bool, on_completion=OnCompletion.TEARDOWN):
-        if on_completion == OnCompletion.ARCHIVE:
-            return await env.archive(delete=delete)
-        return await env.stop(delete=delete)
-
-    env.complete.side_effect = complete
     env.upload_dir.return_value = None
     env.upload_file.return_value = None
 

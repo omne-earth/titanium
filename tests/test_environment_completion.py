@@ -1,12 +1,13 @@
 """Tests for the common environment completion lifecycle."""
 
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
 
-from titanium.environments.base import BaseEnvironment
+from titanium.environments.base import ArchiveError, BaseEnvironment
 from titanium.environments.docker.docker import DockerEnvironment
 from titanium.environments.factory import EnvironmentFactory
 from titanium.environments.gvisor.environment import GVisorEnvironment
@@ -19,6 +20,7 @@ from titanium.models.task.config import EnvironmentConfig as TaskEnvironmentConf
 from titanium.models.trial.config import EnvironmentConfig, OnCompletion
 from titanium.models.trial.config import EnvironmentConfig as TrialEnvironmentConfig
 from titanium.models.trial.paths import TrialPaths
+from titanium.trial.trial import Trial
 
 
 def test_on_completion_defaults_to_teardown():
@@ -38,36 +40,74 @@ def test_on_completion_rejects_unknown_value():
         EnvironmentConfig(on_completion="archvie")
 
 
-@pytest.mark.asyncio
-async def test_complete_teardown_calls_stop():
-    environment = object.__new__(DockerEnvironment)
-    environment.stop = AsyncMock()
-    environment.archive = AsyncMock()
+# ---------------------------------------------------------------------------
+# Trial-level lifecycle: archive publishes the artifact, stop reclaims
+# ---------------------------------------------------------------------------
+# The environment no longer dispatches on the policy. `archive()` only
+# produces the artifact and `stop(delete=...)` is the sole owner of
+# reclamation, so the policy now lives in the trial that calls both.
 
-    await BaseEnvironment.complete(
-        environment,
-        delete=True,
-        on_completion=OnCompletion.TEARDOWN,
+
+def _trial_for_completion(environment, on_completion, trial_paths=None):
+    """A Trial carrying only what `_stop_agent_environment` reads."""
+    trial = object.__new__(Trial)
+    trial._environment = environment
+    trial._is_agent_environment_stopped = False
+    trial._trial_paths = trial_paths
+    trial.config = SimpleNamespace(
+        trial_name="probe",
+        environment=EnvironmentConfig(on_completion=on_completion, delete=True),
     )
+    trial._result = SimpleNamespace(environment_completion=None, exception_info=None)
+    return trial
 
-    environment.stop.assert_awaited_once_with(delete=True)
+
+@pytest.mark.asyncio
+async def test_trial_teardown_stops_without_archiving():
+    environment = AsyncMock()
+    trial = _trial_for_completion(environment, OnCompletion.TEARDOWN)
+
+    await trial._stop_agent_environment()
+
     environment.archive.assert_not_awaited()
+    environment.stop.assert_awaited_once_with(delete=True)
+    assert trial.result.environment_completion is None
 
 
 @pytest.mark.asyncio
-async def test_complete_archive_calls_archive():
-    environment = object.__new__(DockerEnvironment)
-    environment.stop = AsyncMock()
-    environment.archive = AsyncMock()
+async def test_trial_archive_publishes_the_artifact_then_stops():
+    environment = AsyncMock()
+    order = []
+    environment.archive.side_effect = lambda: order.append("archive")
+    environment.stop.side_effect = lambda **kwargs: order.append("stop")
+    trial = _trial_for_completion(environment, OnCompletion.ARCHIVE)
 
-    await BaseEnvironment.complete(
-        environment,
-        delete=True,
-        on_completion=OnCompletion.ARCHIVE,
+    await trial._stop_agent_environment()
+
+    # The artifact exists before the environment it was taken from is gone.
+    assert order == ["archive", "stop"]
+    environment.archive.assert_awaited_once_with()
+    environment.stop.assert_awaited_once_with(delete=True)
+    assert trial.result.environment_completion.status == "succeeded"
+    assert (
+        trial.result.environment_completion.archive_path == "archive/environment.tar"
     )
 
-    environment.archive.assert_awaited_once_with(delete=True)
+
+@pytest.mark.asyncio
+async def test_trial_archive_failure_is_not_reported_as_succeeded(tmp_path):
+    # A failed archive must not publish a success, and must not be papered
+    # over by the stop that would otherwise follow it.
+    trial_paths = TrialPaths(trial_dir=tmp_path / "trial")
+    trial_paths.mkdir()
+    environment = AsyncMock()
+    environment.archive.side_effect = ArchiveError("export exited 1")
+    trial = _trial_for_completion(environment, OnCompletion.ARCHIVE, trial_paths)
+
+    await trial._stop_agent_environment()
+
     environment.stop.assert_not_awaited()
+    assert trial.result.environment_completion.status == "failed"
 
 
 @pytest.mark.asyncio
@@ -78,7 +118,7 @@ async def test_krun_archive_is_explicitly_unsupported():
     environment = object.__new__(KrunPodmanEnvironment)
 
     with pytest.raises(NotImplementedError):
-        await environment.archive(delete=True)
+        await environment.archive()
 
 
 # ---------------------------------------------------------------------------
