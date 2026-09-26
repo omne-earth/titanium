@@ -155,6 +155,15 @@ class TrialPaths:
         return self.trial_dir / "agent"
 
     @property
+    def archive_dir(self) -> Path:
+        """Exported environment archives.
+
+        Deliberately outside the bind-mounted log directories: nothing in the
+        guest can reach it, and it is not part of the artifact manifest.
+        """
+        return self.trial_dir / "archive"
+
+    @property
     def artifacts_dir(self) -> Path:
         """
         A directory for collected artifacts from the environment.

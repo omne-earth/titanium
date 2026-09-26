@@ -68,6 +68,8 @@ class GVisorPodmanUnixOps(GVisorUnixOps):
 class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
     """Podman-driven environment that runs the untrusted service under runsc."""
 
+    SUPPORTS_ARCHIVE: bool = True
+
     _SUPPORTED_ENGINES: tuple[str, ...] = ("podman",)
 
     # Seams for the krun flavor (KrunPodmanEnvironment), which shares the
@@ -267,6 +269,14 @@ class GVisorPodmanEnvironment(GVisorEnvironment, PodmanEnvironment):
             extra_security_opt=self._extra_security_opt(),
             main_annotations=self._main_annotations(),
         )
+
+    # -- archive ------------------------------------------------------------
+
+    async def archive(self) -> None:
+        # Check before GVisorEnvironment captures rootfs-upper: privileged
+        # archive operations must not reach runsc tar.
+        await self._assert_rootless_archive_runtime()
+        await super().archive()
 
     # -- ownership ----------------------------------------------------------
 

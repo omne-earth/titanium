@@ -15,11 +15,14 @@ from pathlib import Path
 
 import pytest
 
-from titanium.environments.base import ExecResult
+from titanium.environments.base import ArchiveError, ExecResult
 from titanium.environments.docker.docker import DockerEnvironment
 from titanium.environments.docker.docker_unix import UnixOps
 from titanium.environments.gvisor import runtime as gvisor_runtime
-from titanium.environments.gvisor.environment import GVisorEnvironment, VerificationState
+from titanium.environments.gvisor.environment import (
+    GVisorEnvironment,
+    VerificationState,
+)
 from titanium.environments.gvisor.transfer import (
     GVisorUnixOps,
     safe_copy_tree,
@@ -2129,3 +2132,104 @@ def test_image_only_tasks_keep_their_prebuilt(tmp_path):
     )
     (env.environment_dir / "Dockerfile").unlink()  # image-only task
     assert env._effective_docker_image == "ghcr.io/org/task-img:v1"
+
+
+# ---------------------------------------------------------------------------
+# Archive (--on-completion archive): exports the filesystem, then reclaims
+# the container. The family implementation is covered in
+# tests/test_container_export_archive.py; these cover gVisor's additions.
+# ---------------------------------------------------------------------------
+
+
+async def _noop():
+    return None
+
+
+def test_docker_backed_gvisor_does_not_declare_archive_support():
+    assert GVisorEnvironment.SUPPORTS_ARCHIVE is False
+    assert GVisorEnvironment.archive is not DockerEnvironment.archive
+
+
+def test_gvisor_archive_removes_the_staging_mounts(tmp_path, monkeypatch):
+    env = make_gvisor_env(tmp_path)
+
+    async def fake_snapshot():
+        return None
+
+    monkeypatch.setattr(env, "_capture_upper_archive", fake_snapshot)
+
+    async def fake_super_archive(self):
+        return None
+
+    monkeypatch.setattr(DockerEnvironment, "archive", fake_super_archive)
+    env._stage_in.mkdir(parents=True, exist_ok=True)
+    env._stage_out.mkdir(parents=True, exist_ok=True)
+    (env._stage_in / "uploaded.txt").write_text("transfer buffer")
+
+    asyncio.run(env.archive())
+
+    assert not env._stage_in.exists()
+    assert not env._stage_out.exists()
+
+
+def test_gvisor_archive_cleans_staging_even_when_export_fails(tmp_path, monkeypatch):
+    env = make_gvisor_env(tmp_path)
+
+    async def failing_archive(self):
+        raise ArchiveError("export failed")
+
+    monkeypatch.setattr(DockerEnvironment, "archive", failing_archive)
+    env._stage_in.mkdir(parents=True, exist_ok=True)
+    env._stage_out.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ArchiveError):
+        asyncio.run(env.archive())
+
+    assert not env._stage_in.exists()
+
+
+def test_gvisor_archive_does_not_reenter_verification(tmp_path, monkeypatch):
+    # A sandbox on its way out must not be re-verified, exactly as in stop().
+    env = make_gvisor_env(tmp_path)
+
+    async def fake_snapshot():
+        return None
+
+    monkeypatch.setattr(env, "_capture_upper_archive", fake_snapshot)
+
+    async def fake_super_archive(self):
+        return None
+
+    monkeypatch.setattr(DockerEnvironment, "archive", fake_super_archive)
+
+    asyncio.run(env.archive())
+
+    assert env._stopping is True
+
+
+def test_gvisor_archive_uses_the_sandbox_engine_and_main_service(tmp_path, monkeypatch):
+    env = make_gvisor_env(tmp_path)
+    resolved = []
+
+    async def fake_compose_container_id(service, *, include_stopped=False):
+        resolved.append((service, include_stopped))
+        return MAIN_ID
+
+    monkeypatch.setattr(env, "_compose_container_id", fake_compose_container_id)
+
+    assert env._engine_command_name() == env._engine_cli
+    assert asyncio.run(env._archive_container_id()) == MAIN_ID
+    # Resolved by service, including a stopped container.
+    assert resolved == [("main", True)]
+
+
+def test_gvisor_teardown_is_unchanged_by_archive_support(tmp_path, monkeypatch):
+    env = make_gvisor_env(tmp_path)
+    commands: list[list[str]] = []
+    _stub_compose(env, monkeypatch, commands)
+    monkeypatch.setattr(env, "prepare_logs_for_host", lambda: _noop())
+
+    asyncio.run(env.stop(delete=True))
+
+    assert ["down", "--rmi", "all", "--volumes", "--remove-orphans"] in commands
+    assert not env._stage_in.exists()

@@ -1,0 +1,13 @@
+schema_version = "1.2"
+
+[task]
+name = "titanium/archive-marker"
+description = "Writes a known file into the guest filesystem so an exported archive can be checked for it."
+keywords = ["smoke", "archive"]
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+build_timeout_sec = 600.0
+allow_internet = false
