@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard .sudo-tty-guard-cella init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-note smoke-cella-branch-all smoke-cella-boundary
+.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard .sudo-tty-guard-cella init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-note smoke-cella-branch-all smoke-cella-boundary smoke-cella-run smoke-cella-run-debug .cella-run-kernel
 
 -include .secrets
 
@@ -514,6 +514,34 @@ smoke-cella: .sudo-tty-guard sync .podman .cella | .sentinel/tasks
 smoke-cella-rootfs: .sudo-tty-guard sync .podman .cella .cella-debug
 	$(LOG)
 	CELLA_BIN="$${CELLA_BIN:-$(CELLA_LAB_BIN)}" bash scripts/smoke/cella-rootfs.sh
+
+# smoke-cella-run: the reflexive runner (docs/runners/CELLA-RUN.md). Bakes the
+# whole tracked workspace into one cella VM, boots it so a systemd oneshot runs
+# `titanium run --env docker` against the inner task inside the sealed guest,
+# and extracts the payload -- a docker escape lands in the guest, never on the
+# host. Field flavor is fine: completion is the guest's forced reset, not a
+# console read. Exit 2 means a precondition was missing; exit 1 is a real
+# failure. The extracted payload lands under .run/jobs/<backend>/<target>/<job>,
+# like every other smoke (the script mints the timestamped job name).
+# The container-capable guest kernel cella-run boots. Built self-contained in
+# a toolbox (no cella-repo dependency); idempotent, so callers depend on it
+# unconditionally and the script decides staleness from the fragment digest.
+.cella-run-kernel:
+	@bash scripts/cella-run/build-kernel.sh
+
+# The inner agent is the house knob: TITANIUM_AGENT=oracle for the canned solve.
+CELLA_RUN_TASK ?= examples/smoke/cella-run
+smoke-cella-run: .sudo-tty-guard sync .podman .cella .cella-run-kernel
+	$(LOG)
+	TITANIUM_CELLA_RUN_AGENT=$(TITANIUM_AGENT) bash scripts/cella-run.sh $(CELLA_RUN_TASK) $(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+
+# The same run on the lab cella, which records each machine's console.log
+# into the payload (cella-chronicle/<machine>/console.log). Debugging only:
+# the script refuses a lab cella without CELLA_RUN_DEBUG, so production
+# never ships on an observed guest.
+smoke-cella-run-debug: .sudo-tty-guard sync .podman .cella .cella-debug .cella-run-kernel
+	$(LOG)
+	CELLA_RUN_DEBUG=true CELLA_BIN="$(CELLA_LAB_BIN)" TITANIUM_CELLA_RUN_AGENT=$(TITANIUM_AGENT) bash scripts/cella-run.sh $(CELLA_RUN_TASK) $(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 # full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
 # BENCH_N concurrent trials each.
