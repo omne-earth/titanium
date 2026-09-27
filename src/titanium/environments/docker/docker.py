@@ -1,12 +1,15 @@
 import asyncio
 import asyncio.subprocess
+import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -19,7 +22,7 @@ from titanium.environments.agent_setup import (
     write_agent_dockerfile,
     write_docker_proxy_compose,
 )
-from titanium.environments.base import BaseEnvironment, ExecResult
+from titanium.environments.base import ArchiveError, BaseEnvironment, ExecResult
 from titanium.environments.capabilities import EnvironmentCapabilities
 from titanium.environments.compose import (
     COMPOSE_BASE_PATH,
@@ -71,6 +74,28 @@ def _sanitize_docker_compose_project_name(name: str) -> str:
     return name
 
 
+# The service whose filesystem the archive captures, and the artifact names
+# published under the trial's archive directory.
+ARCHIVE_SERVICE = "main"
+ARCHIVE_TAR_NAME = "environment.tar"
+ARCHIVE_METADATA_NAME = "archive.json"
+
+
+def _validate_tar(path: Path) -> int:
+    """Read the exported tar back and return its entry count.
+
+    Streamed in one pass: a truncated or corrupt export raises here, before
+    the artifact is published or the container is reclaimed.
+    """
+    entries = 0
+    with tarfile.open(path, mode="r|") as tar:
+        for _ in tar:
+            entries += 1
+    if entries == 0:
+        raise ValueError("the exported tar contains no entries")
+    return entries
+
+
 class DockerEnvironmentEnvVars(BaseModel):
     main_image_name: str
     context_dir: str
@@ -95,6 +120,9 @@ class DockerEnvironmentEnvVars(BaseModel):
 
 
 class DockerEnvironment(BaseEnvironment):
+    # Rootful Docker is intentionally excluded from environment archiving.
+    SUPPORTS_ARCHIVE: bool = False
+
     _DOCKER_COMPOSE_BASE_PATH = COMPOSE_BASE_PATH
     _DOCKER_COMPOSE_BUILD_PATH = COMPOSE_BUILD_PATH
     _DOCKER_COMPOSE_PREBUILT_PATH = COMPOSE_PREBUILT_PATH
@@ -700,22 +728,191 @@ class DockerEnvironment(BaseEnvironment):
         except Exception as e:
             self.logger.warning(f"Failed to chown logs directory: {e}")
 
-    async def stop(self, delete: bool):
-        # Best-effort: fix ownership of bind-mounted directories so the host
-        # user can read/write/delete them after the container is gone.
+    # -- archive -----------------------------------------------------------
+    #
+    # The archive artifact is an exported tar of the trial's `main` container
+    # filesystem, not the container itself. Native export omits mounted
+    # volumes, so `/logs/{agent,verifier,artifacts}` are absent by design:
+    # those are bind mounts already collected into the trial directory by the
+    # log and artifact pipeline. What the tar carries is the rest of the guest
+    # filesystem, including the agent's work outside the mounts.
+
+    def _engine_command_name(self) -> str:
+        """Binary that owns this environment's containers."""
+        return "docker"
+
+    def _engine_env(self) -> dict[str, str]:
+        return self._env_vars.to_env_dict(include_os_env=True)
+
+    async def _run_engine_command(
+        self, args: list[str], timeout_sec: int | None = None
+    ) -> ExecResult:
+        """Run a raw engine command (not compose)."""
+        engine = self._engine_command_name()
+        process = await asyncio.create_subprocess_exec(
+            engine,
+            *args,
+            env=self._engine_env(),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_bytes, stderr_bytes = await (
+            asyncio.wait_for(process.communicate(), timeout=timeout_sec)
+            if timeout_sec
+            else process.communicate()
+        )
+        return ExecResult(
+            stdout=stdout_bytes.decode(errors="replace") if stdout_bytes else None,
+            stderr=stderr_bytes.decode(errors="replace") if stderr_bytes else None,
+            return_code=process.returncode or 0,
+        )
+
+    async def _archive_container_id(self) -> str | None:
+        """Container ID of this trial's `main` service, running or stopped."""
+        result = await self._run_docker_compose_command(
+            ["ps", "--all", "--quiet", ARCHIVE_SERVICE], check=False
+        )
+        ids = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        return ids[0] if ids else None
+
+    async def _container_status(self, container_id: str) -> str:
+        result = await self._run_engine_command(
+            ["inspect", "-f", "{{.State.Status}}", container_id]
+        )
+        if result.return_code != 0:
+            return ""
+        return (result.stdout or "").strip().lower()
+
+    async def _finalize_archive_tar(self, partial_path: Path) -> None:
+        """Allow a runtime to complete its export before validation."""
+        pass
+
+    async def archive(self) -> None:
+        """Refuse archiving through the rootful Docker backend."""
+        raise NotImplementedError(
+            "DockerEnvironment does not support environment archiving; "
+            "on_completion=archive is restricted to rootless Podman-family environments"
+        )
+
+    async def _archive_container_filesystem(self) -> None:
+        """Export the trial's filesystem to a validated tar artifact.
+
+        On any failure the container is left in place, because it is then the
+        only copy of the state the archive was asked to keep.
+        """
         await self.prepare_logs_for_host()
 
-        if self._keep_containers and delete:
-            self.logger.warning(
-                "Both `keep_containers` and `--delete` option are set. "
-                "keep_containers takes precedence."
+        # Execution stops before the snapshot so the filesystem is not
+        # changing underneath the export.
+        await self._run_docker_compose_command(["stop"])
+
+        container_id = await self._archive_container_id()
+        if not container_id:
+            raise ArchiveError(
+                f"Archive failed for {self.session_id!r}: no "
+                f"{ARCHIVE_SERVICE!r} container was found to export."
             )
+
+        status = await self._container_status(container_id)
+        if status == "running":
+            raise ArchiveError(
+                f"Archive failed for {self.session_id!r}: container "
+                f"{container_id} is still running after stop, so its "
+                "filesystem cannot be snapshotted consistently."
+            )
+
+        archive_dir = self.trial_paths.archive_dir
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        final_path = archive_dir / ARCHIVE_TAR_NAME
+        partial_path = archive_dir / f"{ARCHIVE_TAR_NAME}.partial"
+        partial_path.unlink(missing_ok=True)
+
+        export = await self._run_engine_command(
+            ["export", "-o", str(partial_path), container_id]
+        )
+        if export.return_code != 0:
+            partial_path.unlink(missing_ok=True)
+            raise ArchiveError(
+                f"Archive failed for {self.session_id!r}: "
+                f"{self._engine_command_name()} export exited "
+                f"{export.return_code}: "
+                f"{export.stderr or export.stdout or 'no output'}. The "
+                "container was left in place."
+            )
+
+        try:
+            await self._finalize_archive_tar(partial_path)
+            entries = await asyncio.to_thread(_validate_tar, partial_path)
+        except (OSError, tarfile.TarError, ValueError) as exc:
+            partial_path.unlink(missing_ok=True)
+            raise ArchiveError(
+                f"Archive failed for {self.session_id!r}: the exported tar "
+                f"could not be read back ({exc}). The container was left in "
+                "place."
+            ) from exc
+
+        # Publish only after the export is complete and readable.
+        partial_path.replace(final_path)
+        self._write_archive_metadata(final_path, container_id, entries)
+        self.logger.info(
+            f"Archived {self.session_id} to {final_path} "
+            f"({entries} entries, {final_path.stat().st_size} bytes)"
+        )
+
+    def _write_archive_metadata(
+        self, tar_path: Path, container_id: str, entries: int
+    ) -> None:
+        metadata = {
+            "trial": self.session_id,
+            "environment_type": str(self.type()),
+            "engine": self._engine_command_name(),
+            "runtime": getattr(self, "runtime", None),
+            "image": self._env_vars.main_image_name,
+            "service": ARCHIVE_SERVICE,
+            "container_id": container_id,
+            "archive": tar_path.name,
+            "entries": entries,
+            "size_bytes": tar_path.stat().st_size,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        (tar_path.parent / ARCHIVE_METADATA_NAME).write_text(
+            json.dumps(metadata, indent=2) + "\n"
+        )
+
+    async def _down(self, delete: bool) -> None:
+        command = (
+            ["down", "--rmi", "all", "--volumes", "--remove-orphans"]
+            if delete
+            else ["down"]
+        )
+        try:
+            await self._run_docker_compose_command(command)
+        except (RuntimeError, OSError) as e:
+            self.logger.warning(f"Docker compose down failed: {e}")
+
+    async def stop(self, delete: bool):
+        # Legacy retention: keep the stopped container, no export. Unchanged
+        # by the archive policy, which produces a tar instead.
         if self._keep_containers:
+            if delete:
+                self.logger.warning(
+                    "Both `keep_containers` and `--delete` option are set. "
+                    "keep_containers takes precedence."
+                )
+            await self.prepare_logs_for_host()
             try:
                 await self._run_docker_compose_command(["stop"])
             except Exception as e:
                 self.logger.warning(f"Docker compose stop failed: {e}")
-        elif delete:
+            self._cleanup_resources_compose_file()
+            return
+
+        # Best-effort: fix ownership of bind-mounted directories so the host
+        # user can read/write/delete them after the container is gone.
+        await self.prepare_logs_for_host()
+
+        if delete:
             try:
                 await self._run_docker_compose_command(
                     ["down", "--rmi", "all", "--volumes", "--remove-orphans"]
@@ -727,7 +924,10 @@ class DockerEnvironment(BaseEnvironment):
                 await self._run_docker_compose_command(["down"])
             except Exception as e:
                 self.logger.warning(f"Docker compose down failed: {e}")
+
         self._cleanup_resources_compose_file()
+
+
 
     async def upload_file(self, source_path: Path | str, target_path: str):
         await self._platform.upload_file(source_path, target_path)

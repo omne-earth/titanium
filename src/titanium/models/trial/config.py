@@ -71,6 +71,11 @@ class AgentConfig(BaseModel):
             self.name = AgentName.ORACLE.value
         return self
 
+class OnCompletion(str, Enum):
+    """Policy applied when an environment's useful work is complete."""
+
+    TEARDOWN = "teardown"
+    ARCHIVE = "archive"
 
 class EnvironmentConfig(BaseModel):
     type: EnvironmentType | None = None
@@ -85,6 +90,7 @@ class EnvironmentConfig(BaseModel):
     override_gpus: int | None = None
     suppress_override_warnings: bool = False
     mounts: list[ServiceVolumeConfig] | None = None
+    on_completion: OnCompletion = OnCompletion.TEARDOWN
     env: dict[str, str] = Field(default_factory=dict)
     kwargs: dict[str, Any] = Field(default_factory=dict)
 

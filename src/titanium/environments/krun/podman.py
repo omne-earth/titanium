@@ -141,6 +141,14 @@ class KrunPodmanEnvironment(GVisorPodmanEnvironment):
     # disable.
     _DISABLE_PROCESS_LABEL = False
 
+    # The gVisor family archives by keeping the stopped container, but this
+    # flavor does not inherit that. Its exec rides a file mailbox on the
+    # staging mounts archive removes, and `podman stop` reaches only the VMM
+    # (KRUN-PODMAN.md 3.4), so the guest is hard-killed with its RAM and
+    # in-flight state gone. What would survive cannot honestly be called an
+    # archive of the trial, so the request is refused instead.
+    SUPPORTS_ARCHIVE: bool = False
+
     def __init__(
         self,
         *args,
@@ -164,6 +172,12 @@ class KrunPodmanEnvironment(GVisorPodmanEnvironment):
         # Mailbox state; _prepare_gvisor refreshes both per start attempt.
         self._mailbox_seq = itertools.count()
         self._mailbox_lock = asyncio.Lock()
+
+    async def archive(self) -> None:
+        """Refuse archiving: see ``SUPPORTS_ARCHIVE`` above."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support environment archiving"
+        )
 
     # -- identity ----------------------------------------------------------
 

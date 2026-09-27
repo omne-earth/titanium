@@ -24,6 +24,7 @@ from titanium.models.task.paths import TaskPaths
 from titanium.models.trial.config import (
     AgentConfig,
     EnvironmentConfig,
+    OnCompletion,
     ResourceMode,
     TaskConfig,
 )
@@ -405,6 +406,19 @@ def start(
             show_default=False,
         ),
     ] = None,
+    on_completion: Annotated[
+        OnCompletion | None,
+        Option(
+            "--on-completion",
+            help=(
+                "What to do with the agent environment when its useful work ends: "
+                "teardown or archive "
+                f"(default: {EnvironmentConfig.model_fields['on_completion'].default.value})"
+            ),
+            rich_help_panel="Environment",
+            show_default=False,
+        ),
+    ] = None,
     cpus: Annotated[
         ResourceMode | None,
         Option(
@@ -674,6 +688,8 @@ def start(
         config.environment.type = None  # Clear type so import_path takes precedence
     if environment_force_build is not None:
         config.environment.force_build = environment_force_build
+    if on_completion is not None:
+        config.environment.on_completion = on_completion
     if environment_delete is not None:
         config.environment.delete = environment_delete
     if cpus is not None:
@@ -760,6 +776,7 @@ def start(
     EnvironmentFactory.run_preflight(
         type=config.environment.type,
         import_path=config.environment.import_path,
+        completion_policy=config.environment.on_completion,
     )
 
     explicit_env_file_keys: set[str] = set()
@@ -838,6 +855,7 @@ def resume(
     EnvironmentFactory.run_preflight(
         type=config.environment.type,
         import_path=config.environment.import_path,
+        completion_policy=config.environment.on_completion,
     )
 
     async def _run_job():

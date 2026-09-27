@@ -35,6 +35,14 @@ _TRANSFER_TAR_TEMPLATE = ".hb-transfer-{uuid}.tar.gz"
 _ENV_TRANSFER_TAR_DIR = PurePosixPath("/tmp")
 
 
+class ArchiveError(RuntimeError):
+    """The environment could not be archived.
+
+    Raised instead of reporting a completed archive: callers must be able to
+    tell a published artifact from a failed export.
+    """
+
+
 class HealthcheckError(RuntimeError):
     pass
 
@@ -585,6 +593,27 @@ class BaseEnvironment(ABC):
     async def start(self, force_build: bool) -> None:
         """Starts the environment and optionally forces a build."""
 
+    # Whether this environment can hand the machine back after the trial
+    # (`on_completion=archive`). Declared rather than inferred: an environment
+    # that overrides `archive` only to refuse it still does not support it.
+    SUPPORTS_ARCHIVE: bool = False
+
+    @classmethod
+    def archive_preflight(cls) -> None:
+        """Validate archive-specific host requirements before trial creation."""
+        return
+
+    async def archive(self) -> None:
+        """Preserve the environment instead of reclaiming it.
+
+        Environments that can do this override both this method and
+        ``SUPPORTS_ARCHIVE``; the default refuses.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support environment archiving"
+        )
+
+
     @abstractmethod
     async def stop(self, delete: bool):
         """Stops the environment and optionally deletes it."""
@@ -646,7 +675,7 @@ class BaseEnvironment(ABC):
     @abstractmethod
     async def download_file(self, source_path: str, target_path: Path | str):
         """
-        Downloads a file from the environment to the local machine.
+        Downloads a file from the environment.
 
         Args:
             source_path: The path to the source file in the environment.

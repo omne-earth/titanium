@@ -1,7 +1,7 @@
 """A first-class gVisor environment, selected with ``--env gvisor``.
 
 ``GVisorEnvironment`` subclasses :class:`~titanium.environments.docker.docker.DockerEnvironment`
-because this slice still uses the Docker CLI, Docker Compose, Docker build
+because this environment still uses the Docker CLI, Docker Compose, Docker build
 behaviour, Docker exec behaviour, the Docker service lifecycle and Docker
 networking primitives. Only what is genuinely different under gVisor is
 overridden; no part of the Docker lifecycle is duplicated, and
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -36,13 +37,14 @@ from titanium.environments.agent_setup import (
     EGRESS_PROXY_SERVICE,
     proxy_environment,
 )
-from titanium.environments.base import ExecResult
+from titanium.environments.base import ArchiveError, ExecResult
 from titanium.environments.capabilities import EnvironmentCapabilities
 from titanium.environments.docker.docker import (
     DockerEnvironment,
     _sanitize_docker_compose_project_name,
 )
 from titanium.environments.gvisor import network
+from titanium.environments.gvisor.rootfs_archive import merge_rootfs_archives
 from titanium.environments.gvisor.runtime import (
     COMPOSE_OVERRIDE_NAME,
     COMPOSE_PROJECT_LABEL,
@@ -427,6 +429,114 @@ class GVisorEnvironment(DockerEnvironment):
         except BaseException as start_exc:
             await self._teardown_preserving(start_exc)
             raise
+
+    # Archive mechanics live here for reuse by gVisor-Podman, which captures and
+    # merges the gVisor upper layer. Docker-backed gVisor does not support archive.
+    SUPPORTS_ARCHIVE: bool = False
+
+    # Merge the gVisor upper layer into the engine export without changing
+    # the sandbox's existing overlay filesystem semantics.
+
+    # so that we dont have to remove the overlay2
+
+    async def _finalize_archive_tar(self, partial_path: Path) -> None:
+        upper_path = self.trial_paths.archive_dir / "rootfs-upper.tar"
+        merged_path = self.trial_paths.archive_dir / "rootfs-merged.tar"
+
+        if not upper_path.is_file():
+            raise ArchiveError("gVisor upper-layer snapshot is missing")
+
+        await asyncio.to_thread(
+            merge_rootfs_archives,
+            partial_path,
+            upper_path,
+            merged_path,
+        )
+
+        merged_path.replace(partial_path)
+
+    async def _capture_upper_archive(self) -> None:
+        if self._engine != "podman":
+            raise ArchiveError(
+                "Docker + gVisor upper-layer capture is not implemented"
+            )
+
+        container_id = await self._archive_container_id()
+        if not container_id:
+            raise ArchiveError("Cannot snapshot gVisor: main container not found")
+
+        runtime_dir = os.environ.get(
+            "XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"
+        )
+        runsc_root = Path(runtime_dir) / "runsc"
+
+        if not runsc_root.is_dir():
+            raise ArchiveError(f"gVisor runtime root not found: {runsc_root}")
+
+        upper_path = self.trial_paths.archive_dir / "rootfs-upper.tar"
+        upper_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if upper_path.exists():
+            raise ArchiveError(f"Upper-layer snapshot already exists: {upper_path}")
+
+        pause = await self._run_engine_command(["pause", container_id])
+        if pause.return_code != 0:
+            raise ArchiveError(f"Could not pause gVisor container: {pause.stderr}")
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "runsc",
+                f"--root={runsc_root}",
+                "tar",
+                "rootfs-upper",
+                "--file",
+                str(upper_path),
+                container_id,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            _stdout, stderr = await process.communicate()
+
+            if process.returncode != 0:
+                raise ArchiveError(
+                    f"gVisor upper-layer snapshot failed: "
+                    f"{stderr.decode(errors='replace')}"
+                )
+
+            if not upper_path.is_file() or upper_path.stat().st_size == 0:
+                raise ArchiveError("gVisor upper-layer snapshot is missing or empty")
+
+        finally:
+            unpause = await self._run_engine_command(
+                ["unpause", container_id]
+            )
+            if unpause.return_code != 0:
+                raise ArchiveError(
+                    f"Could not unpause gVisor container: {unpause.stderr}"
+                )
+
+    async def archive(self) -> None:
+        """Export this trial's filesystem, then clean up the staging mounts.
+
+        The staging tree is a host-side transfer buffer, removed here exactly
+        as on teardown; the guest state worth keeping is in the exported tar.
+        """
+        # Same reason stop() sets it: teardown must not re-enter runtime
+        # verification on a sandbox that is on its way out.
+        self._stopping = True
+        try:
+            await self._capture_upper_archive()
+            await super().archive()
+        finally:
+            self._cleanup_staging()
+
+    def _engine_command_name(self) -> str:
+        return self._engine_cli
+
+    async def _archive_container_id(self) -> str | None:
+        """Resolve `main` through the family's own service-scoped lookup."""
+        return await self._compose_container_id("main", include_stopped=True)
 
     async def stop(self, delete: bool):
         self._stopping = True
