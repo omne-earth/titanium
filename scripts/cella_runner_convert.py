@@ -10,8 +10,9 @@ lands in the guest, never on the host.
 The runner is parametric over that inner environment (`InnerEnv`): the guest
 skeleton -- base image, uv, the baked tree, the boot oneshot, the member
 prelude, the phases, the reset -- is common, and each environment supplies
-only its own part of it. `docker` is the environment under test today;
-`cella` is not yet onboarded and every one of its hooks refuses by name.
+only its own part of it: `docker`, the container boundary, and
+`cella`, cella hosting cella, which runs the oracle only (its stage hook
+refuses a model agent by name; docs/runners/CELLA-RUNNER.md §5.2).
 
 This driver is the bake half. It exists as Python rather than shell for the
 same reason `scripts/smoke/cella_rootfs_convert.py` does:
@@ -50,18 +51,32 @@ from titanium.environments.agent_setup import (
 )
 from titanium.environments.cella.boot_layer import BootLayer, GuestFile, GuestSymlink
 from titanium.environments.cella.constants import (
+    ROOTFS_BUILDER_IMAGE,
     MEMBER_CA_PATH,
     REPLY_PORT_HIGH,
     REPLY_PORT_LOW,
     RUNNER_DIR,
     SYSTEM_CA_BUNDLE,
 )
+from titanium.environments.cella.buildfile import prepare_build_context
 from titanium.environments.cella.converter import (
     BuildFacts,
     FlavorIdentity,
     convert_task_to_rootfs_flavor,
 )
-from titanium.environments.cella.systemd_boot import plan_systemd_provisioning
+from titanium.environments.cella.image_config import parse_image_record
+from titanium.environments.cella.podman import (
+    build_image,
+    export_rootfs_tar,
+    inspect_image,
+    new_build_tag,
+    untag_image,
+)
+from titanium.environments.cella.rootfs import ensure_rootfs_builder_image
+from titanium.environments.cella.systemd_boot import (
+    plan_systemd_provisioning,
+    prepare_systemd_rootfs,
+)
 from titanium.models.agent.name import AgentName
 from titanium.environments.cella.terminator import (
     appliance_border_policy_text,
@@ -97,6 +112,7 @@ GUEST_WORKSPACE = "/workspace"
 RESULT_ROOT = f"{RUNNER_DIR}/result"
 RUN_SCRIPT_PATH = f"{RUNNER_DIR}/cella-runner.sh"
 RUN_UNIT_NAME = "cella-runner.service"
+JOBS_SUBDIR = "jobs"
 
 # The inner container's base images are seeded into the airgapped guest by the
 # route the operator chose: `docker export` on the host, tar, bake, `docker
@@ -467,10 +483,195 @@ def _docker_stage(task_dir: Path, context: Path, agent: str) -> str | None:
     return None
 
 
-def _not_onboarded(*_args, **_kwargs):
-    raise SystemExit(
-        "inner environment 'cella' is not yet onboarded (docs/runners/CELLA-RUNNER.md §2)"
+# The cella inner environment: a KVM VM inside the KVM guest. The guest
+# carries the field cella install (the persona binaries are dynamic against
+# glibc 2.34, and debian 12 is 2.36), bwrap for the jail, podman for the one
+# thing the inner environment builds per machine -- its ext4, `mkfs.ext4 -d`
+# in the builder container -- and the goldens. Everything that needs a
+# network is done here on the host and seeded (docs/runners/CELLA-RUNNER.md
+# §5.2): the builder image, and the task's systemd-provisioned rootfs tar.
+CELLA_SEED_SUBDIR = f"{SEED_SUBDIR}/cella"
+CELLA_GUEST_SEED = f"{GUEST_WORKSPACE}/{CELLA_SEED_SUBDIR}"
+# The inner titanium runs as this user, not root: a failed inner boundary
+# (the thing the cella leg exists to test) lands as an unprivileged user in
+# this guest, the same shape as titanium-run one layer in. cella's jail is
+# rootless by nature (bwrap, a sub-uid range, newuidmap), and so is podman.
+CELLA_GUEST_USER = "titanium"
+CELLA_GUEST_UID = 1000
+CELLA_GUEST_HOME = f"/home/{CELLA_GUEST_USER}/.cella"
+CELLA_GUEST_RUNTIME_DIR = f"/run/user/{CELLA_GUEST_UID}"
+# How the root oneshot runs a command as that user: the environment kept
+# (the exports above it, the baked secrets), and the identity variables
+# rewritten -- rootless podman reads USER to find its sub-id range, and a
+# preserved USER=root sends it to root's.
+CELLA_AS_USER = (
+    f"runuser -u {CELLA_GUEST_USER} -p -- env HOME=/home/{CELLA_GUEST_USER} "
+    f"USER={CELLA_GUEST_USER} LOGNAME={CELLA_GUEST_USER} "
+    f"XDG_RUNTIME_DIR={CELLA_GUEST_RUNTIME_DIR}"
+)
+CELLA_ROOTFS_TAR = "state-0000.tar"
+CELLA_IMAGE_CONFIG = "image-config.json"
+CELLA_BUILDER_TAR = "builder.tar"
+CELLA_GOLDENS = (("kernel", "canonical"), ("rootfs", "cella"), ("rootfs", "terminator"))
+# cella's terminator verifies the world against webpki's roots only. An inner
+# appliance dialing through the outer appliance would meet a leaf minted from
+# the outer pair CA and refuse it, so no inference line can chain through two
+# membranes until the terminator takes an extra root. The oracle needs none.
+CELLA_ORACLE_ONLY = (
+    "inner environment 'cella' runs the oracle only: cella's terminator "
+    "trusts webpki's roots alone, so an inner appliance cannot chain through "
+    "the outer membrane (docs/runners/CELLA-RUNNER.md §5.2)"
+)
+
+
+def _cella_dockerfile_stanza() -> str:
+    return f"""\
+# The field cella install, copied from the host: the persona set on the path.
+COPY {CELLA_SEED_SUBDIR}/bin/ /usr/local/bin/
+# This base ships no python, so uv fetches an interpreter for the venv. Its
+# default home is /root's, which the unprivileged user cannot traverse; put
+# it where every user reads it.
+ENV UV_PYTHON_INSTALL_DIR=/usr/local/share/uv/python
+# The unprivileged user the inner titanium runs as, with the sub-id range
+# cella's jail and rootless podman map their namespaces from.
+RUN useradd -m -u {CELLA_GUEST_UID} {CELLA_GUEST_USER} \\
+ && echo '{CELLA_GUEST_USER}:100000:65536' > /etc/subuid \\
+ && echo '{CELLA_GUEST_USER}:100000:65536' > /etc/subgid \\
+ && chmod 0711 /home/{CELLA_GUEST_USER}
+# The last line: each machine's VMM runs as its own sub-uid and must
+# traverse the home to reach the machine dir; a 0700 home refuses it before
+# cella's own ACLs on .cella and machines are reached. The host grants this
+# with setfacl (scripts/init/cella.sh); here a mode, because the bake's
+# export-and-mkfs path keeps modes and drops ACL xattrs. Execute-only opens
+# no read on the home.
+# The user's CELLA_HOME: its own kernel, rootfs and machines directories (the
+# inner titanium publishes flavors and creates machines there), with the
+# seeded goldens linked in by name. The seed is root-owned and read-only; one
+# copy in the image, and the machine's sub-uid reads it through the link.
+RUN install -d -o {CELLA_GUEST_USER} -g {CELLA_GUEST_USER} {CELLA_GUEST_HOME} \\
+      {CELLA_GUEST_HOME}/kernel {CELLA_GUEST_HOME}/rootfs {CELLA_GUEST_HOME}/machines \\
+ && ln -s {CELLA_GUEST_SEED}/home/kernel/canonical {CELLA_GUEST_HOME}/kernel/canonical \\
+ && ln -s {CELLA_GUEST_SEED}/home/rootfs/cella {CELLA_GUEST_HOME}/rootfs/cella \\
+ && ln -s {CELLA_GUEST_SEED}/home/rootfs/terminator {CELLA_GUEST_HOME}/rootfs/terminator \\
+ && chown -h {CELLA_GUEST_USER}:{CELLA_GUEST_USER} {CELLA_GUEST_HOME}/kernel/canonical \\
+      {CELLA_GUEST_HOME}/rootfs/cella {CELLA_GUEST_HOME}/rootfs/terminator
+# podman runs one thing here, the ext4 builder, rootless, and its default
+# overlay driver needs overlayfs, which this guest's kernel does not carry.
+# vfs copies the one alpine layer and asks the kernel for nothing. The
+# user's own storage.conf, so podman keeps its rootless roots.
+RUN install -d -o {CELLA_GUEST_USER} -g {CELLA_GUEST_USER} \\
+      /home/{CELLA_GUEST_USER}/.config /home/{CELLA_GUEST_USER}/.config/containers \\
+ && printf '%s\\n' '[storage]' 'driver = "vfs"' \\
+      > /home/{CELLA_GUEST_USER}/.config/containers/storage.conf \\
+ && chown {CELLA_GUEST_USER}:{CELLA_GUEST_USER} /home/{CELLA_GUEST_USER}/.config/containers/storage.conf
+# That one container is the trusted ext4 builder, so it gets no cgroup: crun
+# would otherwise install a BPF device program, which needs CONFIG_CGROUP_BPF,
+# a docker config this kernel does not carry. cgroupfs asks no D-Bus of a
+# guest that runs no dbus daemon.
+RUN printf '%s\\n' '[containers]' 'cgroups = "disabled"' \\
+      '[engine]' 'cgroup_manager = "cgroupfs"' 'events_logger = "file"' \\
+      > /etc/containers/containers.conf
+"""
+
+
+def _cella_run_prep() -> str:
+    return f"""\
+# What the unprivileged user needs from root, once: the KVM device open to
+# every uid -- each machine's VMM opens it itself, jailed as its own sub-uid,
+# which is in no group; 0666 is what udev sets on the host -- a runtime dir
+# (no logind session grants one), and the jobs dir it writes.
+chmod 0666 /dev/kvm
+install -d -m 0700 -o {CELLA_GUEST_USER} -g {CELLA_GUEST_USER} {CELLA_GUEST_RUNTIME_DIR}
+chown -R {CELLA_GUEST_USER}:{CELLA_GUEST_USER} "$R/{JOBS_SUBDIR}"
+# The ext4 builder the inner environment runs `mkfs.ext4 -d` in, seeded by
+# tag into the user's store so the inner run finds it present and builds
+# nothing.
+phase "seed: loading the rootfs builder"
+{CELLA_AS_USER} podman load -i {CELLA_GUEST_SEED}/{CELLA_BUILDER_TAR} > "$R/seed.log" 2>&1 \\
+  || phase "seed: podman load FAILED"
+# cella's own preflight, one level down and as that user: KVM in this guest,
+# the jail, the goldens. Recorded, not fatal here: the inner titanium refuses
+# on its own terms, and the record says why.
+{{ ls -la /dev/kvm; {CELLA_AS_USER} CELLA_HOME={CELLA_GUEST_HOME} cella doctor gate kvm bwrap golden:kernel:canonical golden:rootfs:cella golden:rootfs:terminator; }} \\
+  > "$R/cella-doctor.txt" 2>&1 && phase "cella doctor gate: ok" || phase "cella doctor gate: FAILED"
+"""
+
+
+def _cella_run_env_exports(prebuilt: bool, agent_image: str | None) -> str:
+    return f"""\
+# The boot oneshot runs with no HOME, and cella resolves its home as
+# CELLA_HOME, else HOME/.cella, else ./.cella -- so name it.
+export CELLA_HOME={CELLA_GUEST_HOME}
+# The task's rootfs, provisioned to boot systemd on the host and seeded: the
+# inner run adopts it and builds no base.
+export TITANIUM_CELLA_ROOTFS_TAR={CELLA_GUEST_SEED}/rootfs/{CELLA_ROOTFS_TAR}
+export TITANIUM_CELLA_IMAGE_CONFIG={CELLA_GUEST_SEED}/rootfs/{CELLA_IMAGE_CONFIG}
+"""
+
+
+def _cella_seed_plan(task_dir: Path) -> tuple[list[str], bool]:
+    return [], False
+
+
+def _cella_stage(task_dir: Path, context: Path, agent: str) -> str | None:
+    """cella's part of the staged context: the field install, the goldens,
+    the builder image, and the task's provisioned rootfs tar with the image
+    config the inner environment reads beside it."""
+    if agent != AgentName.ORACLE.value:
+        raise SystemExit(CELLA_ORACLE_ONLY)
+    seed = context / CELLA_SEED_SUBDIR
+    home = Path.home() / ".cella"
+    bins = seed / "bin"
+    bins.mkdir(parents=True, exist_ok=True)
+    for binary in sorted((home / "bin").glob("cella*")):
+        shutil.copy2(binary, bins / binary.name)
+    for axis, flavor in CELLA_GOLDENS:
+        shutil.copytree(home / axis / flavor, seed / "home" / axis / flavor)
+
+    ensure_rootfs_builder_image()
+    subprocess.run(
+        ["podman", "save", "-o", str(seed / CELLA_BUILDER_TAR), ROOTFS_BUILDER_IMAGE],
+        check=True,
     )
+
+    # The same sequence the inner environment's start runs, here where the
+    # package index is reachable.
+    config = tomllib.loads((task_dir / "task.toml").read_text())
+    work = seed / "rootfs"
+    work.mkdir(parents=True)
+    tag = new_build_tag("titanium-cella-runner")
+    try:
+        prepared_context = prepare_build_context(
+            environment_dir=task_dir / "environment",
+            context_dir=work / "context",
+            agent_install_spec=None,
+            agent_user=(config.get("agent") or {}).get("user"),
+        )
+        build_image(
+            context_dir=prepared_context.context_dir,
+            build_file=prepared_context.build_file,
+            tag=tag,
+        )
+        record = parse_image_record(inspect_image(tag))
+        source_tar = work / "rootfs-source.tar"
+        export_rootfs_tar(image=tag, dest_tar=source_tar)
+        prepared = prepare_systemd_rootfs(
+            source_tag=tag,
+            source_image_id=record.image_id,
+            source_rootfs_tar=source_tar,
+            work_dir=work,
+            plan_provisioning=plan_systemd_provisioning,
+        )
+        if prepared.rootfs_tar != work / CELLA_ROOTFS_TAR:
+            shutil.copyfile(prepared.rootfs_tar, work / CELLA_ROOTFS_TAR)
+        (work / CELLA_IMAGE_CONFIG).write_text(json.dumps(dict(record.config)))
+    finally:
+        untag_image(tag)
+    # Only the two files the inner run reads ride the bake.
+    for stale in work.iterdir():
+        if stale.name not in (CELLA_ROOTFS_TAR, CELLA_IMAGE_CONFIG):
+            shutil.rmtree(stale) if stale.is_dir() else stale.unlink()
+    return None
 
 
 @dataclass(frozen=True)
@@ -481,18 +682,23 @@ class InnerEnv:
     guest it cannot run."""
 
     name: str
+    base_image: str
     guest_mem_mb: int
     apt_packages: tuple[str, ...]
     dockerfile_stanza: Callable[[], str]
     run_prep: Callable[[], str]
     run_env_exports: Callable[[bool, str | None], str]
     titanium_flags: Callable[[], list[str]]
+    # The command prefix that runs the inner titanium as the guest's
+    # unprivileged user, or "" for an environment whose run is root.
+    run_as: str
     seed_plan: Callable[[Path], tuple[list[str], bool]]
     stage: Callable[[Path, Path, str], str | None]
 
 
 DOCKER = InnerEnv(
     name="docker",
+    base_image="debian:12",
     guest_mem_mb=4096,
     apt_packages=("docker.io", "nftables"),
     dockerfile_stanza=_docker_dockerfile_stanza,
@@ -501,26 +707,38 @@ DOCKER = InnerEnv(
     # The cella VM is the resource boundary (one vCPU, a real --mem-mb
     # ceiling), so the inner container enforces neither cpu nor memory.
     titanium_flags=lambda: ["--env", "docker", "--cpus", "ignore", "--memory", "ignore"],
+    # Root: driving dockerd needs the docker group, which is root-equivalent
+    # (the reason titanium-run never wraps the docker family either).
+    run_as="",
     seed_plan=inner_seed_plan,
     stage=_docker_stage,
 )
 
 CELLA = InnerEnv(
     name="cella",
-    guest_mem_mb=4096,
-    apt_packages=(),
-    dockerfile_stanza=_not_onboarded,
-    run_prep=_not_onboarded,
-    run_env_exports=_not_onboarded,
-    titanium_flags=_not_onboarded,
-    seed_plan=_not_onboarded,
-    stage=_not_onboarded,
+    # The field cella personas are dynamic against glibc; cella-machine and
+    # cella-doctor need 2.39, above debian 12's 2.36.
+    base_image="debian:13",
+    # The inner machines' --mem-mb (the task's, then the verifier's twin) and
+    # the builder container all come out of this ceiling.
+    guest_mem_mb=6144,
+    # uidmap: the setuid newuidmap/newgidmap the rootless jail and podman
+    # map with; acl: cella's traversal grants on the home for the sub-uid.
+    apt_packages=("bubblewrap", "podman", "uidmap", "acl"),
+    dockerfile_stanza=_cella_dockerfile_stanza,
+    run_prep=_cella_run_prep,
+    run_env_exports=_cella_run_env_exports,
+    # One vCPU is cella's own rule; --mem-mb is the task's real limit.
+    titanium_flags=lambda: ["--env", "cella", "--cpus", "ignore"],
+    run_as=CELLA_AS_USER,
+    seed_plan=_cella_seed_plan,
+    stage=_cella_stage,
 )
 
 INNER_ENVS = {e.name: e for e in (DOCKER, CELLA)}
 
 
-def reflexive_dockerfile(env: InnerEnv = DOCKER) -> str:
+def reflexive_dockerfile(env: InnerEnv) -> str:
     """The build file for the reflexive image.
 
     `uv` so titanium's own Python floor (>=3.12) is met without depending on
@@ -533,7 +751,7 @@ def reflexive_dockerfile(env: InnerEnv = DOCKER) -> str:
 # regenerate. The reflexive image: the inner environment ({env.name}) for the
 # inner run to drive, uv for titanium's Python floor, and titanium provisioned
 # from the baked tree.
-FROM debian:12
+FROM {env.base_image}
 
 RUN apt-get update \\
  && apt-get install -y --no-install-recommends \\
@@ -563,8 +781,8 @@ def run_script(
     prebuilt: bool = False,
     agent: str = "mini-swe-agent",
     agent_image: str | None = None,
-    jobs_subdir: str = "jobs",
-    env: InnerEnv = DOCKER,
+    jobs_subdir: str = JOBS_SUBDIR,
+    env: InnerEnv,
 ) -> str:
     """The guest-side script the boot oneshot runs.
 
@@ -616,7 +834,7 @@ fi
 export LITELLM_LOCAL_MODEL_COST_MAP=true
 
 phase "titanium run: start"
-.venv/bin/titanium run \\
+{env.run_as} .venv/bin/titanium run \\
   --agent {shlex.quote(agent)} \\
   --model "${{OPENROUTER_MODEL:?no OPENROUTER_MODEL in baked .secrets}}" \\
   {flags} \\
@@ -625,7 +843,9 @@ phase "titanium run: start"
   2>&1 | tee /dev/console > "$R/run.log"
 echo "${{PIPESTATUS[0]}}" > "$R/exit-code"
 phase "titanium run: exit $(cat "$R/exit-code")"
-
+# The kernel log after the run: a seccomp kill inside the guest is only
+# ever named here (audit type=1326, syscall=N).
+dmesg > "$R/guest-dmesg.txt" 2>&1
 touch "$R/done"
 end
 """
@@ -637,7 +857,7 @@ def boot_layer(
     prebuilt: bool = False,
     agent: str = "mini-swe-agent",
     agent_image: str | None = None,
-    env: InnerEnv = DOCKER,
+    env: InnerEnv,
 ) -> BootLayer:
     """The run-on-boot layer: the oneshot unit, the run script, the symlink
     that enables the unit. Modeled on the trial orchestrator's boot entries
@@ -701,7 +921,7 @@ def stage_context(
     context: Path,
     *,
     agent: str = "mini-swe-agent",
-    env: InnerEnv = DOCKER,
+    env: InnerEnv,
 ) -> str | None:
     """Copy the tracked tree into *context*, write the reflexive Dockerfile,
     and let the inner environment stage its own seed.
@@ -755,7 +975,7 @@ def main() -> int:
                         help="where to write member.policy and appliance.policy")
     parser.add_argument("--agent", default="mini-swe-agent",
                         help="the inner agent; its install is baked on the host")
-    parser.add_argument("--inner-env", choices=sorted(INNER_ENVS), default=DOCKER.name,
+    parser.add_argument("--inner-env", choices=sorted(INNER_ENVS), required=True,
                         help="the environment the inner run drives in the guest")
     args = parser.parse_args()
     env = INNER_ENVS[args.inner_env]
@@ -764,8 +984,8 @@ def main() -> int:
         member, appliance = write_policies(args.policy_dir)
         print(f"[cella-runner] policies : {member} {appliance}")
 
-    # The seed plan first: an environment not yet onboarded refuses here,
-    # before any tree is copied.
+    # The seed plan first, so an environment that cannot host this task
+    # refuses before any tree is copied.
     _images, prebuilt = env.seed_plan(args.workspace / args.inner_task)
     agent_image = stage_context(
         args.workspace, args.inner_task, args.context, agent=args.agent, env=env

@@ -5,8 +5,8 @@
 #
 #   <inner-task>      repo-relative path of a task with a task.toml
 #   <inner-env>       the environment the inner run drives in the guest:
-#                     docker (supported) or cella (not yet onboarded; refused
-#                     by name, exit 2)
+#                     docker, or cella (the oracle only; a model agent is
+#                     refused by name, exit 2 -- CELLA-RUNNER.md §5.2)
 #   jobs-dir          the home for this runner's jobs (default:
 #                     ./.run/cella-runner/<inner-task-basename>). Each run lands
 #                     in its own <jobs-dir>/<YYYY-MM-DD__HH-MM-SS>, the job name
@@ -56,10 +56,12 @@ _TAG="$(printf '%s' "$INNER_BASENAME" | tr -cd 'a-z0-9' | cut -c1-8)"
 VM="cr-$_TAG-$$"
 EXT4_BYTES="${TITANIUM_CELLA_RUNNER_EXT4_BYTES:-10737418240}"   # 10 GiB: workspace + inner image layers
 # The guest's memory ceiling is the inner environment's (InnerEnv.guest_mem_mb
-# in the driver). docker is the only environment that reaches boot, so its
-# figure is the one default here; a second onboarded environment makes this
-# a case on $INNER_ENV.
-GUEST_MEM_MB="${TITANIUM_CELLA_RUNNER_MEM_MB:-4096}"
+# in the driver): the cella inner machines' --mem-mb comes out of it.
+case "$INNER_ENV" in
+    cella) _MEM_DEFAULT=6144 ;;
+    *)     _MEM_DEFAULT=4096 ;;
+esac
+GUEST_MEM_MB="${TITANIUM_CELLA_RUNNER_MEM_MB:-$_MEM_DEFAULT}"
 BOOT_TIMEOUT_SECS="${TITANIUM_CELLA_RUNNER_TIMEOUT:-1800}"
 # The inner agent. Its build-time install (uv, PyPI) is baked on the host,
 # since the membrane grants the inference line only.
@@ -119,11 +121,14 @@ trap teardown EXIT
 step "step 0: preconditions"
 
 # The inner environment is a runner choice, checked before anything is stood.
-# The driver refuses an un-onboarded environment too; this is the same
-# refusal, before the interpreter and cella are even looked for.
+# cella runs the oracle only: its terminator trusts webpki's roots alone, so
+# an inner appliance cannot chain an inference line through the outer
+# membrane (CELLA-RUNNER.md §5.2). The driver refuses the same way; this is
+# that refusal before the interpreter and cella are even looked for.
 case "$INNER_ENV" in
     docker) ;;
-    cella)  skip "inner environment 'cella' is not yet onboarded (docs/runners/CELLA-RUNNER.md §2)" ;;
+    cella)  [ "$AGENT" = oracle ] \
+                || skip "inner environment 'cella' runs the oracle only (TITANIUM_AGENT=oracle); see CELLA-RUNNER.md §5.2" ;;
     *)      skip "unknown inner environment '$INNER_ENV' (docker|cella)" ;;
 esac
 [ -x "$PY" ] || skip "no interpreter at $PY -- run: make sync"
@@ -179,7 +184,13 @@ if [ "${#EDGE_SOCK}" -ge 108 ]; then
 fi
 mkdir -p "$CELLA_HOME/kernel/canonical" "$CELLA_HOME/bin"
 chmod 0755 "$CELLA_HOME/kernel" "$CELLA_HOME/kernel/canonical" "$CELLA_HOME/bin"
-note "CELLA_HOME: $CELLA_HOME"
+note "CELLA_HOME: $CELLA_HOME (disposable; not your ~/.cella, reaped at exit)"
+note "watch:      CELLA_HOME=$CELLA_HOME $BIN list"
+note "            CELLA_HOME=$CELLA_HOME $BIN gateway $VM show"
+note "            tail -f $WORK/pump-appliance.log   # every world crossing, judged by name"
+note "            tail -f $WORK/pump-member.log      # the member border's own judgments"
+note "            tail -f $M/vmm.log                 # the member VMM: parks, releases, the exit"
+note "            $BIN --dump $M/network/ledger      # the chronicle: every crossing, decoded (also audit, verdict)"
 
 # The reflexive rootfs export is multi-GB (the workspace, docker, a full
 # titanium venv). Route the converter's tempdir into this run's workdir, so
@@ -196,12 +207,12 @@ cp "$REAL_CELLA_HOME/kernel/canonical/bzImage" "$CELLA_HOME/kernel/canonical/" \
     || fail "could not copy the canonical kernel golden"
 cp "$REAL_CELLA_HOME/kernel/canonical/golden.json" "$CELLA_HOME/kernel/canonical/" 2>/dev/null
 
-# The container-capable guest kernel is titanium's own (built by
-# scripts/cella-runner/build-kernel.sh, `make .cella-runner-kernel`), not a cella
+# The guest kernel is titanium's own, one per inner environment (built by
+# scripts/cella-runner/build-kernel.sh, `make .cella-runner-kernel-<env>`), not a cella
 # golden. cella boots any bzImage that carries the virtio-mmio boot configs;
 # it checks only that the file exists. Stage it as the "container" flavor.
-CELLA_RUNNER_KERNEL="${CELLA_RUNNER_KERNEL:-${XDG_CACHE_HOME:-$HOME/.cache}/titanium/cella-runner-kernel/bzImage}"
-[ -f "$CELLA_RUNNER_KERNEL" ] || skip "no container kernel at $CELLA_RUNNER_KERNEL -- run: make .cella-runner-kernel"
+CELLA_RUNNER_KERNEL="${CELLA_RUNNER_KERNEL:-${XDG_CACHE_HOME:-$HOME/.cache}/titanium/cella-runner-kernel/$INNER_ENV/bzImage}"
+[ -f "$CELLA_RUNNER_KERNEL" ] || skip "no $INNER_ENV guest kernel at $CELLA_RUNNER_KERNEL -- run: make .cella-runner-kernel-$INNER_ENV"
 mkdir -p "$CELLA_HOME/kernel/container"
 chmod 0755 "$CELLA_HOME/kernel/container"
 cp "$CELLA_RUNNER_KERNEL" "$CELLA_HOME/kernel/container/bzImage" \

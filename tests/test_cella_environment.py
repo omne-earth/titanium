@@ -43,6 +43,7 @@ import pytest
 from titanium.environments.base import SealedPhaseSpec, SealedPhaseStep
 from titanium.environments.cella.environment import (
     CellaEnvironment,
+    CellaError,
     _flavor_name,
 )
 from titanium.environments.cella.flavor import validate_flavor_name
@@ -685,3 +686,35 @@ def test_install_user_is_untouched_without_an_agent_install(tmp_path):
     env = _make_env(tmp_path)
     env.agent_install_spec = None
     assert env._install_user() is None
+
+
+def test_a_prebaked_rootfs_is_adopted_and_nothing_is_built(tmp_path, monkeypatch):
+    # The cella-runner guest names a host-provisioned rootfs; the start
+    # copies it in, reads the image config beside it, and touches no podman.
+    env = _make_env(tmp_path)
+    tar = tmp_path / "state.tar"
+    tar.write_bytes(b"rootfs")
+    config = tmp_path / "image-config.json"
+    config.write_text('{"WorkingDir": "/app", "Env": ["A=1"]}')
+    monkeypatch.setenv("TITANIUM_CELLA_ROOTFS_TAR", str(tar))
+    monkeypatch.setenv("TITANIUM_CELLA_IMAGE_CONFIG", str(config))
+    monkeypatch.setenv("CELLA_BIN", str(tar))  # preflight wants a file
+    monkeypatch.setattr(
+        "titanium.environments.cella.environment.new_build_tag",
+        lambda *a, **k: pytest.fail("a prebaked rootfs must not build"),
+    )
+
+    env._start_blocking(force_build=False)
+
+    assert env._base_tar.read_bytes() == b"rootfs"
+    assert env._image_config == {"WorkingDir": "/app", "Env": ["A=1"]}
+
+
+def test_a_prebaked_rootfs_needs_both_names(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+    monkeypatch.setenv("TITANIUM_CELLA_ROOTFS_TAR", str(tmp_path / "state.tar"))
+    monkeypatch.delenv("TITANIUM_CELLA_IMAGE_CONFIG", raising=False)
+    monkeypatch.setenv("CELLA_BIN", str(tmp_path / "task.toml"))
+    (tmp_path / "task.toml").write_text("")
+    with pytest.raises(CellaError, match="only one is set"):
+        env._start_blocking(force_build=False)

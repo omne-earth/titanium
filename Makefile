@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard .sudo-tty-guard-cella init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-note smoke-cella-branch-all smoke-cella-boundary smoke-cella-runner smoke-cella-runner-docker smoke-cella-runner-docker-debug smoke-cella-runner-cella smoke-cella-runner-cella-debug .cella-runner-kernel
+.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard .sudo-tty-guard-cella init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-note smoke-cella-branch-all smoke-cella-boundary smoke-cella-runner smoke-cella-runner-docker smoke-cella-runner-docker-debug smoke-cella-runner-cella smoke-cella-runner-cella-debug .cella-runner-kernel-docker .cella-runner-kernel-cella
 
 -include .secrets
 
@@ -520,36 +520,44 @@ smoke-cella-rootfs: .sudo-tty-guard sync .podman .cella .cella-debug
 # it so a systemd oneshot runs `titanium run --env <inner-env>` against the
 # inner task inside the sealed guest, and extracts the payload -- an escape
 # from the inner environment lands in the guest, never on the host. docker is
-# the environment under test today; cella is not yet onboarded, and its target
-# exits 2 with that cause, so the gate stays honest. Field flavor is fine:
+# the container boundary; cella is cella hosting cella, the oracle only
+# (CELLA-RUNNER.md §5.2). Field flavor is fine:
 # completion is the guest's forced reset, not a console read. Exit 2 means a
 # precondition was missing; exit 1 is a real failure. The extracted payload
 # lands under .run/jobs/<backend>/<target>/<job>, like every other smoke (the
 # script mints the timestamped job name).
-# The container-capable guest kernel cella-runner boots. Built self-contained in
-# a toolbox (no cella-repo dependency); idempotent, so callers depend on it
-# unconditionally and the script decides staleness from the fragment digest.
-.cella-runner-kernel:
-	@bash scripts/cella-runner/build-kernel.sh
+# The guest kernel cella-runner boots for one inner environment: the base
+# fragment plus that environment's own, so each guest carries only its own
+# surface. Built self-contained in a toolbox (no cella-repo dependency);
+# idempotent, so callers depend on it unconditionally and the script decides
+# staleness from the fragments' digest.
+.cella-runner-kernel-docker .cella-runner-kernel-cella: .cella-runner-kernel-%:
+	@bash scripts/cella-runner/build-kernel.sh $*
 
 # The inner agent is the house knob: TITANIUM_AGENT=oracle for the canned solve.
-# The inner environment is the target's last word; the recipe passes it.
-CELLA_RUNNER_TASK ?= examples/smoke/cella-runner-docker
-smoke-cella-runner-docker smoke-cella-runner-cella: .sudo-tty-guard sync .podman .cella .cella-runner-kernel
+# The inner environment is the target's last word; the recipe passes it, and
+# picks that environment's own example task. cella pins the oracle: its
+# terminator cannot chain an inference line through the outer membrane
+# (CELLA-RUNNER.md §5.2), so a model agent there would only be refused.
+CELLA_RUNNER_TASK ?= examples/smoke/cella-runner-$(CELLA_RUNNER_ENV)
+CELLA_RUNNER_ENV = $(patsubst %-debug,%,$(@:smoke-cella-runner-%=%))
+CELLA_RUNNER_AGENT = $(if $(filter cella,$(CELLA_RUNNER_ENV)),oracle,$(TITANIUM_AGENT))
+smoke-cella-runner-docker smoke-cella-runner-docker-debug: .cella-runner-kernel-docker
+smoke-cella-runner-cella smoke-cella-runner-cella-debug: .cella-runner-kernel-cella
+smoke-cella-runner-docker smoke-cella-runner-cella: .sudo-tty-guard sync .podman .cella
 	$(LOG)
-	TITANIUM_CELLA_RUNNER_AGENT=$(TITANIUM_AGENT) bash scripts/cella-runner.sh $(CELLA_RUNNER_TASK) $(@:smoke-cella-runner-%=%) $(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+	TITANIUM_CELLA_RUNNER_AGENT=$(CELLA_RUNNER_AGENT) bash scripts/cella-runner.sh $(CELLA_RUNNER_TASK) $(CELLA_RUNNER_ENV) $(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 # The same run on the lab cella, which records each machine's console.log
 # into the payload (cella-chronicle/<machine>/console.log). Debugging only:
 # the script refuses a lab cella without CELLA_RUNNER_DEBUG, so production
 # never ships on an observed guest.
-smoke-cella-runner-docker-debug smoke-cella-runner-cella-debug: .sudo-tty-guard sync .podman .cella .cella-debug .cella-runner-kernel
+smoke-cella-runner-docker-debug smoke-cella-runner-cella-debug: .sudo-tty-guard sync .podman .cella .cella-debug
 	$(LOG)
-	CELLA_RUNNER_DEBUG=true CELLA_BIN="$(CELLA_LAB_BIN)" TITANIUM_CELLA_RUNNER_AGENT=$(TITANIUM_AGENT) bash scripts/cella-runner.sh $(CELLA_RUNNER_TASK) $(@:smoke-cella-runner-%-debug=%) $(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+	CELLA_RUNNER_DEBUG=true CELLA_BIN="$(CELLA_LAB_BIN)" TITANIUM_CELLA_RUNNER_AGENT=$(CELLA_RUNNER_AGENT) bash scripts/cella-runner.sh $(CELLA_RUNNER_TASK) $(CELLA_RUNNER_ENV) $(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
-# Every onboarded inner environment. smoke-cella-runner-cella joins when it
-# runs: an exit 2 here would fail the aggregate, not skip it.
-smoke-cella-runner: smoke-cella-runner-docker
+# Every inner environment with a live pass on record.
+smoke-cella-runner: smoke-cella-runner-docker smoke-cella-runner-cella
 
 # full-dataset benchmarks (default env gvisor-podman; run `make init` to provision).
 # BENCH_N concurrent trials each.
