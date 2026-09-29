@@ -117,7 +117,12 @@ from titanium.environments.cella.constants import (
     ROOTFS_ARTIFACT_NAME,
     RUNNER_DIR,
 )
-from titanium.environments.cella.engine import bound_port, build_judge, serve
+from titanium.environments.cella.engine import (
+    bound_port,
+    build_judge,
+    free_pump_port,
+    serve,
+)
 from titanium.environments.cella.flavor import (
     cella_home,
     render_golden_json,
@@ -1300,7 +1305,8 @@ class CellaEnvironment(BaseEnvironment):
         engine_logger = self._engine_logger(key)
         loop = self._ensure_engine_loop()
         server = asyncio.run_coroutine_threadsafe(
-            serve(judge, "127.0.0.1", 0, engine_logger=engine_logger), loop
+            serve(judge, "127.0.0.1", free_pump_port(), engine_logger=engine_logger),
+            loop,
         ).result(timeout=15)
         port = bound_port(server)
         self._engines[key] = (server, port)

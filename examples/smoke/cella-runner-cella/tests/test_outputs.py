@@ -37,11 +37,14 @@ def test_hosts_no_guests():
     assert not os.path.exists("/dev/kvm")
 
 
-def test_no_nic_exists():
-    # allow_internet=false is a topology: --net none, loopback only.
+def test_no_nic_but_the_wire():
+    # allow_internet=false is a topology. The oracle's trial is --net none:
+    # loopback only. A model agent's trial is the terminated pair: loopback
+    # and the wire to the appliance (eth0), which resolves and judges every
+    # name -- and nothing else. Either way, no nic reaches the world.
     interfaces = sorted(os.listdir("/sys/class/net"))
-    assert interfaces == ["lo"]
-    assert _report()["net_interfaces"] == interfaces
+    assert interfaces in (["lo"], ["eth0", "lo"])
+    assert set(_report()["net_interfaces"]) <= {"lo", "eth0"}
 
 
 def test_egress_denied():

@@ -21,8 +21,9 @@ The probe reads the VM boundary from the inside and writes
   true — a VM under KVM)
 - `kvm_device`: `/dev/kvm` exists (expected: false — the inner guest
   hosts no guests; the depth stops here)
-- `net_interfaces`: sorted `/sys/class/net` entries (expected: `lo` only —
-  `allow_internet = false` is `--net none`)
+- `net_interfaces`: sorted `/sys/class/net` entries (expected: `lo`, plus
+  `eth0` when the trial has an appliance to reach its model through — the
+  wire to it is the only nic, and it leads nowhere but the judge)
 - `egress_tcp_denied`: a TCP connect to `1.1.1.1:443` with a short timeout
   did NOT succeed (expected: true)
 - `uid`: the numeric user id

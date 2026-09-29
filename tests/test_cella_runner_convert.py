@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -143,9 +144,26 @@ def test_cella_seed_plan_names_no_container_images():
     assert driver.CELLA.seed_plan(Path("t")) == ([], False)
 
 
-def test_cella_stage_refuses_a_model_agent_by_name(tmp_path):
-    with pytest.raises(SystemExit, match="runs the oracle only"):
-        driver.CELLA.stage(tmp_path, tmp_path / "ctx", "mini-swe-agent")
+def test_world_hosts_is_the_inference_line_plus_the_task_policy(tmp_path):
+    # The outer appliance grants exactly what the inner run needs: the
+    # inference line, and the names the inner task's own policy releases.
+    _write_task(tmp_path / "t", "[environment]\n")
+    assert driver.world_hosts(tmp_path / "t") == driver.INFERENCE_HOSTS
+    (tmp_path / "t" / "environment" / "cella.policy").write_text(
+        "release outgoing deb.debian.org:80/tcp (keep_open=60m)\n"
+        "release incoming deb.debian.org:80/tcp\n"
+        "refuse outgoing other.example:443/tcp\n"
+    )
+    assert driver.world_hosts(tmp_path / "t") == sorted([*driver.INFERENCE_HOSTS, "deb.debian.org"])
+
+
+def test_cella_run_script_names_the_inner_pair():
+    text = driver.run_script("t", env=driver.CELLA, agent="mini-swe-agent")
+    assert f"export TITANIUM_CELLA_PAIR={driver.CELLA_INNER_PAIR}" in text
+    assert f"export TITANIUM_CELLA_UPSTREAM_DNS={driver.APPLIANCE_WIRE_ADDRESS}" in text
+    assert f"export TITANIUM_CELLA_BOOT_MARGIN_SEC={driver.CELLA_INNER_BOOT_MARGIN_SEC}" in text
+    assert f"export CELLA_EXTRACT_MIB_PER_SEC={driver.CELLA_INNER_EXTRACT_MIB_PER_SEC}" in text
+    assert "--agent mini-swe-agent" in text  # no oracle pin
 
 
 def test_cella_stage_seeds_the_install_the_builder_and_the_rootfs(tmp_path, monkeypatch):
@@ -162,7 +180,10 @@ def test_cella_stage_seeds_the_install_the_builder_and_the_rootfs(tmp_path, monk
     monkeypatch.setattr(driver.Path, "home", staticmethod(lambda: home))
     monkeypatch.setattr(driver, "ensure_rootfs_builder_image", lambda: driver.ROOTFS_BUILDER_IMAGE)
     monkeypatch.setattr(driver.subprocess, "run", lambda argv, **kw: (Path(argv[3]).write_bytes(b"tar"), None)[1])
-    monkeypatch.setattr(driver, "prepare_build_context", lambda **kw: type("C", (), {"context_dir": kw["context_dir"], "build_file": kw["context_dir"] / "Dockerfile"})())
+    nested = []
+    monkeypatch.setattr(driver, "nest_terminator_golden", lambda golden_dir, outer_ca: nested.append((golden_dir, outer_ca)))
+    contexts = []
+    monkeypatch.setattr(driver, "prepare_build_context", lambda **kw: (contexts.append(kw), type("C", (), {"context_dir": kw["context_dir"], "build_file": kw["context_dir"] / "Dockerfile"})())[1])
     monkeypatch.setattr(driver, "build_image", lambda **kw: None)
     monkeypatch.setattr(driver, "inspect_image", lambda tag: {"Id": "sha256:abc", "Config": {"Env": ["A=1"], "WorkingDir": "/app"}})
     monkeypatch.setattr(driver, "export_rootfs_tar", lambda **kw: kw["dest_tar"].write_bytes(b"src"))
@@ -181,10 +202,23 @@ def test_cella_stage_seeds_the_install_the_builder_and_the_rootfs(tmp_path, monk
         [driver.CELLA_ROOTFS_TAR, driver.CELLA_IMAGE_CONFIG]
     )
     assert json.loads((seed / "rootfs" / driver.CELLA_IMAGE_CONFIG).read_text())["WorkingDir"] == "/app"
+    # The seeded terminator copy is nested against the host's outer CA.
+    assert nested == [(seed / "home" / "rootfs" / "terminator", home / ".cella" / "rootfs" / "terminator" / "ca.pem")]
+    assert contexts[-1]["agent_install_spec"] is None  # the oracle installs nothing
+
+    # A model agent: its install rides into the inner rootfs, built here.
+    shutil.rmtree(tmp_path / "ctx")
+    assert driver.CELLA.stage(tmp_path / "t", tmp_path / "ctx", "mini-swe-agent") is None
+    assert contexts[-1]["agent_install_spec"] is not None
 
 
 @ENVS
-def test_boot_layer_is_valid_and_enables_the_unit(env):
+def test_boot_layer_is_valid_and_enables_the_unit(env, tmp_path, monkeypatch):
+    # The layer bakes the host's pair CA; the test brings its own so it
+    # never depends on the host's goldens being present.
+    ca = tmp_path / "ca.pem"
+    ca.write_bytes(b"PAIR-CA\n")
+    monkeypatch.setattr(driver, "pair_ca_path", lambda home: ca)
     layer = driver.boot_layer(f"examples/smoke/cella-runner-{env.name}", env=env, agent="oracle")
     validate_boot_layer(layer)  # raises if not installable
 

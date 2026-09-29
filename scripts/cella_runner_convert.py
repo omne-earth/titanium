@@ -10,9 +10,9 @@ lands in the guest, never on the host.
 The runner is parametric over that inner environment (`InnerEnv`): the guest
 skeleton -- base image, uv, the baked tree, the boot oneshot, the member
 prelude, the phases, the reset -- is common, and each environment supplies
-only its own part of it: `docker`, the container boundary, and
-`cella`, cella hosting cella, which runs the oracle only (its stage hook
-refuses a model agent by name; docs/runners/CELLA-RUNNER.md §5.2).
+only its own part of it: `docker`, the container boundary, and `cella`,
+cella hosting cella, whose inner pair chains its inference line through the
+outer pair (docs/runners/CELLA-RUNNER.md §5.2).
 
 This driver is the bake half. It exists as Python rather than shell for the
 same reason `scripts/smoke/cella_rootfs_convert.py` does:
@@ -38,6 +38,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,7 @@ from titanium.environments.agent_setup import (
 )
 from titanium.environments.cella.boot_layer import BootLayer, GuestFile, GuestSymlink
 from titanium.environments.cella.constants import (
+    APPLIANCE_WIRE_ADDRESS,
     ROOTFS_BUILDER_IMAGE,
     MEMBER_CA_PATH,
     REPLY_PORT_HIGH,
@@ -72,7 +74,8 @@ from titanium.environments.cella.podman import (
     new_build_tag,
     untag_image,
 )
-from titanium.environments.cella.rootfs import ensure_rootfs_builder_image
+from titanium.environments.cella.policy import Policy
+from titanium.environments.cella.rootfs import ensure_rootfs_builder_image, sha3_256_file
 from titanium.environments.cella.systemd_boot import (
     plan_systemd_provisioning,
     prepare_systemd_rootfs,
@@ -93,7 +96,25 @@ from titanium.environments.cella.terminator import (
 INFERENCE_HOSTS = ["openrouter.ai"]
 
 
-def write_policies(out_dir: Path) -> tuple[Path, Path]:
+def world_hosts(task_dir: Path) -> list[str]:
+    """What the outer appliance grants by name: the inference line, and the
+    world the inner task declares in its own cella.policy. Exactly what the
+    inner run needs and nothing more: nested, the inner task's crossings
+    arrive at the outer border as the guest's own, named, and an outer
+    policy narrower than the inner contract would refuse them; one wider is
+    an exit an escapee in the guest could use."""
+    hosts = set(INFERENCE_HOSTS)
+    policy = task_dir / "environment" / "cella.policy"
+    if policy.is_file():
+        hosts.update(
+            grant.host
+            for grant in Policy.parse(policy.read_text()).grants
+            if grant.host and grant.verb == "release"
+        )
+    return sorted(hosts)
+
+
+def write_policies(out_dir: Path, task_dir: Path) -> tuple[Path, Path]:
     """The pair's two borders, composed by the same helpers the cella
     environment uses: the member's fixed wire grants, and the appliance's
     world leg judged by name."""
@@ -101,7 +122,7 @@ def write_policies(out_dir: Path) -> tuple[Path, Path]:
     member = out_dir / "member.policy"
     appliance = out_dir / "appliance.policy"
     member.write_text(member_policy_text())
-    appliance.write_text(appliance_border_policy_text(INFERENCE_HOSTS))
+    appliance.write_text(appliance_border_policy_text(world_hosts(task_dir)))
     return member, appliance
 
 # Where the baked workspace lands in the guest, and where the inner titanium
@@ -513,15 +534,92 @@ CELLA_ROOTFS_TAR = "state-0000.tar"
 CELLA_IMAGE_CONFIG = "image-config.json"
 CELLA_BUILDER_TAR = "builder.tar"
 CELLA_GOLDENS = (("kernel", "canonical"), ("rootfs", "cella"), ("rootfs", "terminator"))
-# cella's terminator verifies the world against webpki's roots only. An inner
-# appliance dialing through the outer appliance would meet a leaf minted from
-# the outer pair CA and refuse it, so no inference line can chain through two
-# membranes until the terminator takes an extra root. The oracle needs none.
-CELLA_ORACLE_ONLY = (
-    "inner environment 'cella' runs the oracle only: cella's terminator "
-    "trusts webpki's roots alone, so an inner appliance cannot chain through "
-    "the outer membrane (docs/runners/CELLA-RUNNER.md §5.2)"
-)
+# The inner pair, nested in the guest. Its wire is pair 1 (the outer's is
+# pair 0), and its appliance's resolver and world are the outer appliance:
+# every inner world crossing leaves the guest as the guest's own, judged by
+# name at the outer border. The inner terminator is titanium's copy of the
+# golden with its own fresh pair CA (P-384; the inner mint never shares the
+# outer's key) and the outer pair CA as the one extra root its world leg
+# trusts -- the trust runs inward only. cella's init reads the pair and the
+# resolver from /etc/cella/terminator.defaults, and the extra root from
+# /etc/cella/extra-roots.pem (cella docs/TLS-TERMINATOR.md, "Baked defaults").
+CELLA_INNER_PAIR = 1
+CELLA_INNER_BOOT_MARGIN_SEC = 900
+CELLA_INNER_EXTRACT_MIB_PER_SEC = 1
+CELLA_INNER_CA_SUBJECT = "/CN=titanium pair CA nested"
+CELLA_INNER_CA_DAYS = "3650"
+
+
+def _mint_inner_ca(work: Path) -> tuple[Path, Path]:
+    """A fresh pair CA for the inner terminator, in the golden's own shape:
+    ECDSA P-384 with SHA-384, CA:TRUE pathlen 0, KeyCertSign + CrlSign,
+    self-signed, a PKCS8 key. Returns (cert.pem, key.pem)."""
+    cert, key = work / "pair-ca.pem", work / "pair-ca.key"
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-nodes", "-sha384", "-days", CELLA_INNER_CA_DAYS,
+            "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-384",
+            "-subj", CELLA_INNER_CA_SUBJECT,
+            "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            "-keyout", str(key), "-out", str(cert),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return cert, key
+
+
+def _debugfs(image: Path, *requests: str) -> None:
+    """Write into an ext4 image without mounting it: one debugfs request per
+    line, as the operator (the image is the run's own copy)."""
+    subprocess.run(
+        ["debugfs", "-w", "-f", "-", str(image)],
+        input="\n".join(requests) + "\n",
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def nest_terminator_golden(golden_dir: Path, outer_ca_pem: Path) -> None:
+    """Make *golden_dir* (the run's copy of cella's terminator golden) the
+    inner pair's appliance: a fresh pair CA in its /etc/cella, the outer pair
+    CA as its one extra root, the baked defaults that put it on pair 1 with
+    the outer appliance as its resolver, and a manifest that records all of
+    it. The golden's ca.pem beside the image becomes the fresh CA -- what the
+    inner titanium bakes into its members -- and the outer CA never enters
+    the inner trust store: the chain runs inward only."""
+    image = golden_dir / "rootfs.ext4"
+    work = golden_dir / "nest"
+    work.mkdir()
+    cert, key = _mint_inner_ca(work)
+    defaults = work / "terminator.defaults"
+    defaults.write_text(
+        f"pair={CELLA_INNER_PAIR}\nupstream_dns={APPLIANCE_WIRE_ADDRESS}\n"
+    )
+    _debugfs(
+        image,
+        "rm /etc/cella/pair-ca.pem",
+        "rm /etc/cella/pair-ca.key",
+        f"write {cert} /etc/cella/pair-ca.pem",
+        f"write {key} /etc/cella/pair-ca.key",
+        f"write {outer_ca_pem} /etc/cella/extra-roots.pem",
+        f"write {defaults} /etc/cella/terminator.defaults",
+    )
+    shutil.copyfile(cert, golden_dir / "ca.pem")
+    manifest = golden_dir / "golden.json"
+    manifest.chmod(0o644)
+    record = json.loads(manifest.read_text())
+    record["sha3_256"] = sha3_256_file(image)
+    record["bytes"] = image.stat().st_size
+    record["built_epoch"] = int(time.time())
+    record["input_pair-ca.pem"] = sha3_256_file(cert)
+    record["input_extra-roots.pem"] = sha3_256_file(outer_ca_pem)
+    record["input_terminator.defaults"] = sha3_256_file(defaults)
+    manifest.write_text(json.dumps(record, indent=2) + "\n")
+    manifest.chmod(0o444)
+    shutil.rmtree(work)
 
 
 def _cella_dockerfile_stanza() -> str:
@@ -606,6 +704,16 @@ export CELLA_HOME={CELLA_GUEST_HOME}
 # inner run adopts it and builds no base.
 export TITANIUM_CELLA_ROOTFS_TAR={CELLA_GUEST_SEED}/rootfs/{CELLA_ROOTFS_TAR}
 export TITANIUM_CELLA_IMAGE_CONFIG={CELLA_GUEST_SEED}/rootfs/{CELLA_IMAGE_CONFIG}
+# The inner pair: pair 1, its appliance resolving and reaching the world
+# through the outer appliance -- the same two the nested golden bakes.
+export TITANIUM_CELLA_PAIR={CELLA_INNER_PAIR}
+export TITANIUM_CELLA_UPSTREAM_DNS={APPLIANCE_WIRE_ADDRESS}
+# The inner machines' boot margin: mkfs, create and a nested one-vCPU boot
+# take minutes here, not the seconds the host default covers.
+export TITANIUM_CELLA_BOOT_MARGIN_SEC={CELLA_INNER_BOOT_MARGIN_SEC}
+# cella's extract budgets the evidence at a host disk's rate (4 MiB/s);
+# here the extractor reads through two VMMs on one vCPU.
+export CELLA_EXTRACT_MIB_PER_SEC={CELLA_INNER_EXTRACT_MIB_PER_SEC}
 """
 
 
@@ -617,8 +725,6 @@ def _cella_stage(task_dir: Path, context: Path, agent: str) -> str | None:
     """cella's part of the staged context: the field install, the goldens,
     the builder image, and the task's provisioned rootfs tar with the image
     config the inner environment reads beside it."""
-    if agent != AgentName.ORACLE.value:
-        raise SystemExit(CELLA_ORACLE_ONLY)
     seed = context / CELLA_SEED_SUBDIR
     home = Path.home() / ".cella"
     bins = seed / "bin"
@@ -627,6 +733,7 @@ def _cella_stage(task_dir: Path, context: Path, agent: str) -> str | None:
         shutil.copy2(binary, bins / binary.name)
     for axis, flavor in CELLA_GOLDENS:
         shutil.copytree(home / axis / flavor, seed / "home" / axis / flavor)
+    nest_terminator_golden(seed / "home" / "rootfs" / "terminator", home / "rootfs" / "terminator" / "ca.pem")
 
     ensure_rootfs_builder_image()
     subprocess.run(
@@ -644,7 +751,7 @@ def _cella_stage(task_dir: Path, context: Path, agent: str) -> str | None:
         prepared_context = prepare_build_context(
             environment_dir=task_dir / "environment",
             context_dir=work / "context",
-            agent_install_spec=None,
+            agent_install_spec=agent_install_spec(agent),
             agent_user=(config.get("agent") or {}).get("user"),
         )
         build_image(
@@ -981,7 +1088,7 @@ def main() -> int:
     env = INNER_ENVS[args.inner_env]
 
     if args.policy_dir:
-        member, appliance = write_policies(args.policy_dir)
+        member, appliance = write_policies(args.policy_dir, args.workspace / args.inner_task)
         print(f"[cella-runner] policies : {member} {appliance}")
 
     # The seed plan first, so an environment that cannot host this task

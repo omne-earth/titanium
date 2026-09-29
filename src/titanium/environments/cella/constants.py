@@ -8,6 +8,9 @@ here is derived at runtime -- a constant that needs computing is not a
 constant.
 """
 
+import os
+
+
 # --- membrane windows (keep_open, as policy duration strings) ----------
 # The member-to-appliance plumbing hops: pre-planted at stream open and
 # held for the machine's whole life -- the member freezes only on a
@@ -31,8 +34,11 @@ RESOLVER_ATTEMPTS = 3
 # The floor beneath tasks that declare no phase timeout; never the
 # figure a declaring task is held to.
 CELLA_EXEC_TIMEOUT = 1800.0
-# How long past the phases' sum the guest gets to boot and reset.
-BOOT_MARGIN_SEC = 180.0
+# How long past the phases' sum the guest gets to boot and reset. On the
+# host that is seconds; nested in a cella-runner guest the flavor's mkfs,
+# the create and a one-vCPU boot run into minutes, so the guest's run
+# script raises it (docs/runners/CELLA-RUNNER.md §5.2).
+BOOT_MARGIN_SEC = float(os.environ.get("TITANIUM_CELLA_BOOT_MARGIN_SEC", "180"))
 # One cella verb's own budget (create/start/stop/thaw/...).
 CELLA_VERB_TIMEOUT_SEC = 120.0
 POWEROFF_GRACE_SEC = 3.0
@@ -55,13 +61,25 @@ REFUSAL_WHY_NO_GRANT = "no cella.policy grants this crossing"
 RECORDER_KEEP_OPEN = 86400
 
 # --- the wire plane (the terminated pair) --------------------------------
-# Pair-0 addresses: the golden's own boot defaults -- these must equal
-# what cella scripts/build/rootfs-terminator.sh writes at boot.
-APPLIANCE_WIRE_ADDRESS = "10.77.0.1"
-MEMBER_WIRE_ADDRESS = "10.77.0.2"
+# The pair number and the appliance's upstream resolver. Pair 0 with the
+# public resolver is the golden's own boot default -- what cella's
+# scripts/build/rootfs-terminator.sh writes at boot -- and the host runs
+# there. A run nested inside a cella-runner guest is pair 1, and its
+# appliance's world is the outer appliance (docs/runners/CELLA-RUNNER.md
+# §5.2): the guest's run script names both here, and the nested terminator
+# golden carries the same two in /etc/cella/terminator.defaults.
+WIRE_PAIR = int(os.environ.get("TITANIUM_CELLA_PAIR", "0"))
+APPLIANCE_WIRE_ADDRESS = f"10.77.{WIRE_PAIR}.1"
+MEMBER_WIRE_ADDRESS = f"10.77.{WIRE_PAIR}.2"
 WIRE_PREFIX = 24
 LISTEN_PORTS = (443, 80)
-UPSTREAM_DNS = "9.9.9.9"
+UPSTREAM_DNS = os.environ.get("TITANIUM_CELLA_UPSTREAM_DNS", "9.9.9.9")
+# The in-process pump listens on loopback in this range, never on an
+# ephemeral port: inside a cella-runner guest the ephemeral range *is* the
+# eight-port reply window, and a pump on one of the eight would spend it
+# for the whole trial.
+PUMP_PORT_LOW = 42000
+PUMP_PORT_HIGH = 42099
 # The consistent reply port window: eight exact, nameable grants
 # instead of an unnameable ephemeral range. Eight is the law, not a
 # tunable: cella pins WORLD_PERMITS and the golden's

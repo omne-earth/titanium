@@ -65,6 +65,8 @@ from grpclib.const import Cardinality, Handler
 from grpclib.server import Server, Stream
 
 from titanium.environments.cella.constants import (
+    PUMP_PORT_HIGH,
+    PUMP_PORT_LOW,
     DECIDE_METHOD,
     DIRECTION_OUTGOING,
     RECORDER_KEEP_OPEN,
@@ -385,6 +387,21 @@ def build_judge(policy_path: Path | None, dry_run: bool) -> PolicyJudge:
     if policy_path is not None and policy_path.exists():
         policy = Policy.load(policy_path)
     return PolicyJudge(policy=policy)
+
+
+def free_pump_port() -> int:
+    """A free loopback port in the pump range (constants), by binding
+    it once; the caller binds it again at once. Never port 0."""
+    import socket
+
+    for port in range(PUMP_PORT_LOW, PUMP_PORT_HIGH + 1):
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise OSError(f"no free pump port in {PUMP_PORT_LOW}-{PUMP_PORT_HIGH}")
 
 
 def bound_port(server: Server) -> int:

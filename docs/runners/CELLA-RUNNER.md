@@ -58,17 +58,16 @@ each environment supplies only its own part of it (`InnerEnv` in
 | Inner environment | Nesting cost         | Status                                  |
 |-------------------|----------------------|-----------------------------------------|
 | `docker`          | none (namespaces)    | **supported** — the smoke               |
-| `cella`           | nested KVM           | **supported** — the oracle; a model agent is refused by name (§5.2) |
+| `cella`           | nested KVM           | **supported** — the inner pair chained through the outer (§5.2) |
 | `gvisor` (runsc)  | none (userspace)     | possible; not built yet                 |
 
 `docker` is the container boundary. `cella` is cella
 hosting cella: nested KVM is proven in the cella repo (its
 `docs/NESTED-BOOT.md`, three hypervisor layers deep), and the guest
-carries the field install and the goldens (§5.2). It runs the oracle
-only: cella's terminator trusts webpki's roots alone, so an inner
-appliance cannot chain an inference line through the outer membrane; the
-script and the driver both refuse a model agent with that cause, and the
-Make target pins the oracle. `gvisor` is nestable at no cost (a
+carries the field install and the goldens (§5.2). A model agent's
+inference line is terminated twice, once per pair: the inner appliance
+trusts the outer pair CA as its one extra root, and the outer never
+learns the inner's (§5.2). `gvisor` is nestable at no cost (a
 userspace kernel, no hypervisor) and is not built, because the reflexive
 image would need runsc provisioned.
 
@@ -302,16 +301,45 @@ half (§4). What the guest carries for it:
   `disk.img` (cella's sparse copy: without it a 4 GiB flavor was a
   4 GiB write through virtio-blk on one vCPU, past titanium's 120 s
   verb timeout).
-- **The oracle only.** cella's terminator verifies the world against
-  webpki's roots (`cella-terminator/src/proxy.rs`), with no way to add
-  one. An inner appliance dialing through the outer appliance meets a
-  leaf minted from the outer pair CA and refuses it, so no inference
-  line can chain through two membranes. The oracle stands no appliance
-  (an airgapped trial is `--net none` inside), so it needs none of this.
-  A model agent is refused by name at the script and in the driver's
-  stage hook. Lifting this is a cella change: an extra-roots input on
-  the terminator, and then the outer pair CA in the inner terminator's
-  copy of it.
+- **The nested terminator.** A paired inner trial stands its own
+  appliance, and that appliance's world is the outer appliance: its
+  upstream presents a leaf from the outer pair CA, which the public
+  roots do not know. So the bake makes the guest's copy of the
+  terminator golden the inner pair's own (`nest_terminator_golden`):
+  a fresh pair CA minted on the host (ECDSA P-384, the golden's own
+  shape; the inner mint never shares the outer's key), the outer pair
+  CA written in as `/etc/cella/extra-roots.pem` — the one extra root
+  the inner world leg trusts beside the public ones (cella's t12) —
+  and `/etc/cella/terminator.defaults` putting it on pair 1 with the
+  outer appliance as its resolver; the manifest records all three. The
+  trust runs inward only: the outer trusts nothing of the inner. The
+  inner titanium reads the same two facts from `TITANIUM_CELLA_PAIR`
+  and `TITANIUM_CELLA_UPSTREAM_DNS` (constants.py), which the run
+  script exports, so its member lives on `10.77.1.0/24` and its
+  appliance policy grants the outer appliance as the resolver. Every
+  inner world crossing leaves the guest as the guest's own, named, and
+  the outer appliance judges it by name (§9).
+- **The pump's port.** The outer prelude pins the guest's ephemeral
+  range to the eight-port reply window, guest-wide; the inner titanium's
+  in-process pumps therefore bind an explicit loopback port
+  (`PUMP_PORT_LOW..HIGH`, outside the window) rather than an ephemeral
+  one, or two pumps would spend a quarter of the window for the trial.
+- **The boot margin.** The inner titanium waits for each machine's
+  reset for the phases' sum plus `BOOT_MARGIN_SEC`, 180 s on the host,
+  where a boot is seconds. Nested, the flavor's `mkfs`, the `create`
+  and a one-vCPU boot take minutes and ate the whole margin — the
+  first model-agent run was cut off 124 s short of its own timeout. The
+  run script exports `TITANIUM_CELLA_BOOT_MARGIN_SEC=900`.
+- **The extract budget.** cella's `extract` gives its helper VM 60 s
+  plus the evidence at 4 MiB/s, a host disk's rate; nested, the
+  extractor reads the member's disk through two VMMs on one vCPU, and
+  a model agent's rootfs (its install baked in) ran past that budget.
+  The run script exports `CELLA_EXTRACT_MIB_PER_SEC=1`, cella's knob
+  for the rate. titanium's own bound on that verb is the task's
+  `build_timeout_sec`, so an inner cella task with a model agent
+  declares it for the nested extract (the example: 7200); the outer
+  deadline is 10800 s to match. A model-agent run of the cella leg is
+  hours, not minutes: nested block I/O is the cost of the depth.
 
 ## 6. Who runs
 
@@ -388,10 +416,9 @@ with a named cause.
 4. **The environment's guest kernel exists.** Run
    `make .cella-runner-kernel-<env>` (§4). `smoke-cella-runner-<env>`
    depends on it.
-5. **The inner environment can run this agent.** `--inner-env` selects
-   the environment; it is a runner choice, not a task property. `cella`
-   with a model agent is refused by name before anything is stood
-   (§5.2); an unknown environment is refused with the valid list.
+5. **The inner environment is named.** `--inner-env` selects it; it is
+   a runner choice, not a task property. An unknown environment is
+   refused with the valid list before anything is stood.
 
 ## 9. The example tasks and the policy
 
@@ -404,24 +431,28 @@ for an offline verifier to pin:
   reachable, PID 1 not the guest's init, egress denied).
 - `cella-runner-cella` reads the VM boundary from the inside, one level
   down; the verifier asserts depth (PID 1 is systemd, a hypervisor above,
-  no `/dev/kvm` of its own, loopback only, egress denied).
+  no `/dev/kvm` of its own, no nic but loopback and — in a paired trial —
+  the wire to the appliance, egress denied).
 
 The inner agent is `TITANIUM_CELLA_RUNNER_AGENT` (default
 `mini-swe-agent`, with the model and key from the baked `.secrets`);
 `TITANIUM_CELLA_RUNNER_AGENT=oracle` runs the probe with no model and no
-inference egress at all. The `cella` targets pin the oracle (§5.2).
+inference egress at all.
 
-The membrane policy is the runner's, not the inner task's, because the
-agent's inference line is a property of the runner, not of any one
-task. Its one input is `INFERENCE_HOSTS` in
-`scripts/cella_runner_convert.py`, which today names OpenRouter only; the
-driver composes the member and appliance policies from it (§7) and
-writes them beside the run. It grants the LLM API egress **only**: the
-crossing to OpenRouter on `:443/tcp` (and `:80`) with a `keep_open`
-window, and nothing else. Every other crossing stays refused, on the
-record. This is the isolation the runner is for (§1): the agent reaches
-its model and nothing else, so the run measures the model's own
-capability, not what it can pull from the network.
+The outer membrane's policy is the runner's, composed from two inputs
+and nothing else (`world_hosts` in `scripts/cella_runner_convert.py`):
+`INFERENCE_HOSTS`, the agent's inference line (OpenRouter), and the
+world names the inner task itself releases in its `environment/
+cella.policy`, when it has one. That union is exactly what the inner
+run needs: nested, the inner task's crossings arrive at the outer
+border as the guest's own, named, so an outer policy narrower than
+the inner contract would refuse traffic the task declared, and one
+wider would be an exit an escapee in the guest could use. For a task
+with no policy of its own (both example tasks) the outer grants the
+inference line only, on `:443/tcp` (and `:80`) with a `keep_open`
+window; every other crossing stays refused, on the record. That is the
+isolation the runner is for (§1): the agent reaches its model, and the
+task its declared world, and nothing else.
 
 Do not widen the host list from guesswork. Collect the real crossings
 against one live run and review them first:
@@ -442,12 +473,22 @@ collection recipe (§3.1); this document does not repeat it.
 
 `smoke-cella-runner` is the aggregate of every inner environment with a
 live pass on record: `smoke-cella-runner-docker` and
-`smoke-cella-runner-cella` (the oracle against
-`examples/smoke/cella-runner-cella`; the recipe pins `oracle`, §5.2).
+`smoke-cella-runner-cella` (against `examples/smoke/cella-runner-cella`).
 Each target passes its environment to the script and picks that
-environment's example task. Expect about half an hour for the pair:
-each leg bakes a 10 GiB reflexive image, boots it, and compresses it
-for the payload.
+environment's example task. Expect about half an hour for the docker
+leg and hours for the cella leg with a model agent (§5.2): each bakes
+a 10 GiB reflexive image, boots it, and compresses it for the payload.
+
+`smoke-cella-runner-cella-baseline` runs the cella leg's inner task
+through the cella environment on the host — no outer guest, the same
+task, publish, boot, extract and verifier — once with the oracle
+(`-oracle`, the clean column) and once with `TITANIUM_AGENT`
+(`-agent`, the noisy one), one at a time, into
+`.run/jobs/<backend>/smoke-cella-runner-cella-baseline-<which>/`. Its
+trial time against the nested run's `titanium/result/run.log` is the
+nesting's cost, stage by stage, with the agent phase as the noisy
+column. cella only: the docker leg's host counterpart is the ordinary
+docker environment, not a runner shape.
 
 `smoke-cella-runner-<env>` boots the reflexive VM, runs the inner task
 inside it in that environment, extracts the payload, and reaps. It depends on
@@ -533,10 +574,16 @@ What the task must be:
   the oracle a `solution/`; the same contract as any titanium task. The
   bake builds its image on the host, where the network is, so its
   Dockerfile may fetch — the guest never builds it.
-- **For `cella`:** the oracle only, and `allow_internet = false`, so
-  the inner machine is `--net none` and no inner appliance is stood
-  (§5.2). Its `storage_mb` is the inner flavor's size; what the rootfs
-  holds is what is copied (§5.2, disk).
+- **For `cella`:** any agent titanium knows; a model agent's line is
+  terminated twice, once per pair (§5.2). With `allow_internet =
+  false` and the oracle the inner machine is `--net none` and no inner
+  appliance is stood. A task's own `cella.policy` names pass both
+  membranes (§9). Its `storage_mb` is the inner flavor's size; what
+  the rootfs holds is what is copied (§5.2, disk). Its
+  `build_timeout_sec` also bounds the state extract, which nested
+  takes tens of minutes for a rootfs with an agent install (§5.2), and
+  its `[agent] timeout_sec` should allow for every step paying two
+  membranes (the example: 1800).
 - **For `docker`:** any agent titanium knows. A model agent gets its
   model and key from the baked `.secrets` (`OPENROUTER_MODEL`,
   `OPENROUTER_API_KEY`), and reaches it through the membrane and
@@ -547,10 +594,10 @@ The knobs, all environment variables on the `make` line:
 | Knob | Default | What |
 |------|---------|------|
 | `CELLA_RUNNER_TASK` | `examples/smoke/cella-runner-<env>` | the inner task, repo-relative |
-| `TITANIUM_AGENT` | `mini-swe-agent` | the inner agent (`docker`; `cella` pins `oracle`) |
+| `TITANIUM_AGENT` | `mini-swe-agent` | the inner agent, for either environment |
 | `TITANIUM_CELLA_RUNNER_MEM_MB` | 4096 docker, 6144 cella | the guest's memory ceiling |
 | `TITANIUM_CELLA_RUNNER_EXT4_BYTES` | 10 GiB | the guest's disk |
-| `TITANIUM_CELLA_RUNNER_TIMEOUT` | 1800 | seconds to wait for the guest's reset |
+| `TITANIUM_CELLA_RUNNER_TIMEOUT` | 1800 docker, 10800 cella | seconds to wait for the guest's reset; on a miss the guest is stopped and its partial payload extracted |
 | `TITANIUM_CELLA_WORKDIR` | `/var/tmp` | where the bake and the run's `CELLA_HOME` live |
 | `CELLA_RUNNER_KEEP_ROOTFS` | `true` | keep the guest rootfs in the payload (`false` for fast iteration) |
 | `CELLA_RUNNER_DRY_RUN` | `false` | collect the world crossings instead of enforcing (§9) |
@@ -570,9 +617,9 @@ same provisioning the targets depend on (`make .cella`,
 
 * It does not open a channel into a live guest. The cella model is boot,
   run, extract, reset. There is no exec-into.
-* It does not run a model agent under the `cella` inner environment
-  (§5.2, §8).
 * It does not run the `cella` leg's inner titanium as root (§5.2).
+* It does not let the outer pair trust the inner's CA: the chain runs
+  inward only (§5.2).
 * It does not host the pump in its own process (§7).
 * It does not copy the gitignored files into the rootfs (§3).
 * It does not add a titanium `--env`. It is a runner, not an environment;

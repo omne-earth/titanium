@@ -718,3 +718,36 @@ def test_a_prebaked_rootfs_needs_both_names(tmp_path, monkeypatch):
     (tmp_path / "task.toml").write_text("")
     with pytest.raises(CellaError, match="only one is set"):
         env._start_blocking(force_build=False)
+
+
+def test_the_pump_binds_outside_the_reply_window():
+    # Inside a cella-runner guest the ephemeral range is the eight-port
+    # window; the pump takes a loopback port of its own instead.
+    from titanium.environments.cella.constants import (
+        PUMP_PORT_HIGH,
+        PUMP_PORT_LOW,
+        REPLY_PORT_HIGH,
+        REPLY_PORT_LOW,
+    )
+    from titanium.environments.cella.engine import free_pump_port
+
+    port = free_pump_port()
+    assert PUMP_PORT_LOW <= port <= PUMP_PORT_HIGH
+    assert not (REPLY_PORT_LOW <= port <= REPLY_PORT_HIGH)
+
+
+def test_the_pair_knobs_move_the_wire_and_the_resolver():
+    # Pair 1 with the outer appliance as resolver is what a nested run
+    # exports; the module reads both at import, so ask a fresh interpreter.
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ, TITANIUM_CELLA_PAIR="1", TITANIUM_CELLA_UPSTREAM_DNS="10.77.0.1")
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from titanium.environments.cella.constants import APPLIANCE_WIRE_ADDRESS as a, "
+         "MEMBER_WIRE_ADDRESS as m, UPSTREAM_DNS as u; print(a, m, u)"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.split() == ["10.77.1.1", "10.77.1.2", "10.77.0.1"]

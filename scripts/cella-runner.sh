@@ -5,8 +5,7 @@
 #
 #   <inner-task>      repo-relative path of a task with a task.toml
 #   <inner-env>       the environment the inner run drives in the guest:
-#                     docker, or cella (the oracle only; a model agent is
-#                     refused by name, exit 2 -- CELLA-RUNNER.md §5.2)
+#                     docker or cella (CELLA-RUNNER.md §2)
 #   jobs-dir          the home for this runner's jobs (default:
 #                     ./.run/cella-runner/<inner-task-basename>). Each run lands
 #                     in its own <jobs-dir>/<YYYY-MM-DD__HH-MM-SS>, the job name
@@ -62,7 +61,13 @@ case "$INNER_ENV" in
     *)     _MEM_DEFAULT=4096 ;;
 esac
 GUEST_MEM_MB="${TITANIUM_CELLA_RUNNER_MEM_MB:-$_MEM_DEFAULT}"
-BOOT_TIMEOUT_SECS="${TITANIUM_CELLA_RUNNER_TIMEOUT:-1800}"
+# The wait for the guest's reset. A nested run boots a VM inside the VM, and
+# each of its machines pays mkfs, create and a one-vCPU boot in minutes.
+case "$INNER_ENV" in
+    cella) _TIMEOUT_DEFAULT=10800 ;;
+    *)     _TIMEOUT_DEFAULT=1800 ;;
+esac
+BOOT_TIMEOUT_SECS="${TITANIUM_CELLA_RUNNER_TIMEOUT:-$_TIMEOUT_DEFAULT}"
 # The inner agent. Its build-time install (uv, PyPI) is baked on the host,
 # since the membrane grants the inference line only.
 AGENT="${TITANIUM_CELLA_RUNNER_AGENT:-mini-swe-agent}"
@@ -121,15 +126,9 @@ trap teardown EXIT
 step "step 0: preconditions"
 
 # The inner environment is a runner choice, checked before anything is stood.
-# cella runs the oracle only: its terminator trusts webpki's roots alone, so
-# an inner appliance cannot chain an inference line through the outer
-# membrane (CELLA-RUNNER.md §5.2). The driver refuses the same way; this is
-# that refusal before the interpreter and cella are even looked for.
 case "$INNER_ENV" in
-    docker) ;;
-    cella)  [ "$AGENT" = oracle ] \
-                || skip "inner environment 'cella' runs the oracle only (TITANIUM_AGENT=oracle); see CELLA-RUNNER.md §5.2" ;;
-    *)      skip "unknown inner environment '$INNER_ENV' (docker|cella)" ;;
+    docker|cella) ;;
+    *) skip "unknown inner environment '$INNER_ENV' (docker|cella)" ;;
 esac
 [ -x "$PY" ] || skip "no interpreter at $PY -- run: make sync"
 [ -f "$ROOT/$INNER_TASK/task.toml" ] || skip "no task at $INNER_TASK ($INNER_TASK/task.toml not found)"
@@ -408,6 +407,15 @@ if [ -n "$reason" ]; then
     echo "--- vmm.log (tail) ---"; tail -30 "$M/vmm.log" 2>/dev/null | sed 's/^/   /'
     if [ "$LAB" = "true" ]; then
         echo "--- console.log (tail) ---"; tail -60 "$M/console.log" 2>/dev/null | sed 's/^/   /'
+    fi
+    # The guest's own record of how far it got (phases.log, run.log, the
+    # inner trial so far) is on its disk; stop it and take it, best effort,
+    # so a stall leaves evidence and not only a deadline.
+    "$BIN" stop "$VM" >/dev/null 2>&1
+    if "$BIN" extract "$VM" /titanium > "$WORK/payload.tar" 2>"$WORK/extract.err" \
+        && tar -C "$OUT" --delay-directory-restore -xf "$WORK/payload.tar" 2>/dev/null; then
+        note "partial payload extracted to $OUT (the run did not complete)"
+        [ -f "$OUT/titanium/result/phases.log" ] && { echo "--- phases.log ---"; sed 's/^/   /' "$OUT/titanium/result/phases.log"; }
     fi
     fail "$reason"
 fi
