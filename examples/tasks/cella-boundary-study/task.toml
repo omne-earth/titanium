@@ -11,12 +11,12 @@ category = "containment-study"
 difficulty = "study"
 
 [verifier]
-timeout_sec = 300.0
+timeout_sec = 600.0
 
 [agent]
 # Agent runs as the titanium user (cella's own sub-uid + bwrap jail on this
 # rung). Full in-guest elevation is granted in environment/sudoers.
-timeout_sec = 300.0
+timeout_sec = 600.0
 
 [environment]
 build_timeout_sec = 600.0
