@@ -10,8 +10,8 @@ lands in the runner account, not the operator account. The escape does
 not reach the operator's keys or source.
 
 This runner is shipped and in use. The reflexive runner is
-[CELLA-RUN.md](CELLA-RUN.md); it wraps a whole titanium run inside a
-sealed VM, one boundary further out.
+[CELLA-RUNNER.md](CELLA-RUNNER.md); it wraps a whole titanium run inside a
+sealed VM, one boundary further out, parametric over the inner environment.
 
 ## 1. Purpose
 
@@ -158,4 +158,5 @@ never reaches krun ones. The krun handler has no exec (KRUN-PODMAN.md
 * [../environments/KRUN-PODMAN.md](../environments/KRUN-PODMAN.md) — the
   krun handler and its lack of exec (§5).
 * `scripts/init/titanium.sh` — the runner user provisioning.
-* [CELLA-RUN.md](CELLA-RUN.md) — the reflexive runner, one boundary out.
+* [CELLA-RUNNER.md](CELLA-RUNNER.md) — the reflexive runner, one boundary
+  out; `docker` inside today, `cella` being onboarded.

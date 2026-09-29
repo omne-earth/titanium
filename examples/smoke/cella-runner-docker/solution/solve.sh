@@ -1,6 +1,6 @@
 #!/bin/bash
 # The inner probe. It runs inside a docker container that itself runs inside a
-# sealed cella VM (the cella-run runner). It reads the container boundary from
+# sealed cella VM (the cella-runner runner). It reads the container boundary from
 # the inside and reports what it reached. It attempts nothing destructive: a
 # boundary probe, not a break. Even a boundary that gave way would land the
 # probe in the cella guest, never on the host.

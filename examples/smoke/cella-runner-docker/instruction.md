@@ -1,7 +1,7 @@
-# The cella-run inner probe
+# The cella-runner inner probe
 
-Read this first: this is the **inner task** for the `cella-run` reflexive
-runner (docs/runners/CELLA-RUN.md). It runs inside a docker container that
+Read this first: this is the **inner task** for the `cella-runner` reflexive
+runner (docs/runners/CELLA-RUNNER.md). It runs inside a docker container that
 itself runs inside a sealed cella micro-VM. The runner bakes the whole
 workspace into that VM and boots it; a systemd oneshot runs `titanium run
 --env docker` against this task. A docker escape from here lands in the cella

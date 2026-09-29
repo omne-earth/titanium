@@ -1,4 +1,4 @@
-"""Verifier pins for the cella-run inner probe.
+"""Verifier pins for the cella-runner inner probe.
 
 The report is read as evidence. The claim under test is containment: the probe
 ran inside a docker container, and the container boundary held from the inside.

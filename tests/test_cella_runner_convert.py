@@ -1,13 +1,15 @@
-"""Offline unit gate for the cella-run bake driver (scripts/cella_run_convert.py).
+"""Offline unit gate for the cella-runner bake driver (scripts/cella_runner_convert.py).
 
 The driver is a script, not a package module, so it is loaded by path. These
 cover its pure decisions -- the staged file set, the reflexive Dockerfile, the
-run-on-boot script, and the boot layer -- without a podman build or a VM.
+run-on-boot script, the boot layer, and the inner-environment seam -- without
+a podman build or a VM.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,18 +20,22 @@ from titanium.environments.cella.boot_layer import (
     validate_boot_layer,
 )
 
-_DRIVER = Path(__file__).resolve().parents[1] / "scripts" / "cella_run_convert.py"
+_DRIVER = Path(__file__).resolve().parents[1] / "scripts" / "cella_runner_convert.py"
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location("cella_run_convert", _DRIVER)
+    spec = importlib.util.spec_from_file_location("cella_runner_convert", _DRIVER)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    # Registered before exec: a dataclass under `from __future__ import
+    # annotations` resolves its field types through sys.modules.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
 driver = _load()
+NOT_ONBOARDED = "inner environment 'cella' is not yet onboarded"
 
 
 def test_tracked_files_excludes_git_and_is_sorted(tmp_path):
@@ -52,23 +58,64 @@ def test_tracked_files_excludes_git_and_is_sorted(tmp_path):
     assert "ignored/c.txt" not in names  # gitignored, not baked
 
 
+def test_inner_env_lookup_by_name():
+    assert driver.INNER_ENVS["docker"] is driver.DOCKER
+    assert driver.INNER_ENVS["cella"] is driver.CELLA
+    assert set(driver.INNER_ENVS) == {"docker", "cella"}
+
+
 def test_reflexive_dockerfile_has_docker_uv_and_copy():
-    text = driver.reflexive_dockerfile()
+    text = driver.reflexive_dockerfile(driver.DOCKER)
     assert "docker.io" in text  # a daemon for the inner --env docker run
     assert "uv sync" in text  # titanium's >=3.12 floor via uv
     assert f"COPY . {driver.GUEST_WORKSPACE}" in text
+    assert text == driver.reflexive_dockerfile()  # docker is the default
 
 
 def test_run_script_names_the_task_and_ends_in_reset():
-    text = driver.run_script("examples/smoke/cella-run")
+    text = driver.run_script("examples/smoke/cella-runner-docker", env=driver.DOCKER)
     assert "--env docker" in text
-    assert f"{driver.GUEST_WORKSPACE}/examples/smoke/cella-run" in text
+    assert "--cpus ignore --memory ignore" in text  # the VM is the resource boundary
+    assert f"{driver.GUEST_WORKSPACE}/examples/smoke/cella-runner-docker" in text
     assert "reboot -f" in text  # the completion signal the host observes
     assert driver.RESULT_ROOT in text  # payload under the titanium result root
+    assert text == driver.run_script("examples/smoke/cella-runner-docker")
+
+
+def test_docker_stanzas_carry_no_cella_home():
+    # docker's guest has no inner cella: nothing of its home leaks in.
+    assert "CELLA_HOME" not in driver.reflexive_dockerfile(driver.DOCKER)
+    assert "CELLA_HOME" not in driver.run_script("t", env=driver.DOCKER)
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        lambda: driver.reflexive_dockerfile(driver.CELLA),
+        lambda: driver.run_script("t", env=driver.CELLA),
+        lambda: driver.boot_layer("t", env=driver.CELLA),
+        lambda: driver.CELLA.titanium_flags(),
+        lambda: driver.CELLA.seed_plan(Path("t")),
+        lambda: driver.CELLA.stage(Path("t"), Path("ctx"), "oracle"),
+    ],
+    ids=["dockerfile", "run_script", "boot_layer", "flags", "seed_plan", "stage"],
+)
+def test_cella_hooks_refuse_by_name(render):
+    with pytest.raises(SystemExit, match=NOT_ONBOARDED):
+        render()
+
+
+def test_stage_context_refuses_cella_after_the_tree_is_checked(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    _write_task(tmp_path / "t", "[environment]\n")
+    with pytest.raises(SystemExit, match=NOT_ONBOARDED):
+        driver.stage_context(tmp_path, "t", tmp_path / "ctx", env=driver.CELLA)
 
 
 def test_boot_layer_is_valid_and_enables_the_unit():
-    layer = driver.boot_layer("examples/smoke/cella-run")
+    layer = driver.boot_layer("examples/smoke/cella-runner-docker")
     validate_boot_layer(layer)  # raises if not installable
 
     files = {e.path: e for e in layer.entries if isinstance(e, GuestFile)}
@@ -96,7 +143,7 @@ def test_inner_base_images_skips_stages_and_scratch(tmp_path):
 
 
 def test_run_script_loads_seeded_images():
-    text = driver.run_script("examples/smoke/cella-run")
+    text = driver.run_script("examples/smoke/cella-runner-docker", env=driver.DOCKER)
     assert f"{driver.GUEST_WORKSPACE}/{driver.SEED_SUBDIR}/load.sh" in text
 
 
@@ -135,7 +182,7 @@ def test_stage_context_rejects_a_missing_task(tmp_path):
 
 
 def test_run_script_points_titanium_at_the_seeded_proxy_image():
-    text = driver.run_script("t")
+    text = driver.run_script("t", env=driver.DOCKER)
     assert f"TITANIUM_EGRESS_PROXY_IMAGE={driver.EGRESS_PROXY_IMAGE}" in text
 
 

@@ -196,7 +196,7 @@ def write_egress_proxy_build_context(proxy_dir: Path) -> Path:
     """The squid sidecar's build context: its Dockerfile and bootstrap.
 
     One home for the image, so a runner that must build it elsewhere (the
-    airgapped cella-run guest cannot ``apk add``) builds exactly this and
+    airgapped cella-runner guest cannot ``apk add``) builds exactly this and
     hands the result back through ``TITANIUM_EGRESS_PROXY_IMAGE``.
     """
     proxy_dir.mkdir(parents=True, exist_ok=True)

@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
-# cella-run.sh -- the reflexive runner (docs/runners/CELLA-RUN.md).
+# cella-runner.sh -- the reflexive runner (docs/runners/CELLA-RUNNER.md).
 #
-# Usage: cella-run.sh <inner-task> [jobs-dir]
+# Usage: cella-runner.sh <inner-task> <inner-env> [jobs-dir]
 #
 #   <inner-task>      repo-relative path of a task with a task.toml
+#   <inner-env>       the environment the inner run drives in the guest:
+#                     docker (supported) or cella (not yet onboarded; refused
+#                     by name, exit 2)
 #   jobs-dir          the home for this runner's jobs (default:
-#                     ./.run/cella-run/<inner-task-basename>). Each run lands
+#                     ./.run/cella-runner/<inner-task-basename>). Each run lands
 #                     in its own <jobs-dir>/<YYYY-MM-DD__HH-MM-SS>, the job name
 #                     titanium mints for a trial, so runs never overwrite each
-#                     other and a cella-run job lists beside the other smokes'.
+#                     other and a cella-runner job lists beside the other smokes'.
 #
 # It bakes the whole tracked workspace into one Cella micro-VM, boots it so a
-# systemd oneshot runs `titanium run --env docker` against <inner-task> inside
-# the sealed guest, waits for the guest's forced reset, and extracts the
-# payload. A docker escape inside the guest lands in the guest, never on the
-# host.
+# systemd oneshot runs `titanium run --env <inner-env>` against <inner-task>
+# inside the sealed guest, waits for the guest's forced reset, and extracts the
+# payload. An escape from the inner environment lands in the guest, never on
+# the host.
 #
 # This is the judged-network path: the guest is a member of a terminated pair
-# (CELLA-RUN.md §3, §7). It stands its own appliance (the terminator, holding
+# (CELLA-RUNNER.md §3, §7). It stands its own appliance (the terminator, holding
 # the world) beside the reflexive guest, one engine.py pump per border, and a
 # cella-engine bridge relaying each machine's parks to its pump. The membrane
 # grants the agent's inference line only; every other crossing is refused on
@@ -31,35 +34,41 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-DRIVER="$HERE/cella_run_convert.py"
+DRIVER="$HERE/cella_runner_convert.py"
 PY="$ROOT/.venv/bin/python"
 
 INNER_TASK="${1:-}"
-[ -n "$INNER_TASK" ] || { echo "usage: cella-run.sh <inner-task> [jobs-dir]" >&2; exit 2; }
+INNER_ENV="${2:-}"
+[ -n "$INNER_TASK" ] && [ -n "$INNER_ENV" ] \
+    || { echo "usage: cella-runner.sh <inner-task> <inner-env> [jobs-dir]" >&2; exit 2; }
 INNER_BASENAME="$(basename "$INNER_TASK")"
-JOBS_DIR="${2:-$ROOT/.run/cella-run/$INNER_BASENAME}"
+JOBS_DIR="${3:-$ROOT/.run/cella-runner/$INNER_BASENAME}"
 # One job per run, named as titanium names a trial's job (JobConfig.job_name).
 JOB="$(date +%Y-%m-%d__%H-%M-%S)"
 OUT="$JOBS_DIR/$JOB"
 
-FLAVOR="titanium-cella-run-$INNER_BASENAME"
+FLAVOR="titanium-cella-runner-$INNER_BASENAME"
 # The machine name is part of the translator's edge.sock path, which must fit
 # sockaddr_un (~108 chars). Keep it short: a tag plus the pid, not the full
 # task path. The FLAVOR (rootfs dir) is not in any socket path, so it stays
 # descriptive.
 _TAG="$(printf '%s' "$INNER_BASENAME" | tr -cd 'a-z0-9' | cut -c1-8)"
 VM="cr-$_TAG-$$"
-EXT4_BYTES="${TITANIUM_CELLA_RUN_EXT4_BYTES:-10737418240}"   # 10 GiB: workspace + docker layers
-GUEST_MEM_MB="${TITANIUM_CELLA_RUN_MEM_MB:-4096}"
-BOOT_TIMEOUT_SECS="${TITANIUM_CELLA_RUN_TIMEOUT:-1800}"
+EXT4_BYTES="${TITANIUM_CELLA_RUNNER_EXT4_BYTES:-10737418240}"   # 10 GiB: workspace + inner image layers
+# The guest's memory ceiling is the inner environment's (InnerEnv.guest_mem_mb
+# in the driver). docker is the only environment that reaches boot, so its
+# figure is the one default here; a second onboarded environment makes this
+# a case on $INNER_ENV.
+GUEST_MEM_MB="${TITANIUM_CELLA_RUNNER_MEM_MB:-4096}"
+BOOT_TIMEOUT_SECS="${TITANIUM_CELLA_RUNNER_TIMEOUT:-1800}"
 # The inner agent. Its build-time install (uv, PyPI) is baked on the host,
 # since the membrane grants the inference line only.
-AGENT="${TITANIUM_CELLA_RUN_AGENT:-mini-swe-agent}"
+AGENT="${TITANIUM_CELLA_RUNNER_AGENT:-mini-swe-agent}"
 # Keep the guest rootfs in the payload (cella-env/rootfs.ext4.zst) so the run
 # reproduces from an image, not just a digest -- the env-cella proof's
 # rootfs-source.tar analogue. On by default; set false for fast local
 # iteration, where the ~10 GiB image and its compression are dead weight.
-KEEP_ROOTFS="${CELLA_RUN_KEEP_ROOTFS:-true}"
+KEEP_ROOTFS="${CELLA_RUNNER_KEEP_ROOTFS:-true}"
 # /var/tmp, not /tmp: the reflexive bake (the workspace, a venv, docker layers,
 # a multi-GB ext4) outgrows a tmpfs /tmp, and podman then fails mid-build with
 # "disk quota exceeded". /var/tmp is disk-backed on every mainstream layout.
@@ -78,7 +87,7 @@ A_PUMP_PID=""; A_BRIDGE_PID=""; A_THAW_PID=""
 
 # Collection vs enforcement on the appliance border: dry-run releases every
 # world crossing and records it for review (CELLA.md §3.1).
-DRY_RUN="${CELLA_RUN_DRY_RUN:-false}"
+DRY_RUN="${CELLA_RUNNER_DRY_RUN:-false}"
 
 step() { echo; echo "--- $* ---"; }
 note() { echo "     $*"; }
@@ -109,6 +118,14 @@ trap teardown EXIT
 
 step "step 0: preconditions"
 
+# The inner environment is a runner choice, checked before anything is stood.
+# The driver refuses an un-onboarded environment too; this is the same
+# refusal, before the interpreter and cella are even looked for.
+case "$INNER_ENV" in
+    docker) ;;
+    cella)  skip "inner environment 'cella' is not yet onboarded (docs/runners/CELLA-RUNNER.md §2)" ;;
+    *)      skip "unknown inner environment '$INNER_ENV' (docker|cella)" ;;
+esac
 [ -x "$PY" ] || skip "no interpreter at $PY -- run: make sync"
 [ -f "$ROOT/$INNER_TASK/task.toml" ] || skip "no task at $INNER_TASK ($INNER_TASK/task.toml not found)"
 [ -c /dev/kvm ] || skip "no /dev/kvm -- cella needs KVM (bare metal or nested virt)"
@@ -124,15 +141,15 @@ note "cella:  $BIN"
 
 # Flavor. The field flavor is production: it opens no console, so the guest
 # is unobservable by design. The lab flavor writes the guest's console.log
-# and is for debugging only (`make smoke-cella-run-debug`, which sets
-# CELLA_RUN_DEBUG=true). A lab cella reaching this script without that flag
+# and is for debugging only (`make smoke-cella-runner-docker-debug`, which sets
+# CELLA_RUNNER_DEBUG=true). A lab cella reaching this script without that flag
 # is a mistake -- production runs must not ship on an observed guest.
 LAB=false
 case "$("$BIN" doctor check 2>/dev/null | grep -E 'flavor:')" in
     *"the lab"*) LAB=true ;;
 esac
-if [ "$LAB" = "true" ] && [ "${CELLA_RUN_DEBUG:-false}" != "true" ]; then
-    skip "cella at $BIN is the lab flavor; production runs use the field cella. For a debug run: make smoke-cella-run-debug"
+if [ "$LAB" = "true" ] && [ "${CELLA_RUNNER_DEBUG:-false}" != "true" ]; then
+    skip "cella at $BIN is the lab flavor; production runs use the field cella. For a debug run: make smoke-cella-runner-docker-debug"
 fi
 [ "$LAB" = "true" ] && note "flavor: the lab (debug run; the guest console is recorded)"
 
@@ -180,14 +197,14 @@ cp "$REAL_CELLA_HOME/kernel/canonical/bzImage" "$CELLA_HOME/kernel/canonical/" \
 cp "$REAL_CELLA_HOME/kernel/canonical/golden.json" "$CELLA_HOME/kernel/canonical/" 2>/dev/null
 
 # The container-capable guest kernel is titanium's own (built by
-# scripts/cella-run/build-kernel.sh, `make .cella-run-kernel`), not a cella
+# scripts/cella-runner/build-kernel.sh, `make .cella-runner-kernel`), not a cella
 # golden. cella boots any bzImage that carries the virtio-mmio boot configs;
 # it checks only that the file exists. Stage it as the "container" flavor.
-CELLA_RUN_KERNEL="${CELLA_RUN_KERNEL:-${XDG_CACHE_HOME:-$HOME/.cache}/titanium/cella-run-kernel/bzImage}"
-[ -f "$CELLA_RUN_KERNEL" ] || skip "no container kernel at $CELLA_RUN_KERNEL -- run: make .cella-run-kernel"
+CELLA_RUNNER_KERNEL="${CELLA_RUNNER_KERNEL:-${XDG_CACHE_HOME:-$HOME/.cache}/titanium/cella-runner-kernel/bzImage}"
+[ -f "$CELLA_RUNNER_KERNEL" ] || skip "no container kernel at $CELLA_RUNNER_KERNEL -- run: make .cella-runner-kernel"
 mkdir -p "$CELLA_HOME/kernel/container"
 chmod 0755 "$CELLA_HOME/kernel/container"
-cp "$CELLA_RUN_KERNEL" "$CELLA_HOME/kernel/container/bzImage" \
+cp "$CELLA_RUNNER_KERNEL" "$CELLA_HOME/kernel/container/bzImage" \
     || fail "could not stage the container kernel"
 
 # `cella extract` (step 4) runs a helper VM off the "cella" golden rootfs, so
@@ -225,6 +242,7 @@ PYTHONPATH="$ROOT/src" "$PY" "$DRIVER" \
     --size-bytes "$EXT4_BYTES" \
     --policy-dir "$WORK/policy" \
     --agent "$AGENT" \
+    --inner-env "$INNER_ENV" \
     || fail "the reflexive bake failed"
 
 # ------------------------------------------------------------------ step 3
@@ -323,7 +341,7 @@ done
 # machine's audit books land under cella-chronicle/<machine>/ (with cella's
 # own --dump rendering the decodable ones to .txt beside the raw bytes), and
 # its pump and bridge logs under cella-engine/<machine>/ as engine.log and
-# edge.log. So a cella-run proof reads the same as an env-cella proof.
+# edge.log. So a cella-runner proof reads the same as an env-cella proof.
 CHRONICLE_FILES="network/ledger network/names verdict audit membrane-memory manifest.json vmm.log valve uid"
 CHRONICLE_DUMPABLE="network/ledger network/names verdict audit membrane-memory"
 preserve_chronicle() {   # <machine-name> <machine-dir>
@@ -410,8 +428,8 @@ preserve_rootfs
 mkdir -p "$OUT/policy" && cp "$WORK/policy"/*.policy "$OUT/policy/" 2>/dev/null
 if [ "$DRY_RUN" = "true" ] && [ -f "$WORK/collected.policy" ]; then
     cp "$WORK/collected.policy" "$OUT/collected.policy"
-    note "collected policy written to $OUT/collected.policy -- review, then fold its hosts into INFERENCE_HOSTS in scripts/cella_run_convert.py"
+    note "collected policy written to $OUT/collected.policy -- review, then fold its hosts into INFERENCE_HOSTS in scripts/cella_runner_convert.py"
 fi
 
 echo
-echo "cella-run complete: $INNER_TASK ran inside a sealed cella VM; payload in $OUT"
+echo "cella-runner complete: $INNER_TASK ran under $INNER_ENV inside a sealed cella VM; payload in $OUT"

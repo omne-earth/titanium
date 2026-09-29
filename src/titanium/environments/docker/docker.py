@@ -409,10 +409,10 @@ class DockerEnvironment(BaseEnvironment):
         """An image that already carries the agent's install, built elsewhere.
 
         ``TITANIUM_AGENT_IMAGE`` names it. A host that cannot run the agent's
-        install steps at build time (the airgapped cella-run guest: no PyPI,
+        install steps at build time (the airgapped cella-runner guest: no PyPI,
         no GitHub) builds the task+agent image where the network is, seeds
         it, and names it here; the run then uses it as a prebuilt image and
-        builds nothing (docs/runners/CELLA-RUN.md §5).
+        builds nothing (docs/runners/CELLA-RUNNER.md §5).
         """
         if self.agent_install_spec is None:
             return None
@@ -473,7 +473,7 @@ class DockerEnvironment(BaseEnvironment):
             allowlist=allowlist,
             token=token,
             # A prebuilt sidecar image, for a host that cannot build it
-            # (the airgapped cella-run guest seeds one; docs/runners/CELLA-RUN.md).
+            # (the airgapped cella-runner guest seeds one; docs/runners/CELLA-RUNNER.md).
             image=os.environ.get("TITANIUM_EGRESS_PROXY_IMAGE") or None,
         )
 

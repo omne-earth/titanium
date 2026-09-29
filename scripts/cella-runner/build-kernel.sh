@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# build-kernel.sh — build the container-capable guest kernel for `cella-run`.
+# build-kernel.sh — build the container-capable guest kernel for `cella-runner`.
 #
-# Self-contained by design (docs/runners/CELLA-RUN.md): titanium fetches its
+# Self-contained by design (docs/runners/CELLA-RUNNER.md): titanium fetches its
 # own kernel source and merges its own fragment. It reads nothing from the
 # cella repo, its source cache, or its build outputs — no cross-repo
 # dependency. cella only consumes the bzImage this produces (it checks the
@@ -11,8 +11,8 @@
 # toolbox named cella-build, provisioned here with the kernel toolchain
 # (idempotent). The toolbox is a host build container, not a repo.
 #
-# Output (titanium-owned, staged into the run's CELLA_HOME by cella-run.sh):
-#   ${XDG_CACHE_HOME:-~/.cache}/titanium/cella-run-kernel/bzImage
+# Output (titanium-owned, staged into the run's CELLA_HOME by cella-runner.sh):
+#   ${XDG_CACHE_HOME:-~/.cache}/titanium/cella-runner-kernel/bzImage
 #
 #   exit 0  the kernel is built and current
 #   exit 1  a real failure
@@ -23,12 +23,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [[ -f "$REPO_ROOT/runtime.env" ]] || { echo "missing runtime.env" >&2; exit 1; }
 source "$REPO_ROOT/runtime.env"
 
-FRAGMENT="$REPO_ROOT/scripts/cella-run/kernel-fragment-container.config"
+FRAGMENT="$REPO_ROOT/scripts/cella-runner/kernel-fragment-container.config"
 [[ -f "$FRAGMENT" ]] || { echo "missing $FRAGMENT" >&2; exit 1; }
 
-VERSION="${CELLA_RUN_KERNEL_VERSION:?set in runtime.env}"
+VERSION="${CELLA_RUNNER_KERNEL_VERSION:?set in runtime.env}"
 MAJOR="${VERSION%%.*}"
-CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/titanium/cella-run-kernel"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/titanium/cella-runner-kernel"
 SRC="$CACHE/linux-$VERSION"
 OUT="$CACHE/bzImage"
 STAMP="$CACHE/fragment.sha256"
@@ -44,7 +44,7 @@ command -v toolbox >/dev/null 2>&1 || { echo "toolbox is not installed" >&2; exi
 # Idempotent: a current bzImage whose fragment digest is unchanged is done.
 frag_digest="$(sha256sum "$FRAGMENT" | cut -d' ' -f1)"
 if [[ -f "$OUT" && -f "$STAMP" && "$(cat "$STAMP")" == "$frag_digest" ]]; then
-    echo "cella-run kernel current: $OUT"
+    echo "cella-runner kernel current: $OUT"
     exit 0
 fi
 
@@ -93,4 +93,4 @@ BUILT="$SRC/arch/x86/boot/bzImage"
 [[ -f "$BUILT" ]] || { echo "build produced no bzImage at $BUILT" >&2; exit 1; }
 cp "$BUILT" "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
 echo "$frag_digest" > "$STAMP"
-echo "cella-run kernel built: $OUT ($VERSION, $(du -h "$OUT" | cut -f1))"
+echo "cella-runner kernel built: $OUT ($VERSION, $(du -h "$OUT" | cut -f1))"
