@@ -17,7 +17,7 @@ TASK="${TITANIUM_SMOKE_TASK:-$ROOT/examples/smoke/cella-branch-marker}"
 TITANIUM="$ROOT/.venv/bin/titanium"
 
 MARKER_PATH="./app/branch-log.txt"
-RUN_ID="cella-branch-$(date +%s)-$$"
+RUN_ID="$(date +%Y-%m-%d__%H-%M-%S)"
 
 step() { echo; echo "--- $* ---"; }
 note() { echo "     $*"; }
@@ -32,10 +32,11 @@ step "preconditions"
 note "task:   $TASK"
 note "run id: $RUN_ID"
 
-WORK="$ROOT/.run/cella-branch/$(date +%Y%m%d_%H%M%S)-$$"
-JOBS_DIR="$WORK/jobs"
-mkdir -p "$JOBS_DIR" || skip "could not create a work directory"
-note "work dir: $WORK"
+JOBS_DIR="${SMOKE_JOBS_DIR:-$ROOT/.run/jobs/openrouter/smoke-cella-branch-oracle}"
+WORK="${SMOKE_CACHE_DIR:-$ROOT/.run/cache/openrouter/smoke-cella-branch-oracle}/$RUN_ID"
+mkdir -p "$JOBS_DIR" "$WORK" || skip "could not create the jobs and cache directories"
+note "jobs dir:  $JOBS_DIR/$RUN_ID"
+note "cache dir: $WORK"
 
 # -------------------------------------------------------------- the parent leg
 

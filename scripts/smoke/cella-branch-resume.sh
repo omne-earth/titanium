@@ -33,7 +33,7 @@ MODEL="${TITANIUM_MODEL:-${OPENROUTER_MODEL:-}}"
 INSTALL_SOURCE="${MSWEA_INSTALL_SOURCE:-git+https://github.com/omne-earth/mini-swe-agent@edge}"
 TRAJ_PATH="./logs/agent/mini-swe-agent.trajectory.json"
 
-RUN_ID="cella-branch-resume-$(date +%s)-$$"
+RUN_ID="$(date +%Y-%m-%d__%H-%M-%S)"
 
 step() { echo; echo "--- $* ---"; }
 note() { echo "     $*"; }
@@ -54,10 +54,11 @@ note "model:  $MODEL"
 note "fork:   $INSTALL_SOURCE"
 note "run id: $RUN_ID"
 
-WORK="$ROOT/.run/cella-branch-resume/$(date +%Y%m%d_%H%M%S)-$$"
-JOBS_DIR="$WORK/jobs"
-mkdir -p "$JOBS_DIR" || skip "could not create a work directory"
-note "work dir: $WORK"
+JOBS_DIR="${SMOKE_JOBS_DIR:-$ROOT/.run/jobs/openrouter/smoke-cella-branch}"
+WORK="${SMOKE_CACHE_DIR:-$ROOT/.run/cache/openrouter/smoke-cella-branch}/$RUN_ID"
+mkdir -p "$JOBS_DIR" "$WORK" || skip "could not create the jobs and cache directories"
+note "jobs dir:  $JOBS_DIR/$RUN_ID"
+note "cache dir: $WORK"
 
 # --------------------------------------------------------- the parent leg (cut)
 
@@ -114,17 +115,36 @@ tar -xOf "$LEG_TAR" "$TRAJ_PATH" >"$WORK/leg-traj.json" 2>/dev/null \
 # --------------------------------------------------- one run, two legs, no reset
 
 step "trajectory continuity"
-python3 - "$WORK/parent-traj.json" "$WORK/leg-traj.json" <<'PY' || fail "the leg's trajectory does not extend the parent's"
+# The token stage 1 minted: it lives in leg-1's observation and on the
+# disk, and a fresh restart could only mint a different one -- the
+# nondeterministic content that makes the prefix check a discriminator.
+TOKEN="$(tar -xOf "$LEG_TAR" ./app/token.txt 2>/dev/null | head -1 | tr -d '[:space:]')"
+[ -n "$TOKEN" ] || fail "no /app/token.txt on the leg's disk: stage 1 never ran"
+note "token: $TOKEN"
+python3 - "$WORK/parent-traj.json" "$WORK/leg-traj.json" "$TOKEN" <<'PY' || fail "the leg's trajectory does not extend the parent's"
 import json, sys
 
 parent = json.load(open(sys.argv[1]))["messages"]
 leg = json.load(open(sys.argv[2]))["messages"]
+token = sys.argv[3]
 
 # The resume prune: back to the last observation (a user message).
 while parent and parent[-1].get("role") != "user":
     parent.pop()
 
-assert len(parent) >= 2, "parent trajectory too short"
+# A parent cut before its first observation leaves nothing a restart
+# could not regenerate: 2 template messages discriminate nothing. The
+# wedge's stage 1 guarantees one real observation before the sleep.
+assert len(parent) >= 4, (
+    f"pruned parent has only {len(parent)} messages -- the cut landed "
+    "before stage 1's observation; a task-compliance flake, not a "
+    "resume verdict"
+)
+# The banked observation carries the token the disk carries: history
+# and disk agree through the resume.
+assert any(token in str(m.get("content", "")) for m in parent), (
+    "the disk's token never appears in the pruned parent's messages"
+)
 assert len(leg) > len(parent), (
     f"leg trajectory ({len(leg)} messages) does not extend the pruned "
     f"parent ({len(parent)}): the agent reset instead of resuming"

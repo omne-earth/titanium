@@ -24,7 +24,7 @@ TITANIUM="$ROOT/.venv/bin/titanium"
 CELLA="${CELLA_BIN:-$HOME/.cella/bin/cella}"
 MACHINES="$HOME/.cella/machines"
 
-RUN_ID="cella-pause-$(date +%s)-$$"
+RUN_ID="$(date +%Y-%m-%d__%H-%M-%S)"
 
 step() { echo; echo "--- $* ---"; }
 note() { echo "     $*"; }
@@ -40,10 +40,11 @@ step "preconditions"
 note "task:   $TASK"
 note "run id: $RUN_ID"
 
-WORK="$ROOT/.run/cella-pause/$(date +%Y%m%d_%H%M%S)-$$"
-JOBS_DIR="$WORK/jobs"
-mkdir -p "$JOBS_DIR" || skip "could not create a work directory"
-note "work dir: $WORK"
+JOBS_DIR="${SMOKE_JOBS_DIR:-$ROOT/.run/jobs/openrouter/smoke-cella-pause}"
+WORK="${SMOKE_CACHE_DIR:-$ROOT/.run/cache/openrouter/smoke-cella-pause}/$RUN_ID"
+mkdir -p "$JOBS_DIR" "$WORK" || skip "could not create the jobs and cache directories"
+note "jobs dir:  $JOBS_DIR/$RUN_ID"
+note "cache dir: $WORK"
 
 # The machines that already exist are not ours; only the diff is evidence.
 ls -1 "$MACHINES" 2>/dev/null | sort > "$WORK/machines-before.txt"

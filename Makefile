@@ -413,7 +413,7 @@ smoke-cella-all: smoke-cella-rootfs smoke-cella-integration smoke-cella
 # leg's evidence (the member state tar and image-config.json).
 smoke-cella-pause: .sudo-tty-guard-cella sync .podman .cella
 	$(LOG)
-	bash scripts/smoke/cella-pause.sh
+	SMOKE_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ SMOKE_CACHE_DIR=$(RUN_DIR)/cache/$(BACKEND)/$@ bash scripts/smoke/cella-pause.sh
 
 # smoke-cella-branch-oracle: model-free continuity. A parent oracle leg
 # appends one line to a guest file, `titanium branch` bakes a new leg
@@ -421,7 +421,7 @@ smoke-cella-pause: .sudo-tty-guard-cella sync .podman .cella
 # lines: evidence became new life.
 smoke-cella-branch-oracle: .sudo-tty-guard-cella sync .podman .cella
 	$(LOG)
-	bash scripts/smoke/cella-branch.sh
+	SMOKE_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ SMOKE_CACHE_DIR=$(RUN_DIR)/cache/$(BACKEND)/$@ bash scripts/smoke/cella-branch.sh
 
 # smoke-cella-branch: the full resume proof. mini-swe-agent (the org
 # fork, --resume) hits the wedge task's first-leg timeout mid-sleep, the
@@ -432,8 +432,13 @@ smoke-cella-branch-oracle: .sudo-tty-guard-cella sync .podman .cella
 # nothing proven) rather than failing.
 smoke-cella-branch: .sudo-tty-guard-cella sync .podman .cella
 	$(LOG)
-	TITANIUM_MODEL=$(TITANIUM_MODEL) bash scripts/smoke/cella-branch-resume.sh
+	TITANIUM_MODEL=$(TITANIUM_MODEL) SMOKE_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ SMOKE_CACHE_DIR=$(RUN_DIR)/cache/$(BACKEND)/$@ bash scripts/smoke/cella-branch-resume.sh
 
+# Artifacts follow the jobs-smoke layout: titanium's job directories land in
+# .run/jobs/<backend>/<target>/<timestamp>/ and each script's scratch files
+# (logs, machine lists, extracted trajectories) in
+# .run/cache/<backend>/<target>/<timestamp>/.
+#
 # The three in order, cheapest first.
 smoke-cella-branch-all: smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch
 
