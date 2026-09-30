@@ -610,3 +610,19 @@ def test_retire_machine_destroys_by_default_and_archives_on_flag(tmp_path):
     verbs.clear()
     env._retire_machine("m")
     assert verbs == ["stop", "archive"]  # archive: the machine is kept as an artifact
+
+
+def test_on_completion_parses_pause(tmp_path):
+    assert _make_env_with(tmp_path, on_completion="pause")._on_completion == "pause"
+    assert _make_env_with(tmp_path, on_completion="PAUSE")._on_completion == "pause"
+
+
+def test_retire_machine_pause_stops_and_keeps(tmp_path):
+    # pause: stop alone -- no archive latch, no destroy. The machine
+    # survives still and branchable (the resume path).
+    env = _make_env_with(tmp_path)
+    env._on_completion = "pause"
+    verbs = []
+    env._cella = lambda *a, **k: verbs.append(a[0])
+    env._retire_machine("m")
+    assert verbs == ["stop"]

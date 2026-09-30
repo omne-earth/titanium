@@ -232,6 +232,10 @@ class CellaEnvironment(BaseEnvironment):
     its resolved name lands in the task's ``cella.policy`` as a grant.
     """
 
+    # `--on-completion pause` is cella-only: a stopped machine survives as a
+    # still, branchable source (`cella branch` yields a fresh-bootable copy).
+    SUPPORTS_PAUSE = True
+
     def __init__(
         self,
         *args,
@@ -250,9 +254,13 @@ class CellaEnvironment(BaseEnvironment):
         # inspect`, and forkable back to a runnable machine with `cella
         # branch`, but never thawed (thaw resumes a live frozen machine;
         # archive closes that door). The forensic path for a run you
-        # want to hold. Anything but an explicit `archive` is teardown.
+        # want to hold. `pause` stops the machine and keeps it: still,
+        # bootable, and forkable with `cella branch` (a stopped source
+        # copies to a fresh-bootable machine) -- the resume path.
+        # Anything but an explicit `archive` or `pause` is teardown.
+        policy = str(on_completion).lower()
         self._on_completion = (
-            "archive" if str(on_completion).lower() == "archive" else "teardown"
+            policy if policy in ("archive", "pause") else "teardown"
         )
         # Each engine is an in-process grpclib server (no subprocess):
         # {vm-id: (server, port)}, all hosted on one background asyncio
@@ -1503,13 +1511,19 @@ class CellaEnvironment(BaseEnvironment):
         destroys it. `archive` stops it and latches it as a cella
         artifact (`cella archive`) -- a rock, inspected with `cella
         inspect` and forked back to a runnable machine with `cella
-        branch`, never thawed. The evidence is already copied out either
-        way (the chronicle); this only decides whether the machine
-        itself survives."""
-        if self._on_completion != "archive":
+        branch`, never thawed. `pause` stops it and keeps it: a still
+        machine, bootable again and branchable to a fresh-bootable
+        copy -- the resume path. The evidence is already copied out
+        either way (the chronicle); this only decides whether the
+        machine itself survives."""
+        if self._on_completion == "archive":
+            verbs: tuple[str, ...] = ("stop", "archive")
+        elif self._on_completion == "pause":
+            verbs = ("stop",)
+        else:
             self._destroy_quietly(name)
             return
-        for verb in ("stop", "archive"):
+        for verb in verbs:
             try:
                 self._cella(verb, name)
             except (CellaError, subprocess.TimeoutExpired):

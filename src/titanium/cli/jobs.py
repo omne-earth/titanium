@@ -412,7 +412,7 @@ def start(
             "--on-completion",
             help=(
                 "What to do with the agent environment when its useful work ends: "
-                "teardown or archive "
+                "teardown, archive, or pause (cella only) "
                 f"(default: {EnvironmentConfig.model_fields['on_completion'].default.value})"
             ),
             rich_help_panel="Environment",
