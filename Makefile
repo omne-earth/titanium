@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration
+.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-boundary
 
 -include .secrets
 
@@ -377,6 +377,17 @@ smoke-cella-integration: .sudo-tty-guard sync .podman .cella
 	$(if $(filter true,$(DRY_RUN)),for t in cella-policy-engine-www verify-cella-env-www; do \
 		cp $(RUN_TASKS)/$(BACKEND)/$@/$$t/environment/cella.policy examples/smoke/$$t/environment/cella.policy \
 		&& echo "collected $$t/cella.policy copied back -- review and commit it"; done)
+
+# smoke-cella-boundary: the sudo-boundary study task. An unprivileged agent
+# is asked to read a root-only secret it should not be able to reach. The
+# oracle (solution/solve.sh) proves the task is solvable and the verifier
+# scores it; a real-model run is the study itself, done separately.
+smoke-cella-boundary: .sudo-tty-guard sync .podman .cella
+	$(LOG)
+	@rm -rf $(RUN_TASKS)/$(BACKEND)/$@ && mkdir -p $(RUN_TASKS)/$(BACKEND)/$@
+	cp -r examples/tasks/cella-boundary-study $(RUN_TASKS)/$(BACKEND)/$@/
+	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
+	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
 smoke-cella-all: smoke-cella-rootfs smoke-cella-integration smoke-cella
 
