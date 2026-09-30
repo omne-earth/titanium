@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import logging
 from pathlib import Path
+from collections.abc import Callable
 from typing import NamedTuple
 
 from titanium.constants import PYPI_PACKAGE_NAME
@@ -90,6 +91,10 @@ def _supports_archive(env_class: type[BaseEnvironment]) -> bool:
     return bool(getattr(env_class, "SUPPORTS_ARCHIVE", False))
 
 
+def _supports_pause(env_class: type[BaseEnvironment]) -> bool:
+    return bool(getattr(env_class, "SUPPORTS_PAUSE", False))
+
+
 def _env_label(env_class: type[BaseEnvironment]) -> str:
     """The environment's ``--env`` value when it has one, else its class name."""
     try:
@@ -99,7 +104,7 @@ def _env_label(env_class: type[BaseEnvironment]) -> str:
     return getattr(label, "value", str(label))
 
 
-def _reject_unsupported_archive(
+def _reject_unsupported_completion_policy(
     env_class: type[BaseEnvironment],
     completion_policy: OnCompletion | None,
 ) -> None:
@@ -109,30 +114,37 @@ def _reject_unsupported_archive(
     surface during cleanup, after the trial had already built and run, and
     the environment would be left running because teardown never happened.
     """
-    if completion_policy != OnCompletion.ARCHIVE:
+    if completion_policy == OnCompletion.ARCHIVE:
+        supports, capable = _supports_archive, _archive_capable_entry
+    elif completion_policy == OnCompletion.PAUSE:
+        supports, capable = _supports_pause, _pause_capable_entry
+    else:
         return
-    if _supports_archive(env_class):
-        archive_preflight = getattr(env_class, "archive_preflight", None)
-        if archive_preflight is not None:
-            archive_preflight()
+    if supports(env_class):
+        if completion_policy == OnCompletion.ARCHIVE:
+            archive_preflight = getattr(env_class, "archive_preflight", None)
+            if archive_preflight is not None:
+                archive_preflight()
         return
 
     supported = sorted(
         env_type.value
         for env_type, entry in _ENVIRONMENT_REGISTRY.items()
-        if _archive_capable_entry(entry)
+        if capable(entry)
     )
     raise ValueError(
         f"The '{_env_label(env_class)}' environment "
-        f"does not implement on_completion=archive. Supported: "
+        f"does not implement on_completion={completion_policy.value}. Supported: "
         f"{', '.join(supported)}. Refusing to start rather than building a "
         "trial that cannot honor the policy at the end -- and that would be "
         "left running when the refusal lands during cleanup."
     )
 
 
-def _archive_capable_entry(entry: _EnvEntry) -> bool:
-    """Whether a registered environment supports archiving.
+def _capable_entry(
+    entry: _EnvEntry, supports: "Callable[[type[BaseEnvironment]], bool]"
+) -> bool:
+    """Whether a registered environment supports a completion policy.
 
     An environment whose optional dependencies are absent is simply not
     listed, rather than raising here.
@@ -142,7 +154,15 @@ def _archive_capable_entry(entry: _EnvEntry) -> bool:
     except ImportError:
         return False
     env_class = getattr(module, entry.class_name, None)
-    return env_class is not None and _supports_archive(env_class)
+    return env_class is not None and supports(env_class)
+
+
+def _archive_capable_entry(entry: _EnvEntry) -> bool:
+    return _capable_entry(entry, _supports_archive)
+
+
+def _pause_capable_entry(entry: _EnvEntry) -> bool:
+    return _capable_entry(entry, _supports_pause)
 
 
 def _reject_obsolete_gvisor_kwargs(
@@ -214,7 +234,11 @@ class EnvironmentFactory:
     ) -> BaseEnvironment:
         _reject_obsolete_gvisor_kwargs(type, kwargs)
         environment_class = _load_environment_class(type)
-        _reject_unsupported_archive(environment_class, completion_policy)
+        _reject_unsupported_completion_policy(environment_class, completion_policy)
+        if completion_policy == OnCompletion.PAUSE:
+            # A pause-capable environment consumes the policy as its own
+            # `on_completion` kwarg (cella does); an explicit --ek wins.
+            kwargs.setdefault("on_completion", OnCompletion.PAUSE.value)
 
         return environment_class(
             environment_dir=environment_dir,
@@ -246,7 +270,7 @@ class EnvironmentFactory:
                 env_class = getattr(module, class_name)
             except (ImportError, AttributeError):
                 return
-            _reject_unsupported_archive(env_class, completion_policy)
+            _reject_unsupported_completion_policy(env_class, completion_policy)
             try:
                 if hasattr(env_class, "preflight"):
                     env_class.preflight()
@@ -258,7 +282,7 @@ class EnvironmentFactory:
             return
 
         env_class = _load_environment_class(type)
-        _reject_unsupported_archive(env_class, completion_policy)
+        _reject_unsupported_completion_policy(env_class, completion_policy)
         env_class.preflight()
 
     @classmethod
@@ -354,7 +378,9 @@ class EnvironmentFactory:
                 f"Module '{module_path}' has no class '{class_name}'"
             ) from e
 
-        _reject_unsupported_archive(Environment, completion_policy)
+        _reject_unsupported_completion_policy(Environment, completion_policy)
+        if completion_policy == OnCompletion.PAUSE:
+            kwargs.setdefault("on_completion", OnCompletion.PAUSE.value)
 
         return Environment(
             environment_dir=environment_dir,

@@ -319,3 +319,62 @@ def test_teardown_preflight_is_not_rootless_gated(env_type, monkeypatch):
     )
 
     assert asked == []
+
+
+# ---------------------------------------------------------------------------
+# Pause: cella-only. A paused machine is stopped and kept -- still, bootable,
+# and branchable -- never destroyed or archived.
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_allows_pause_for_cella():
+    EnvironmentFactory.run_preflight(
+        type=EnvironmentType.CELLA, completion_policy=OnCompletion.PAUSE
+    )
+
+
+@pytest.mark.parametrize(
+    "env_type",
+    [t for t in ARCHIVE_UNSUPPORTED + ARCHIVE_CAPABLE if t != EnvironmentType.CELLA],
+)
+def test_preflight_refuses_pause_for_everything_else(env_type):
+    with pytest.raises(ValueError, match="does not implement on_completion=pause"):
+        EnvironmentFactory.run_preflight(
+            type=env_type, completion_policy=OnCompletion.PAUSE
+        )
+
+
+def test_pause_policy_reaches_cella_as_its_on_completion_kwarg(tmp_path):
+    # The trial-level policy is forwarded to cella's own kwarg, so the
+    # machine retires by `stop` alone (kept, not destroyed).
+    environment_dir, trial_paths = _task_dirs(tmp_path)
+    environment = EnvironmentFactory.create_environment_from_config(
+        TrialEnvironmentConfig(
+            type=EnvironmentType.CELLA, on_completion=OnCompletion.PAUSE
+        ),
+        environment_dir=environment_dir,
+        environment_name="probe",
+        session_id="probe__abc123",
+        trial_paths=trial_paths,
+        task_env_config=TaskEnvironmentConfig(allow_internet=False),
+    )
+
+    assert environment._on_completion == "pause"
+
+
+def test_explicit_cella_kwarg_wins_over_pause_policy(tmp_path):
+    environment_dir, trial_paths = _task_dirs(tmp_path)
+    environment = EnvironmentFactory.create_environment_from_config(
+        TrialEnvironmentConfig(
+            type=EnvironmentType.CELLA,
+            on_completion=OnCompletion.PAUSE,
+            kwargs={"on_completion": "archive"},
+        ),
+        environment_dir=environment_dir,
+        environment_name="probe",
+        session_id="probe__abc123",
+        trial_paths=trial_paths,
+        task_env_config=TaskEnvironmentConfig(allow_internet=False),
+    )
+
+    assert environment._on_completion == "archive"

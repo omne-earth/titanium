@@ -1,0 +1,17 @@
+schema_version = "1.2"
+
+[task]
+name = "titanium/cella-branch-wedge"
+description = "A task whose one blocking command outlives the first leg's agent timeout: the parent leg is cut mid-run, and only a branched leg with a bigger budget can finish it."
+keywords = ["smoke", "branch", "timeout", "cella"]
+
+[verifier]
+timeout_sec = 300.0
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+build_timeout_sec = 900.0
+memory_mb = 2048
+allow_internet = false

@@ -79,6 +79,7 @@ def network_topology(allow_internet: bool) -> NetworkTopology:
 
 import asyncio
 import io
+import json
 import logging
 import os
 import re
@@ -232,11 +233,16 @@ class CellaEnvironment(BaseEnvironment):
     its resolved name lands in the task's ``cella.policy`` as a grant.
     """
 
+    # `--on-completion pause` is cella-only: a stopped machine survives as a
+    # still, branchable source (`cella branch` yields a fresh-bootable copy).
+    SUPPORTS_PAUSE = True
+
     def __init__(
         self,
         *args,
         dry_run: bool | str = False,
         on_completion: str = "teardown",
+        resume_state_tar: str | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -250,9 +256,20 @@ class CellaEnvironment(BaseEnvironment):
         # inspect`, and forkable back to a runnable machine with `cella
         # branch`, but never thawed (thaw resumes a live frozen machine;
         # archive closes that door). The forensic path for a run you
-        # want to hold. Anything but an explicit `archive` is teardown.
+        # want to hold. `pause` stops the machine and keeps it: still,
+        # bootable, and forkable with `cella branch` (a stopped source
+        # copies to a fresh-bootable machine) -- the resume path.
+        # Anything but an explicit `archive` or `pause` is teardown.
+        policy = str(on_completion).lower()
         self._on_completion = (
-            "archive" if str(on_completion).lower() == "archive" else "teardown"
+            policy if policy in ("archive", "pause") else "teardown"
+        )
+        # A branch leg: boot from a parent trial's extracted state tar
+        # instead of building the task image (the verifier pattern --
+        # new life is baked from evidence, never a mutated machine).
+        # The parent's image-config.json must sit beside the tar.
+        self._resume_state_tar = (
+            Path(resume_state_tar) if resume_state_tar else None
         )
         # Each engine is an in-process grpclib server (no subprocess):
         # {vm-id: (server, port)}, all hosted on one background asyncio
@@ -395,13 +412,18 @@ class CellaEnvironment(BaseEnvironment):
         self._work = Path(
             tempfile.mkdtemp(prefix="cella-env-", dir=self.trial_paths.trial_dir)
         )
+        if self._resume_state_tar is not None:
+            self._load_resumed_state()
+            if self._paired:
+                self._ensure_appliance()
+            return
         tag = new_build_tag("titanium-cella-env")
         try:
             context = prepare_build_context(
                 environment_dir=self.environment_dir,
                 context_dir=self._work / "context",
                 agent_install_spec=self.agent_install_spec,
-                agent_user=self.default_user,
+                agent_user=self._install_user(),
             )
             build_image(
                 context_dir=context.context_dir,
@@ -413,6 +435,11 @@ class CellaEnvironment(BaseEnvironment):
                 inspect_image(tag, timeout_sec=self.task_env_config.build_timeout_sec)
             )
             self._image_config = dict(record.config)
+            # Persisted beside the state tars so a later branch leg can
+            # reload it without rebuilding the image.
+            (self._work / "image-config.json").write_text(
+                json.dumps(self._image_config)
+            )
             source_tar = self._work / "rootfs-source.tar"
             export_rootfs_tar(
                 image=tag,
@@ -434,6 +461,51 @@ class CellaEnvironment(BaseEnvironment):
             untag_image(tag)
         if self._paired:
             self._ensure_appliance()
+
+    def _install_user(self) -> str | int | None:
+        """The user the agent's install steps run as: the user the agent
+        will run as. An undeclared agent user resolves to the baked
+        standard user (the payload never runs as root by omission), so
+        the install must land in that user's home -- an install left
+        under root's would be unreachable to the payload."""
+        if self.default_user is None and self.agent_install_spec is not None:
+            return AGENT_USER
+        return self.default_user
+
+    def _load_resumed_state(self) -> None:
+        """Seed the leg from a parent trial's evidence: its state tar
+        becomes this leg's base tar (copied -- the parent's evidence is
+        never consumed) and its persisted image config carries the exec
+        facts (workdir, env, user) the build would have parsed."""
+        assert self._work is not None
+        tar = self._resume_state_tar
+        assert tar is not None
+        if not tar.is_file():
+            raise CellaError(f"resume_state_tar does not exist: {tar}")
+        config_path = tar.parent / "image-config.json"
+        if not config_path.is_file():
+            raise CellaError(
+                f"no image-config.json beside {tar}: the parent run "
+                "predates branch support; re-run it first"
+            )
+        self._image_config = dict(json.loads(config_path.read_text()))
+        self._base_tar = self._work / "state-0000.tar"
+        # The parent's disk carries the orchestrator's own completion
+        # latch (RUNNER_DIR/result: done, rc) -- resumed verbatim, the
+        # guest would see a finished run and reset without executing a
+        # phase. Scrub exactly that subtree in the copy; everything
+        # else (the agent's /logs trajectory above all) rides along.
+        latch = "." + RUNNER_DIR + "/result"
+        with tarfile.open(tar, "r:") as source, tarfile.open(
+            self._base_tar, "w"
+        ) as dest:
+            for member in source:
+                if member.name == latch or member.name.startswith(latch + "/"):
+                    continue
+                if member.isfile():
+                    dest.addfile(member, source.extractfile(member))
+                else:
+                    dest.addfile(member)
 
     # ----------------------------------------------------------- uploads
 
@@ -531,7 +603,16 @@ class CellaEnvironment(BaseEnvironment):
                         step.user if step.user is not None else self.default_user
                     )
                     if run_as is None:
-                        run_as = self._image_config.get("User") or None
+                        # An image's USER is inherited, not decided: the
+                        # agent-install layer itself ends in `USER root`,
+                        # so a root image user is an omission, never the
+                        # task's declaration (that is agent.user).
+                        image_user = self._image_config.get("User") or None
+                        if image_user is not None and str(image_user).split(":")[
+                            0
+                        ] in ("root", "0"):
+                            image_user = None
+                        run_as = image_user
                     if run_as in (None, 0, "0"):
                         run_as = AGENT_USER
                 else:
@@ -1503,13 +1584,19 @@ class CellaEnvironment(BaseEnvironment):
         destroys it. `archive` stops it and latches it as a cella
         artifact (`cella archive`) -- a rock, inspected with `cella
         inspect` and forked back to a runnable machine with `cella
-        branch`, never thawed. The evidence is already copied out either
-        way (the chronicle); this only decides whether the machine
-        itself survives."""
-        if self._on_completion != "archive":
+        branch`, never thawed. `pause` stops it and keeps it: a still
+        machine, bootable again and branchable to a fresh-bootable
+        copy -- the resume path. The evidence is already copied out
+        either way (the chronicle); this only decides whether the
+        machine itself survives."""
+        if self._on_completion == "archive":
+            verbs: tuple[str, ...] = ("stop", "archive")
+        elif self._on_completion == "pause":
+            verbs = ("stop",)
+        else:
             self._destroy_quietly(name)
             return
-        for verb in ("stop", "archive"):
+        for verb in verbs:
             try:
                 self._cella(verb, name)
             except (CellaError, subprocess.TimeoutExpired):

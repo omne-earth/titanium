@@ -1,0 +1,14 @@
+schema_version = "1.2"
+
+[task]
+name = "titanium/cella-branch-marker"
+description = "Appends a line to a guest log on every leg, so a branched leg can be proven to have booted from the parent's disk (two lines, one file)."
+keywords = ["smoke", "branch", "cella"]
+
+[agent]
+timeout_sec = 300.0
+
+[environment]
+build_timeout_sec = 900.0
+memory_mb = 2048
+allow_internet = false

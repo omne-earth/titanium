@@ -30,6 +30,50 @@ graders never coexist. An oracle trial and an agent trial write the
 same records; they differ only in the `agent/` folder (§4) and the
 payload the agent phase runs.
 
+### 1.1 Provision a standard user on a provisioned host
+
+The cella digest pin (`/usr/local/share/titanium/cella.sha3-512`) is
+host-global, but the install is per-user (`~/.cella`). A second,
+non-sudo user on an already-provisioned host still needs cella's own
+installer to run once as them, and that installer calls `sudo`
+unconditionally. A sudo user grants exactly the commands the init
+path invokes — nothing more — with an argv-exact drop-in
+(`standard-user` is the non-sudo account; run as the sudo user):
+
+```bash
+sudo tee /etc/sudoers.d/titanium-standard-user >/dev/null <<'EOF'
+Cmnd_Alias TITANIUM_INIT = \
+  /usr/bin/dnf install -y rust cargo rustfmt clippy bubblewrap iproute protobuf-compiler curl iputils python3 podman toolbox, \
+  /usr/bin/dnf install -y shadow-utils acl, \
+  /usr/sbin/usermod --add-subuids 524288-589823 --add-subgids 524288-589823 standard-user, \
+  /usr/sbin/usermod -aG kvm standard-user, \
+  /usr/sbin/usermod -aG docker standard-user, \
+  /usr/bin/mkdir -p /usr/local/share/titanium, \
+  /usr/bin/tee /usr/local/share/titanium/cella.sha3-512
+standard-user ALL=(root) NOPASSWD: TITANIUM_INIT
+EOF
+sudo visudo -cf /etc/sudoers.d/titanium-standard-user
+sudo rm /usr/local/share/titanium/cella.sha3-512
+sudo -iu standard-user bash -lc 'cd ~/workspace/titanium && make init'
+```
+
+Replace `standard-user` throughout. The pin must be deleted first: the installer runs only when the pin
+is absent, and the standard user's build re-writes it. Two facts to
+weigh before granting:
+
+- The `tee` rule lets the standard user write the host's cella
+  digest pin — the trust anchor every run verifies. To keep the pin
+  sudo-user-owned, drop the last two alias lines and re-run
+  `make init` as the sudo user once after the standard user's build.
+- The rules are argv-exact. A cella rev that changes its package
+  list breaks the match loudly (sudo prompts) instead of widening
+  silently. Delete the drop-in when provisioning is done; running
+  trials never needs it.
+
+The doctor's logind warning applies to `sudo -iu` shells: run the
+proving smokes from the standard user's own login, not through the
+sudo user's shell, or cgroup limits do not enforce.
+
 ## 2. Orchestration
 
 No process ever enters a machine: each machine boots with its whole
