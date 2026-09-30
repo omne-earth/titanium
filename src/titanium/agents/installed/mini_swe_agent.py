@@ -583,10 +583,19 @@ class MiniSweAgent(BaseInstalledAgent):
         set_cache_control: str | None = None,
         config_yaml: str | None = None,
         config_file: str | None = None,
+        resume: bool | str = False,
+        install_source: str | None = None,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        # A branch leg: continue the trajectory already on the guest disk
+        # (--resume needs a mini-swe-agent build that has the flag, e.g.
+        # installed via install_source from the org fork).
+        self._resume = str(resume).lower() in ("true", "1", "yes")
+        # An alternative `uv tool install` source (a git+https URL or a
+        # local path); the default is the pinned PyPI package.
+        self._install_source = install_source
         self._cost_limit = cost_limit
         self._reasoning_effort = reasoning_effort
         self._model_class = model_class
@@ -651,7 +660,7 @@ if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" 2>/dev/null;
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
 fi
 source "$HOME/.local/bin/env"
-uv tool install mini-swe-agent{version_spec}
+uv tool install {shlex.quote(self._install_source) if self._install_source else f"mini-swe-agent{version_spec}"}
 
 python_bin="$(head -n 1 "$(command -v mini-swe-agent)" | sed 's/^#!//')"
 {install_extra_packages}
@@ -853,13 +862,19 @@ mini-swe-agent --help
                 )
             )
         config_flags = self._build_config_flags(custom_config_path=custom_config_path)
+        # A branch leg continues the trajectory the parent leg left on the
+        # guest disk (--output and --resume are the same file: the agent
+        # prunes it back to the last observation and keeps appending).
+        resume_flag = (
+            f"--resume={self._mini_swe_agent_trajectory_path} " if self._resume else ""
+        )
         steps.append(
             SealedStep(
                 command=(
                     '. "$HOME/.local/bin/env"; '
                     f"mini-swe-agent --yolo --model={run_model_name} "
                     f"--task={escaped_instruction} "
-                    f"--output={self._mini_swe_agent_trajectory_path} {extra_flags}"
+                    f"--output={self._mini_swe_agent_trajectory_path} {resume_flag}{extra_flags}"
                     f"{config_flags}"
                     f"--exit-immediately 2>&1 </dev/null "
                     f"| tee /logs/agent/mini-swe-agent.txt"

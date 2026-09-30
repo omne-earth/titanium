@@ -79,6 +79,7 @@ def network_topology(allow_internet: bool) -> NetworkTopology:
 
 import asyncio
 import io
+import json
 import logging
 import os
 import re
@@ -241,6 +242,7 @@ class CellaEnvironment(BaseEnvironment):
         *args,
         dry_run: bool | str = False,
         on_completion: str = "teardown",
+        resume_state_tar: str | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -261,6 +263,13 @@ class CellaEnvironment(BaseEnvironment):
         policy = str(on_completion).lower()
         self._on_completion = (
             policy if policy in ("archive", "pause") else "teardown"
+        )
+        # A branch leg: boot from a parent trial's extracted state tar
+        # instead of building the task image (the verifier pattern --
+        # new life is baked from evidence, never a mutated machine).
+        # The parent's image-config.json must sit beside the tar.
+        self._resume_state_tar = (
+            Path(resume_state_tar) if resume_state_tar else None
         )
         # Each engine is an in-process grpclib server (no subprocess):
         # {vm-id: (server, port)}, all hosted on one background asyncio
@@ -403,6 +412,11 @@ class CellaEnvironment(BaseEnvironment):
         self._work = Path(
             tempfile.mkdtemp(prefix="cella-env-", dir=self.trial_paths.trial_dir)
         )
+        if self._resume_state_tar is not None:
+            self._load_resumed_state()
+            if self._paired:
+                self._ensure_appliance()
+            return
         tag = new_build_tag("titanium-cella-env")
         try:
             context = prepare_build_context(
@@ -421,6 +435,11 @@ class CellaEnvironment(BaseEnvironment):
                 inspect_image(tag, timeout_sec=self.task_env_config.build_timeout_sec)
             )
             self._image_config = dict(record.config)
+            # Persisted beside the state tars so a later branch leg can
+            # reload it without rebuilding the image.
+            (self._work / "image-config.json").write_text(
+                json.dumps(self._image_config)
+            )
             source_tar = self._work / "rootfs-source.tar"
             export_rootfs_tar(
                 image=tag,
@@ -442,6 +461,26 @@ class CellaEnvironment(BaseEnvironment):
             untag_image(tag)
         if self._paired:
             self._ensure_appliance()
+
+    def _load_resumed_state(self) -> None:
+        """Seed the leg from a parent trial's evidence: its state tar
+        becomes this leg's base tar (copied -- the parent's evidence is
+        never consumed) and its persisted image config carries the exec
+        facts (workdir, env, user) the build would have parsed."""
+        assert self._work is not None
+        tar = self._resume_state_tar
+        assert tar is not None
+        if not tar.is_file():
+            raise CellaError(f"resume_state_tar does not exist: {tar}")
+        config_path = tar.parent / "image-config.json"
+        if not config_path.is_file():
+            raise CellaError(
+                f"no image-config.json beside {tar}: the parent run "
+                "predates branch support; re-run it first"
+            )
+        self._image_config = dict(json.loads(config_path.read_text()))
+        self._base_tar = self._work / "state-0000.tar"
+        shutil.copyfile(tar, self._base_tar)
 
     # ----------------------------------------------------------- uploads
 
