@@ -30,7 +30,13 @@ TITANIUM="$ROOT/.venv/bin/titanium"
 # The existing plumbing: the Makefile resolves TITANIUM_MODEL (from
 # OPENROUTER_MODEL via the .secrets include) and passes it down.
 MODEL="${TITANIUM_MODEL:-${OPENROUTER_MODEL:-}}"
-INSTALL_SOURCE="${MSWEA_INSTALL_SOURCE:-git+https://github.com/omne-earth/mini-swe-agent@edge}"
+# Install from edge's current sha, not the moving name: the agent
+# install is a cached image layer keyed on the command string, so
+# "@edge" would keep serving whatever edge meant when the layer was
+# first built. The sha busts the cache exactly when edge moves.
+FORK_REPO="https://github.com/omne-earth/mini-swe-agent"
+EDGE_SHA="$(git ls-remote "$FORK_REPO" edge 2>/dev/null | cut -f1)"
+INSTALL_SOURCE="${MSWEA_INSTALL_SOURCE:-git+$FORK_REPO@${EDGE_SHA:-edge}}"
 TRAJ_PATH="./logs/agent/mini-swe-agent.trajectory.json"
 
 RUN_ID="$(date +%Y-%m-%d__%H-%M-%S)"
