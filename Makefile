@@ -134,7 +134,8 @@ _probe-krun-podman: .krun-podman
 .cella:
 	@{ test -x "$$HOME/.cella/bin/cella" \
 		&& test -f /usr/local/share/titanium/cella.sha3-512 \
-		&& test -f "$$HOME/.cella/kernel/canonical/bzImage"; } >/dev/null 2>&1 \
+		&& test -f "$$HOME/.cella/kernel/canonical/bzImage" \
+		&& test -f "$$HOME/.cella/rootfs/cella/rootfs.ext4"; } >/dev/null 2>&1 \
 		|| bash scripts/init/cella.sh
 
 # the lab flavor (console on), built in the same pinned clone for smokes
@@ -269,7 +270,8 @@ titanium-run: | .sentinel/tasks
 .sudo-tty-guard-cella:
 	@if { test -x "$$HOME/.cella/bin/cella" \
 		&& test -f /usr/local/share/titanium/cella.sha3-512 \
-		&& test -f "$$HOME/.cella/kernel/canonical/bzImage"; } >/dev/null 2>&1; then \
+		&& test -f "$$HOME/.cella/kernel/canonical/bzImage" \
+		&& test -f "$$HOME/.cella/rootfs/cella/rootfs.ext4"; } >/dev/null 2>&1; then \
 		exit 0; \
 	fi; \
 	if [ -n "$${TMUX:-}$${STY:-}" ] && ! sudo -n true 2>/dev/null; then \

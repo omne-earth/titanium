@@ -168,6 +168,18 @@ fi
   exit 1
 }
 
+# --- the stock rootfs golden -----------------------------------------------
+
+# The appliance rootfs for cella's own evidence verbs: inspect and
+# extract boot a throwaway machine from the stock flavor to read a still
+# machine's disk. Titanium's state extract (and so the branch leg) rides
+# extract, so the golden is part of provisioning, not a lazy first-use
+# surprise inside a trial. Present means done, like the others.
+if [[ ! -f "$HOME/.cella/rootfs/cella/rootfs.ext4" ]]; then
+  echo "building the stock rootfs golden (the inspect/extract appliance)"
+  ( cd "$SRC" && "$CELLA" build rootfs cella )
+fi
+
 # --- the digest pin --------------------------------------------------------
 
 # Trust-on-first-use, like the krun and runsc pins, with the git rev as the

@@ -59,6 +59,10 @@ PARENT_DIR="$(find "$JOBS_DIR/$RUN_ID" -mindepth 1 -maxdepth 1 -type d \
     ! -name '.*' 2>/dev/null | head -1)"
 [ -n "$PARENT_DIR" ] || fail "the parent left no trial directory under $JOBS_DIR/$RUN_ID"
 note "parent dir: $PARENT_DIR"
+if [ -f "$PARENT_DIR/exception.txt" ]; then
+    sed -n 1,3p "$PARENT_DIR/exception.txt"
+    fail "the parent trial recorded an exception"
+fi
 
 PARENT_TAR="$(find "$PARENT_DIR" -path '*/cella-env-*/state-*.tar' \
     ! -name 'state-0000.tar' 2>/dev/null | head -1)"

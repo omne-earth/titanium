@@ -83,6 +83,13 @@ TRIAL_DIR="$(find "$JOBS_DIR/$RUN_ID" -mindepth 1 -maxdepth 1 -type d \
 [ -n "$TRIAL_DIR" ] || fail "the trial left no trial directory under $JOBS_DIR/$RUN_ID"
 note "trial dir: $TRIAL_DIR"
 
+# `titanium run` exits 0 even when the trial recorded an exception; the
+# trial's own record is the fact.
+if [ -f "$TRIAL_DIR/exception.txt" ]; then
+    sed -n 1,3p "$TRIAL_DIR/exception.txt"
+    fail "the trial recorded an exception"
+fi
+
 # -------------------------------------------------------- the surviving machine
 
 step "the paused machine"
@@ -108,6 +115,7 @@ step "the branch evidence"
 STATE_TAR="$(find "$TRIAL_DIR" -path '*/cella-env-*/state-*.tar' \
     ! -name 'state-0000.tar' 2>/dev/null | head -1)"
 [ -n "$STATE_TAR" ] || fail "no member state tar under $TRIAL_DIR/cella-env-*/"
+[ -s "$STATE_TAR" ] || fail "the member state tar is empty: the state extract never ran"
 note "state tar: $STATE_TAR ($(stat -c %s "$STATE_TAR") bytes)"
 
 IMAGE_CONFIG="$(dirname "$STATE_TAR")/image-config.json"

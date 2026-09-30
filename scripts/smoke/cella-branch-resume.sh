@@ -75,9 +75,9 @@ PARENT_DIR="$(find "$JOBS_DIR/$RUN_ID" -mindepth 1 -maxdepth 1 -type d \
 [ -n "$PARENT_DIR" ] || fail "the parent left no trial directory under $JOBS_DIR/$RUN_ID"
 note "parent dir: $PARENT_DIR"
 
-grep -q "AgentTimeoutError" "$PARENT_DIR/results.json" \
+grep -q "AgentTimeoutError" "$PARENT_DIR/result.json" \
     || fail "the parent leg did not record AgentTimeoutError: the wedge never cut"
-note "cut confirmed: AgentTimeoutError in the parent's results.json"
+note "cut confirmed: AgentTimeoutError in the parent's result.json"
 
 PARENT_TAR="$(find "$PARENT_DIR" -path '*/cella-env-*/state-*.tar' \
     ! -name 'state-0000.tar' 2>/dev/null | head -1)"
@@ -136,7 +136,7 @@ PY
 # --------------------------------------------------------------------- the wedge
 
 step "the wedge verifies"
-grep -q '"reward"' "$LEG_DIR/results.json" 2>/dev/null || true
+grep -q '"reward"' "$LEG_DIR/result.json" 2>/dev/null || true
 REWARD="$(tar -xOf "$LEG_TAR" ./app/results.txt 2>/dev/null | head -1)"
 note "guest /app/results.txt: '${REWARD:-<absent>}' (expected 'done')"
 [ "${REWARD:-}" = "done" ] \
