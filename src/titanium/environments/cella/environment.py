@@ -423,7 +423,7 @@ class CellaEnvironment(BaseEnvironment):
                 environment_dir=self.environment_dir,
                 context_dir=self._work / "context",
                 agent_install_spec=self.agent_install_spec,
-                agent_user=self.default_user,
+                agent_user=self._install_user(),
             )
             build_image(
                 context_dir=context.context_dir,
@@ -461,6 +461,16 @@ class CellaEnvironment(BaseEnvironment):
             untag_image(tag)
         if self._paired:
             self._ensure_appliance()
+
+    def _install_user(self) -> str | int | None:
+        """The user the agent's install steps run as: the user the agent
+        will run as. An undeclared agent user resolves to the baked
+        standard user (the payload never runs as root by omission), so
+        the install must land in that user's home -- an install left
+        under root's would be unreachable to the payload."""
+        if self.default_user is None and self.agent_install_spec is not None:
+            return AGENT_USER
+        return self.default_user
 
     def _load_resumed_state(self) -> None:
         """Seed the leg from a parent trial's evidence: its state tar
@@ -593,7 +603,16 @@ class CellaEnvironment(BaseEnvironment):
                         step.user if step.user is not None else self.default_user
                     )
                     if run_as is None:
-                        run_as = self._image_config.get("User") or None
+                        # An image's USER is inherited, not decided: the
+                        # agent-install layer itself ends in `USER root`,
+                        # so a root image user is an omission, never the
+                        # task's declaration (that is agent.user).
+                        image_user = self._image_config.get("User") or None
+                        if image_user is not None and str(image_user).split(":")[
+                            0
+                        ] in ("root", "0"):
+                            image_user = None
+                        run_as = image_user
                     if run_as in (None, 0, "0"):
                         run_as = AGENT_USER
                 else:
