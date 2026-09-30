@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration
+.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-all
 
 -include .secrets
 
@@ -379,6 +379,42 @@ smoke-cella-integration: .sudo-tty-guard sync .podman .cella
 		&& echo "collected $$t/cella.policy copied back -- review and commit it"; done)
 
 smoke-cella-all: smoke-cella-rootfs smoke-cella-integration smoke-cella
+
+# The branch-leg smokes: continue-on-timeout via `titanium branch`.
+# Deliberately NOT part of smoke-cella-all -- the branch leg is its own
+# lineage, proven separately from the jobs smokes. Three rungs of proof,
+# cheapest first, each a scripts/smoke/*.sh acceptance script with the
+# shared convention: exit 2 means a precondition was missing and nothing
+# was proven; exit 1 is a real failure.
+#
+# smoke-cella-pause: one oracle trial with --on-completion pause; the
+# machine survives still (never archived) and the trial dir holds the
+# leg's evidence (the member state tar and image-config.json).
+smoke-cella-pause: .sudo-tty-guard sync .podman .cella
+	$(LOG)
+	bash scripts/smoke/cella-pause.sh
+
+# smoke-cella-branch-oracle: model-free continuity. A parent oracle leg
+# appends one line to a guest file, `titanium branch` bakes a new leg
+# from the parent's state tar, and the leg's own extract shows both
+# lines: evidence became new life.
+smoke-cella-branch-oracle: .sudo-tty-guard sync .podman .cella
+	$(LOG)
+	bash scripts/smoke/cella-branch.sh
+
+# smoke-cella-branch: the full resume proof. mini-swe-agent (the org
+# fork, --resume) hits the wedge task's first-leg timeout mid-sleep, the
+# branch leg gets a 5x budget, and the assertions are the recorded
+# AgentTimeoutError, the leg's trajectory strictly extending the
+# parent's pruned messages, and the wedge verifying. Needs a model key
+# and TITANIUM_SMOKE_MODEL; without them the script exits 2 (skipped,
+# nothing proven) rather than failing.
+smoke-cella-branch: .sudo-tty-guard sync .podman .cella
+	$(LOG)
+	bash scripts/smoke/cella-branch-resume.sh
+
+# The three in order, cheapest first.
+smoke-cella-branch-all: smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch
 
 # smoke-cella: the rung-parity smoke -- the real bench tasks under cella,
 # the way smoke-krun-podman runs them under krun. fix-git-offline is
