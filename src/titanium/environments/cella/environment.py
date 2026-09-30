@@ -480,7 +480,22 @@ class CellaEnvironment(BaseEnvironment):
             )
         self._image_config = dict(json.loads(config_path.read_text()))
         self._base_tar = self._work / "state-0000.tar"
-        shutil.copyfile(tar, self._base_tar)
+        # The parent's disk carries the orchestrator's own completion
+        # latch (RUNNER_DIR/result: done, rc) -- resumed verbatim, the
+        # guest would see a finished run and reset without executing a
+        # phase. Scrub exactly that subtree in the copy; everything
+        # else (the agent's /logs trajectory above all) rides along.
+        latch = "." + RUNNER_DIR + "/result"
+        with tarfile.open(tar, "r:") as source, tarfile.open(
+            self._base_tar, "w"
+        ) as dest:
+            for member in source:
+                if member.name == latch or member.name.startswith(latch + "/"):
+                    continue
+                if member.isfile():
+                    dest.addfile(member, source.extractfile(member))
+                else:
+                    dest.addfile(member)
 
     # ----------------------------------------------------------- uploads
 

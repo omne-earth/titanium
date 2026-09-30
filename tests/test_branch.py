@@ -70,11 +70,32 @@ def _cella_env(tmp_path, **kw):
     )
 
 
-def test_resumed_state_seeds_base_tar_and_image_config(tmp_path, monkeypatch):
+def _parent_state_tar(parent_work):
+    """A parent state tar: the agent's evidence plus the orchestrator's
+    completion latch a resumed leg must not inherit."""
+    import io
+    import tarfile
+
+    state_tar = parent_work / "state-parent.tar"
+    with tarfile.open(state_tar, "w") as tar:
+        for name, payload in [
+            ("./app/branch-log.txt", b"leg\n"),
+            ("./logs/agent/mini-swe-agent.trajectory.json", b"{}"),
+            ("./titanium/result/done", b""),
+            ("./titanium/result/agent/rc", b"0\n"),
+        ]:
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+    return state_tar
+
+
+def test_resumed_state_seeds_base_tar_and_scrubs_the_latch(tmp_path, monkeypatch):
+    import tarfile
+
     parent_work = tmp_path / "parent" / "cella-env-x"
     parent_work.mkdir(parents=True)
-    state_tar = parent_work / "state-parent.tar"
-    state_tar.write_bytes(b"tar-bytes")
+    state_tar = _parent_state_tar(parent_work)
     (parent_work / "image-config.json").write_text(
         json.dumps({"WorkingDir": "/app"})
     )
@@ -84,8 +105,15 @@ def test_resumed_state_seeds_base_tar_and_image_config(tmp_path, monkeypatch):
     env._paired = False
     env._start_blocking(force_build=False)
 
-    assert env._base_tar is not None and env._base_tar.read_bytes() == b"tar-bytes"
-    assert env._base_tar != state_tar  # the parent's evidence is never consumed
+    assert env._base_tar is not None and env._base_tar != state_tar
+    with tarfile.open(env._base_tar) as tar:
+        names = tar.getnames()
+    # The evidence rides along -- the trajectory above all.
+    assert "./app/branch-log.txt" in names
+    assert "./logs/agent/mini-swe-agent.trajectory.json" in names
+    # The parent's completion latch does not: resumed verbatim, the
+    # guest would see a finished run and reset without a single phase.
+    assert not any(n.startswith("./titanium/result") for n in names)
     assert env._image_config == {"WorkingDir": "/app"}
 
 
@@ -94,8 +122,7 @@ def test_resume_refuses_a_tar_without_image_config(tmp_path, monkeypatch):
 
     parent_work = tmp_path / "parent" / "cella-env-x"
     parent_work.mkdir(parents=True)
-    state_tar = parent_work / "state-parent.tar"
-    state_tar.write_bytes(b"tar-bytes")
+    state_tar = _parent_state_tar(parent_work)
 
     env = _cella_env(tmp_path, resume_state_tar=str(state_tar))
     monkeypatch.setattr(env, "preflight", lambda: None)
