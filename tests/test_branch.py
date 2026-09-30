@@ -43,7 +43,7 @@ def test_sealed_spec_default_has_no_resume(tmp_path):
 
 
 def test_install_source_overrides_the_pypi_package(tmp_path):
-    source = "git+https://github.com/omne-earth/mini-swe-agent@feat/cella-branch"
+    source = "git+https://github.com/omne-earth/mini-swe-agent@edge"
     run = _mini(tmp_path, install_source=source).install_spec().steps[1].run
     assert f"uv tool install {source}" in run
     assert "uv tool install mini-swe-agent" not in run

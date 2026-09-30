@@ -12,9 +12,10 @@
 #
 # Needs a model key and the fork; without them nothing is proven (exit 2).
 #
-#   TITANIUM_SMOKE_MODEL   provider/model for mini-swe-agent (required)
+#   TITANIUM_MODEL         provider/model, the Makefile's own resolution
 #   MSWEA_INSTALL_SOURCE   uv tool install source for the fork
-#                          (default: the org fork's feat/cella-branch)
+#                          (default: the org fork's edge -- the rule of
+#                          thumb: omne-earth ships from edge)
 #
 #   exit 0  the proof passed
 #   exit 1  the proof failed -- a real regression
@@ -26,11 +27,10 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 
 TASK="${TITANIUM_SMOKE_TASK:-$ROOT/examples/smoke/cella/branch-wedge}"
 TITANIUM="$ROOT/.venv/bin/titanium"
-# The house convention: .secrets is a make include exporting
-# OPENROUTER_MODEL / OPENROUTER_API_KEY, so a `make smoke-cella-branch`
-# arrives with both in the environment. TITANIUM_SMOKE_MODEL overrides.
-MODEL="${TITANIUM_SMOKE_MODEL:-${OPENROUTER_MODEL:-}}"
-INSTALL_SOURCE="${MSWEA_INSTALL_SOURCE:-git+https://github.com/omne-earth/mini-swe-agent@feat/cella-branch}"
+# The existing plumbing: the Makefile resolves TITANIUM_MODEL (from
+# OPENROUTER_MODEL via the .secrets include) and passes it down.
+MODEL="${TITANIUM_MODEL:-${OPENROUTER_MODEL:-}}"
+INSTALL_SOURCE="${MSWEA_INSTALL_SOURCE:-git+https://github.com/omne-earth/mini-swe-agent@edge}"
 TRAJ_PATH="./logs/agent/mini-swe-agent.trajectory.json"
 
 RUN_ID="cella-branch-resume-$(date +%s)-$$"
@@ -45,7 +45,7 @@ fail() { echo; echo "FAIL: $*"; echo; echo "OVERALL: FAIL"; exit 1; }
 step "preconditions"
 [ -x "$TITANIUM" ] || skip "no titanium at $TITANIUM (run 'make sync')"
 [ -d "$TASK" ] || skip "no task at $TASK"
-[ -n "$MODEL" ] || skip "no model: set TITANIUM_SMOKE_MODEL, or OPENROUTER_MODEL via .secrets"
+[ -n "$MODEL" ] || skip "no model: TITANIUM_MODEL unresolved (set OPENROUTER_MODEL via .secrets)"
 if [ -z "${OPENROUTER_API_KEY:-}${MSWEA_API_KEY:-}${ANTHROPIC_API_KEY:-}${OPENAI_API_KEY:-}" ]; then
     skip "no model key in the environment (.secrets exports OPENROUTER_API_KEY through make)"
 fi

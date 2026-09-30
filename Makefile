@@ -432,7 +432,7 @@ smoke-cella-branch-oracle: .sudo-tty-guard-cella sync .podman .cella
 # nothing proven) rather than failing.
 smoke-cella-branch: .sudo-tty-guard-cella sync .podman .cella
 	$(LOG)
-	bash scripts/smoke/cella-branch-resume.sh
+	TITANIUM_MODEL=$(TITANIUM_MODEL) bash scripts/smoke/cella-branch-resume.sh
 
 # The three in order, cheapest first.
 smoke-cella-branch-all: smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch
