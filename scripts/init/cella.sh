@@ -23,6 +23,13 @@
 # at a lab build from a checkout when a smoke needs the console.
 set -ueo pipefail
 
+# The kernel golden builds inside Cella's build toolbox, and the toolbox
+# client (unlike rootless podman, which computes this itself) refuses an
+# empty XDG_RUNTIME_DIR: it reads its init stamps and bind sources from
+# it literally. A detached or non-login shell (CI, a harness) arrives
+# without one; fall back to the systemd user runtime dir.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [[ -f "$REPO_ROOT/runtime.env" ]] || {
   echo "missing $REPO_ROOT/runtime.env — the checked-in runtime dependency pins" >&2
@@ -160,6 +167,18 @@ fi
   echo "cella build rootfs terminator did not export the pair ca.pem" >&2
   exit 1
 }
+
+# --- the stock rootfs golden -----------------------------------------------
+
+# The appliance rootfs for cella's own evidence verbs: inspect and
+# extract boot a throwaway machine from the stock flavor to read a still
+# machine's disk. Titanium's state extract (and so the branch leg) rides
+# extract, so the golden is part of provisioning, not a lazy first-use
+# surprise inside a trial. Present means done, like the others.
+if [[ ! -f "$HOME/.cella/rootfs/cella/rootfs.ext4" ]]; then
+  echo "building the stock rootfs golden (the inspect/extract appliance)"
+  ( cd "$SRC" && "$CELLA" build rootfs cella )
+fi
 
 # --- the digest pin --------------------------------------------------------
 

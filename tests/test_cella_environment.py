@@ -610,3 +610,78 @@ def test_retire_machine_destroys_by_default_and_archives_on_flag(tmp_path):
     verbs.clear()
     env._retire_machine("m")
     assert verbs == ["stop", "archive"]  # archive: the machine is kept as an artifact
+
+
+def test_on_completion_parses_pause(tmp_path):
+    assert _make_env_with(tmp_path, on_completion="pause")._on_completion == "pause"
+    assert _make_env_with(tmp_path, on_completion="PAUSE")._on_completion == "pause"
+
+
+def test_retire_machine_pause_stops_and_keeps(tmp_path):
+    # pause: stop alone -- no archive latch, no destroy. The machine
+    # survives still and branchable (the resume path).
+    env = _make_env_with(tmp_path)
+    env._on_completion = "pause"
+    verbs = []
+    env._cella = lambda *a, **k: verbs.append(a[0])
+    env._retire_machine("m")
+    assert verbs == ["stop"]
+
+
+def _agent_phase(env, **step_kw) -> str:
+    phases = [
+        SealedPhaseSpec(
+            name="agent", steps=[SealedPhaseStep(command="id", **step_kw)]
+        )
+    ]
+    files = env._orchestrator_files(phases)
+    return next(
+        e for e in files if e.path == "/titanium/phases/agent.sh"
+    ).contents.decode()
+
+
+@pytest.mark.parametrize("image_user", ["root", "0", "0:0", "root:root"])
+def test_inherited_root_image_user_is_an_omission(tmp_path, image_user):
+    # The agent-install layer ends in `USER root`, so the image's USER
+    # is root for every agent-installed task. Inherited, that must not
+    # hand the payload root: the law is that root is written down.
+    env = _make_env(tmp_path)
+    env._image_config = {"User": image_user}
+    assert "runuser -u titanium -- bash" in _agent_phase(env)
+
+
+def test_a_non_root_image_user_is_still_inherited(tmp_path):
+    env = _make_env(tmp_path)
+    env._image_config = {"User": "builder"}
+    assert "runuser -u builder -- bash" in _agent_phase(env)
+
+
+def test_root_written_down_by_the_task_is_honored(tmp_path):
+    env = _make_env(tmp_path)
+    env._image_config = {"User": "root"}
+    env.default_user = "root"
+    assert "runuser -u root -- bash" in _agent_phase(env)
+
+
+def test_install_user_follows_the_payload_user(tmp_path):
+    # The payload never runs as root by omission, so an undeclared agent
+    # user installs as the standard user: an install under root's home
+    # would be unreachable to the payload that runs as titanium.
+    from titanium.models.agent.install import AgentInstallSpec, InstallStep
+
+    spec = AgentInstallSpec(
+        agent_name="mini-swe-agent", steps=[InstallStep(run="true", user="root")]
+    )
+    env = _make_env(tmp_path)
+    env.agent_install_spec = spec
+    assert env._install_user() == "titanium"
+    env.default_user = "builder"
+    assert env._install_user() == "builder"
+    env.default_user = "root"
+    assert env._install_user() == "root"
+
+
+def test_install_user_is_untouched_without_an_agent_install(tmp_path):
+    env = _make_env(tmp_path)
+    env.agent_install_spec = None
+    assert env._install_user() is None

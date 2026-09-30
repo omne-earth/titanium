@@ -598,6 +598,11 @@ class BaseEnvironment(ABC):
     # that overrides `archive` only to refuse it still does not support it.
     SUPPORTS_ARCHIVE: bool = False
 
+    # Whether this environment can stop the machine and keep it still and
+    # branchable after the trial (`on_completion=pause`), instead of
+    # destroying or archiving it. Declared, like SUPPORTS_ARCHIVE.
+    SUPPORTS_PAUSE: bool = False
+
     @classmethod
     def archive_preflight(cls) -> None:
         """Validate archive-specific host requirements before trial creation."""

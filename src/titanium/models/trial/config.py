@@ -76,6 +76,9 @@ class OnCompletion(str, Enum):
 
     TEARDOWN = "teardown"
     ARCHIVE = "archive"
+    # Stop the machine and keep it (no destroy, no archive latch): a still,
+    # branchable source for resuming the run. Cella only.
+    PAUSE = "pause"
 
 class EnvironmentConfig(BaseModel):
     type: EnvironmentType | None = None

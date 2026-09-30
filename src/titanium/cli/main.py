@@ -4,6 +4,7 @@ import typer
 from typer import Typer
 
 from titanium.cli.analyze import analyze_command, check_command
+from titanium.cli.branch import branch_command
 from titanium.cli.critique import critique_app
 from titanium.cli.jobs import jobs_app, start
 from titanium.cli.view import view_command
@@ -33,6 +34,10 @@ app.add_typer(critique_app, name="critique", help="Run sandboxed critiques.")
 app.command(name="check", help="Check task quality against a rubric.")(check_command)
 app.command(name="analyze", help="Analyze trial trajectories.")(analyze_command)
 app.command(name="run", help="Start a job.")(start)
+app.command(
+    name="branch",
+    help="Continue a timed-out cella trial as a new leg (cella only).",
+)(branch_command)
 app.command(name="view", help="Start web server to browse trajectory files.")(
     view_command
 )
