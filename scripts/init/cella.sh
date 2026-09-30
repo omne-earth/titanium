@@ -23,6 +23,13 @@
 # at a lab build from a checkout when a smoke needs the console.
 set -ueo pipefail
 
+# The kernel golden builds inside Cella's build toolbox, and the toolbox
+# client (unlike rootless podman, which computes this itself) refuses an
+# empty XDG_RUNTIME_DIR: it reads its init stamps and bind sources from
+# it literally. A detached or non-login shell (CI, a harness) arrives
+# without one; fall back to the systemd user runtime dir.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [[ -f "$REPO_ROOT/runtime.env" ]] || {
   echo "missing $REPO_ROOT/runtime.env — the checked-in runtime dependency pins" >&2
