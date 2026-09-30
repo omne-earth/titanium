@@ -140,6 +140,15 @@ def test_cella_run_script_adopts_the_seeded_rootfs_and_runs_no_dockerd():
     assert "reboot -f" in text
 
 
+def test_install_user_follows_the_environment_rule():
+    # The environment's own rule, mirrored: a declared user is honored, an
+    # undeclared one installs as the baked standard user, and no install
+    # means no user to name.
+    assert driver.install_user("builder", object()) == "builder"
+    assert driver.install_user(None, object()) == driver.AGENT_USER
+    assert driver.install_user(None, None) is None
+
+
 def test_cella_seed_plan_names_no_container_images():
     assert driver.CELLA.seed_plan(Path("t")) == ([], False)
 

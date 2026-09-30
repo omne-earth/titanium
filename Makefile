@@ -541,7 +541,7 @@ CELLA_RUNNER_TASK ?= examples/smoke/cella-runner-$(CELLA_RUNNER_ENV)
 CELLA_RUNNER_ENV = $(patsubst %-debug,%,$(@:smoke-cella-runner-%=%))
 smoke-cella-runner-docker smoke-cella-runner-docker-debug: .cella-runner-kernel-docker
 smoke-cella-runner-cella smoke-cella-runner-cella-debug: .cella-runner-kernel-cella
-smoke-cella-runner-docker smoke-cella-runner-cella: .sudo-tty-guard sync .podman .cella
+smoke-cella-runner-docker smoke-cella-runner-cella: .sudo-tty-guard-cella sync .podman .cella
 	$(LOG)
 	TITANIUM_CELLA_RUNNER_AGENT=$(TITANIUM_AGENT) bash scripts/cella-runner.sh $(CELLA_RUNNER_TASK) $(CELLA_RUNNER_ENV) $(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 
@@ -549,7 +549,7 @@ smoke-cella-runner-docker smoke-cella-runner-cella: .sudo-tty-guard sync .podman
 # into the payload (cella-chronicle/<machine>/console.log). Debugging only:
 # the script refuses a lab cella without CELLA_RUNNER_DEBUG, so production
 # never ships on an observed guest.
-smoke-cella-runner-docker-debug smoke-cella-runner-cella-debug: .sudo-tty-guard sync .podman .cella .cella-debug
+smoke-cella-runner-docker-debug smoke-cella-runner-cella-debug: .sudo-tty-guard-cella sync .podman .cella .cella-debug
 	$(LOG)
 	CELLA_RUNNER_DEBUG=true CELLA_BIN="$(CELLA_LAB_BIN)" TITANIUM_CELLA_RUNNER_AGENT=$(TITANIUM_AGENT) bash scripts/cella-runner.sh $(CELLA_RUNNER_TASK) $(CELLA_RUNNER_ENV) $(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
 

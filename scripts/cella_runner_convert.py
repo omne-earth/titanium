@@ -52,6 +52,7 @@ from titanium.environments.agent_setup import (
 )
 from titanium.environments.cella.boot_layer import BootLayer, GuestFile, GuestSymlink
 from titanium.environments.cella.constants import (
+    AGENT_USER,
     APPLIANCE_WIRE_ADDRESS,
     ROOTFS_BUILDER_IMAGE,
     MEMBER_CA_PATH,
@@ -717,6 +718,16 @@ export CELLA_EXTRACT_MIB_PER_SEC={CELLA_INNER_EXTRACT_MIB_PER_SEC}
 """
 
 
+def install_user(declared: str | None, install) -> str | None:
+    """The user the agent's install steps run as, the environment's own rule
+    (CellaEnvironment._install_user): the task's declared agent user, else,
+    for an installed agent, the baked standard user -- the payload never
+    runs as root by omission, so the install must land in its home."""
+    if declared is None and install is not None:
+        return AGENT_USER
+    return declared
+
+
 def _cella_seed_plan(task_dir: Path) -> tuple[list[str], bool]:
     return [], False
 
@@ -746,13 +757,14 @@ def _cella_stage(task_dir: Path, context: Path, agent: str) -> str | None:
     config = tomllib.loads((task_dir / "task.toml").read_text())
     work = seed / "rootfs"
     work.mkdir(parents=True)
+    install = agent_install_spec(agent)
     tag = new_build_tag("titanium-cella-runner")
     try:
         prepared_context = prepare_build_context(
             environment_dir=task_dir / "environment",
             context_dir=work / "context",
-            agent_install_spec=agent_install_spec(agent),
-            agent_user=(config.get("agent") or {}).get("user"),
+            agent_install_spec=install,
+            agent_user=install_user((config.get("agent") or {}).get("user"), install),
         )
         build_image(
             context_dir=prepared_context.context_dir,
