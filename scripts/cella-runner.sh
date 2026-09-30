@@ -65,7 +65,7 @@ GUEST_MEM_MB="${TITANIUM_CELLA_RUNNER_MEM_MB:-$_MEM_DEFAULT}"
 # each of its machines pays mkfs, create and a one-vCPU boot in minutes.
 case "$INNER_ENV" in
     cella) _TIMEOUT_DEFAULT=10800 ;;
-    *)     _TIMEOUT_DEFAULT=1800 ;;
+    *)     _TIMEOUT_DEFAULT=2700 ;;
 esac
 BOOT_TIMEOUT_SECS="${TITANIUM_CELLA_RUNNER_TIMEOUT:-$_TIMEOUT_DEFAULT}"
 # The inner agent. Its build-time install (uv, PyPI) is baked on the host,

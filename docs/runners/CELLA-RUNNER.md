@@ -597,7 +597,7 @@ The knobs, all environment variables on the `make` line:
 | `TITANIUM_AGENT` | `mini-swe-agent` | the inner agent, for either environment |
 | `TITANIUM_CELLA_RUNNER_MEM_MB` | 4096 docker, 6144 cella | the guest's memory ceiling |
 | `TITANIUM_CELLA_RUNNER_EXT4_BYTES` | 10 GiB | the guest's disk |
-| `TITANIUM_CELLA_RUNNER_TIMEOUT` | 1800 docker, 10800 cella | seconds to wait for the guest's reset; on a miss the guest is stopped and its partial payload extracted |
+| `TITANIUM_CELLA_RUNNER_TIMEOUT` | 2700 docker, 10800 cella | seconds to wait for the guest's reset; on a miss the guest is stopped and its partial payload extracted |
 | `TITANIUM_CELLA_WORKDIR` | `/var/tmp` | where the bake and the run's `CELLA_HOME` live |
 | `CELLA_RUNNER_KEEP_ROOTFS` | `true` | keep the guest rootfs in the payload (`false` for fast iteration) |
 | `CELLA_RUNNER_DRY_RUN` | `false` | collect the world crossings instead of enforcing (§9) |
