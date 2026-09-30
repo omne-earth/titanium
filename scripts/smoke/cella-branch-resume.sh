@@ -128,8 +128,12 @@ parent = json.load(open(sys.argv[1]))["messages"]
 leg = json.load(open(sys.argv[2]))["messages"]
 token = sys.argv[3]
 
-# The resume prune: back to the last observation (a user message).
-while parent and parent[-1].get("role") != "user":
+# The resume prune, mirrored from the fork: back to the last
+# observation in any message format (user / tool / response API).
+def is_observation(m):
+    return m.get("type") == "function_call_output" or m.get("role") in ("user", "tool")
+
+while parent and not is_observation(parent[-1]):
     parent.pop()
 
 # A parent cut before its first observation leaves nothing a restart
