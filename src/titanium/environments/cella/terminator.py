@@ -165,7 +165,8 @@ def _round_trip(dest: str, proto: str, window: str) -> str:
 def member_policy_text() -> str:
     """The member border, fixed for every task: the wire plane's ARP and
     the appliance itself. The member reaches only its appliance -- 443
-    (https + inference), 80 (apt), 53 (the interceptor's DNS) -- so its
+    (https + inference), 80 (apt), 53 (the interceptor's DNS, udp and the
+    resolver's tcp fallback) and its own icmp back to it -- so its
     grants are three exact destinations, all to the gateway ip. Every
     world name is judged on the *appliance's* border, never here.
 
@@ -190,6 +191,15 @@ def member_policy_text() -> str:
         + _round_trip(f"{gw}:443", "tcp", MEMBER_KEEP_OPEN)
         + _round_trip(f"{gw}:80", "tcp", MEMBER_KEEP_OPEN)
         + _round_trip(f"{gw}:53", "udp", MEMBER_KEEP_OPEN)
+        # A resolver falls back to TCP on a truncated answer. The
+        # interceptor speaks UDP only, so the attempt meets a reset -- an
+        # answer the resolver moves past. Ungranted, the egress is refused
+        # and held, and a held egress freezes the member for good.
+        + _round_trip(f"{gw}:53", "tcp", MEMBER_KEEP_OPEN)
+        # The member's own ICMP to its appliance: port-unreachable for a
+        # DNS answer that lands after the resolver closed its socket (a
+        # retried query's late twin). Same peer, same rule as above.
+        + _round_trip(f"{gw}:*", "icmp", MEMBER_KEEP_OPEN)
     )
 
 

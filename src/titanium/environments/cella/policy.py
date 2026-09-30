@@ -345,7 +345,7 @@ def _parse_destination(spec: str, lineno: int) -> dict:
         except ValueError as exc:
             raise PolicyError(
                 f"cella.policy line {lineno}: protocol {proto_word!r} is not "
-                f"tcp, udp, or a number."
+                f"tcp, udp, icmp, or a number."
             ) from exc
         if not 0 <= proto <= 255:
             raise PolicyError(

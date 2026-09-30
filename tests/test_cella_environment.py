@@ -543,6 +543,8 @@ def test_member_policy_reaches_only_the_appliance():
     assert f"release outgoing {gw}:443/tcp (keep_open=24h) (skip_freeze=true)" in lines
     assert f"release outgoing {gw}:80/tcp (keep_open=24h) (skip_freeze=true)" in lines
     assert f"release outgoing {gw}:53/udp (keep_open=24h) (skip_freeze=true)" in lines
+    assert f"release outgoing {gw}:53/tcp (keep_open=24h) (skip_freeze=true)" in lines
+    assert f"release outgoing {gw}:*/icmp (keep_open=24h) (skip_freeze=true)" in lines
     # No world name ever appears on the member border.
     assert all(g.host == "" for g in policy.grants)
 

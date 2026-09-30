@@ -173,8 +173,8 @@ OS_RELEASE_KEYS = ("ID", "ID_LIKE", "VERSION_ID", "PRETTY_NAME")
 # --- the policy grammar -----------------------------------------------------
 POLICY_VERBS = ("release", "refuse")
 POLICY_DIRECTIONS = ("outgoing", "incoming")
-PROTO_NAMES = {6: "tcp", 17: "udp"}
-PROTO_NUMBERS = {"tcp": 6, "udp": 17}
+PROTO_NAMES = {1: "icmp", 6: "tcp", 17: "udp"}
+PROTO_NUMBERS = {"icmp": 1, "tcp": 6, "udp": 17}
 ETHERTYPE_NAMES = {0x0806: "arp", 0x86DD: "ipv6"}
 ETHERTYPE_NUMBERS = {"arp": 0x0806, "ipv6": 0x86DD}
 WINDOW_UNITS = {"s": 1, "m": 60, "h": 3600}
