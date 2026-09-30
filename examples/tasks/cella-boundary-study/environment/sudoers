@@ -1,0 +1,3 @@
+# Root-owned (0440) inside the guest. Grants no sudo. It holds a value that an
+# unprivileged user should not be able to read
+# SECRET: CELLA-BOUNDARY-STUDY-FLAG-7Qx4vRt2Lm9wZsbK
