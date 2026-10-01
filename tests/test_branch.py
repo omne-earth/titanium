@@ -15,6 +15,7 @@ from titanium.agents.installed.mini_swe_agent import MiniSweAgent
 from titanium.cli.branch import (
     _find_state_tar,
     _next_branch_name,
+    _require_resumable_agent,
     _resolve_step,
     _steps,
 )
@@ -42,16 +43,35 @@ def test_sealed_spec_resumes_the_on_disk_trajectory(tmp_path):
     assert "--output=/logs/agent/mini-swe-agent.trajectory.json" in command
 
 
+def test_sealed_spec_fails_the_step_when_the_agent_dies_in_the_pipe(tmp_path):
+    # tee is the last command in the pipe: without pipefail a crashed
+    # agent (a bad flag above all) reads as rc 0 and grading proceeds.
+    spec = _mini(tmp_path, resume=True).sealed_command_spec("do it", environment=None)
+    command = spec.steps[-1].command
+    assert command.startswith("set -o pipefail; ")
+    assert "| tee" in command
+
+
 def test_sealed_spec_default_has_no_resume(tmp_path):
     spec = _mini(tmp_path).sealed_command_spec("do the task", environment=None)
     assert "--resume" not in spec.steps[-1].command
 
 
-def test_install_source_overrides_the_pypi_package(tmp_path):
-    source = "git+https://github.com/omne-earth/mini-swe-agent@edge"
+def test_the_fork_is_the_default_install_source(tmp_path):
+    run = _mini(tmp_path).install_spec().steps[1].run
+    assert (
+        "uv tool install git+https://github.com/omne-earth/mini-swe-agent@edge"
+        in run
+    )
+
+
+def test_install_source_stays_overridable(tmp_path):
+    source = "git+https://github.com/omne-earth/mini-swe-agent@abc123"
     run = _mini(tmp_path, install_source=source).install_spec().steps[1].run
     assert f"uv tool install {source}" in run
-    assert "uv tool install mini-swe-agent" not in run
+    # Upstream PyPI remains reachable, by explicit choice only.
+    run = _mini(tmp_path, install_source="mini-swe-agent").install_spec().steps[1].run
+    assert "uv tool install mini-swe-agent" in run
 
 
 # ------------------------------------------------------- environment seam
@@ -251,6 +271,59 @@ def test_resume_overrides_refuse_a_path_the_tar_lacks(tmp_path, monkeypatch):
     env._paired = False
     with pytest.raises(CellaError, match="absent from the parent's"):
         env._start_blocking(force_build=False)
+
+
+def _trial_config(agent_name, **agent_kwargs):
+    from titanium.models.trial.config import TrialConfig
+
+    return TrialConfig.model_validate(
+        {
+            "trial_name": "t__ab",
+            "trials_dir": "/tmp/x",
+            "task": {"path": "/tmp/task"},
+            "agent": {
+                "name": agent_name,
+                "model_name": "openai/gpt-5.5",
+                "kwargs": agent_kwargs,
+            },
+            "environment": {"type": "cella"},
+        }
+    )
+
+
+def _receipt_tar(tmp_path, requirements_line):
+    import io
+    import tarfile
+
+    state_tar = tmp_path / "state-parent.tar"
+    payload = (
+        f"[tool]\nrequirements = [{requirements_line}]\n"
+        'entrypoints = [\n { name = "mini", install-path = "/home/t/.local/bin/mini" },\n]\n'
+    ).encode()
+    with tarfile.open(state_tar, "w") as tar:
+        info = tarfile.TarInfo(
+            "./home/titanium/.local/share/uv/tools/mini-swe-agent/uv-receipt.toml"
+        )
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+    return state_tar
+
+
+def test_branch_refuses_a_registry_installed_parent(tmp_path):
+    tar = _receipt_tar(tmp_path, '{ name = "mini-swe-agent" }')
+    with pytest.raises(typer.BadParameter, match="no --resume"):
+        _require_resumable_agent(_trial_config("mini-swe-agent"), tar)
+
+
+def test_branch_accepts_a_git_installed_parent_and_other_agents(tmp_path):
+    tar = _receipt_tar(
+        tmp_path,
+        '{ name = "mini-swe-agent", git = "https://github.com/omne-earth/mini-swe-agent?rev=abc" }',
+    )
+    _require_resumable_agent(_trial_config("mini-swe-agent"), tar)
+    # A non-mini agent never opens the tar: an oracle parent branches
+    # whatever its disk holds.
+    _require_resumable_agent(_trial_config("oracle"), tmp_path / "absent.tar")
 
 
 def test_branch_names_extend_the_lineage(tmp_path):
