@@ -880,6 +880,10 @@ mini-swe-agent --help
         steps.append(
             SealedStep(
                 command=(
+                    # Without pipefail the step's rc is tee's: a crashed
+                    # agent (a bad flag above all) would read as rc 0 and
+                    # verification would grade whatever the disk holds.
+                    "set -o pipefail; "
                     '. "$HOME/.local/bin/env"; '
                     f"mini-swe-agent --yolo --model={run_model_name} "
                     f"--task={escaped_instruction} "
