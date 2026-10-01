@@ -139,6 +139,34 @@ def _resolve_step(steps: list[dict[str, Any]], at: str) -> dict[str, Any]:
     return matches[0]
 
 
+_UV_RECEIPT_SUFFIX = "/.local/share/uv/tools/mini-swe-agent/uv-receipt.toml"
+
+
+def _require_resumable_agent(config: TrialConfig, state_tar: Path) -> None:
+    """The leg reuses the parent's baked disk, binary and all. Upstream
+    PyPI mini-swe-agent has no --resume: the leg's agent would die on
+    the flag and the verifier would re-grade the parent's finished disk
+    -- a hollow PASS. The ground truth is the uv install receipt on
+    that disk (the config's install_source only says what was asked
+    for), so refuse when the receipt shows a registry install rather
+    than a git build. A parent without a receipt is left alone."""
+    if config.agent.name != "mini-swe-agent":
+        return
+    receipt = None
+    with tarfile.open(state_tar, "r:") as tar:
+        for member in tar:
+            if member.name.endswith(_UV_RECEIPT_SUFFIX) and member.isfile():
+                receipt = tar.extractfile(member).read().decode(errors="replace")
+                break
+    if receipt is not None and "git" not in receipt.split("entrypoints")[0]:
+        raise typer.BadParameter(
+            "the parent's disk carries a registry-installed mini-swe-agent, "
+            "which has no --resume: the leg cannot continue its trajectory. "
+            "Re-run the parent with the fork (the default install source), "
+            "not an upstream PyPI install_source"
+        )
+
+
 _TRIAL_PATH_OPTION = Option(
     "-p",
     "--trial-path",
@@ -229,6 +257,8 @@ def branch_command(
 
     trial_dir = Path(trial_path)
     config, state_tar = _parent_state_tar(trial_dir)
+
+    _require_resumable_agent(config, state_tar)
 
     trials_dir = trial_dir.parent
     leg_name = _next_branch_name(config.trial_name, trials_dir)
