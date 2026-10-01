@@ -39,6 +39,11 @@ from titanium.utils.trajectory_metrics import (
 )
 
 
+# The default `uv tool install` source: the org fork's edge, the build
+# every titanium feature (--resume above all) is proven against.
+DEFAULT_INSTALL_SOURCE = "git+https://github.com/omne-earth/mini-swe-agent@edge"
+
+
 def _normalize_content(raw_content: Any) -> str:
     """Normalize message content which may be a string, list of parts, or None."""
     if raw_content is None:
@@ -593,9 +598,14 @@ class MiniSweAgent(BaseInstalledAgent):
         # (--resume needs a mini-swe-agent build that has the flag, e.g.
         # installed via install_source from the org fork).
         self._resume = str(resume).lower() in ("true", "1", "yes")
-        # An alternative `uv tool install` source (a git+https URL or a
-        # local path); the default is the pinned PyPI package.
-        self._install_source = install_source
+        # The `uv tool install` source. The default is the org fork's
+        # edge: the build every titanium feature (--resume above all)
+        # is proven against. Overridable with any uv source -- a pinned
+        # fork sha (the cache-honest choice: the install is a cached
+        # image layer keyed on the command string, so a moving ref can
+        # serve a stale build), upstream PyPI ("mini-swe-agent"), or a
+        # local path.
+        self._install_source = install_source or DEFAULT_INSTALL_SOURCE
         self._cost_limit = cost_limit
         self._reasoning_effort = reasoning_effort
         self._model_class = model_class
@@ -631,7 +641,6 @@ class MiniSweAgent(BaseInstalledAgent):
         return list(dict.fromkeys(packages))
 
     def install_spec(self) -> AgentInstallSpec:
-        version_spec = f"=={self._version}" if self._version else ""
         install_extra_packages = ""
         if self._install_python_packages:
             packages = " ".join(
@@ -660,7 +669,7 @@ if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" 2>/dev/null;
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
 fi
 source "$HOME/.local/bin/env"
-uv tool install {shlex.quote(self._install_source) if self._install_source else f"mini-swe-agent{version_spec}"}
+uv tool install {shlex.quote(self._install_source)}
 
 python_bin="$(head -n 1 "$(command -v mini-swe-agent)" | sed 's/^#!//')"
 {install_extra_packages}
