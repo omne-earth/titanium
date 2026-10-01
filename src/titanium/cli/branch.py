@@ -8,13 +8,22 @@ the agent resumes its own on-disk trajectory pruned back to the last
 observation, and the leg runs under a fresh timeout. To the agent it
 reads as one longer run, gap in wall-clock notwithstanding.
 
+``titanium branch show`` lists the parent's steps git-log style, keyed
+by each observation's tool_call_id, and ``--at <id>`` trims the resumed
+trajectory back to that observation instead of the last one. The trim
+rewinds the agent's memory only: the disk in the state tar is from the
+end of the parent leg, and the leg resumes on it as-is.
+
 Cella-only by design: no other rung leaves a whole-tree state tar to
 bake the next leg from.
 """
 
+import datetime
+import json
 import re
+import tarfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -25,6 +34,12 @@ from titanium.models.environment_type import EnvironmentType
 from titanium.models.trial.config import TrialConfig
 
 console = Console()
+
+branch_app = typer.Typer(invoke_without_command=True, no_args_is_help=False)
+
+# Where the agent's own trajectory lives on the guest disk: the file the
+# patched mini-swe-agent --resume reads and keeps appending to.
+TRAJECTORY_GUEST_PATH = "./logs/agent/mini-swe-agent.trajectory.json"
 
 
 def _find_state_tar(trial_dir: Path) -> Path:
@@ -57,29 +72,82 @@ def _next_branch_name(parent_name: str, trials_dir: Path) -> str:
     return f"{base}-branch-{n}"
 
 
-def branch_command(
-    trial_path: Annotated[
-        Path,
-        Option(
-            "-p",
-            "--trial-path",
-            help="Path to the parent trial directory (containing config.json "
-            "and the cella-env-* work dir with its state tar).",
-        ),
-    ],
-    agent_timeout_multiplier: Annotated[
-        float | None,
-        Option(
-            "--agent-timeout-multiplier",
-            help="Agent timeout multiplier for the new leg (default: the "
-            "parent's own).",
-            show_default=False,
-        ),
-    ] = None,
-) -> None:
-    """Continue a cella trial from its preserved state, as a new leg."""
-    from titanium.trial.trial import Trial
+def _read_trajectory(state_tar: Path) -> dict[str, Any]:
+    """The parent's trajectory, read from the state tar itself: the copy
+    the leg will actually resume, not a host-side mirror."""
+    with tarfile.open(state_tar, "r:") as tar:
+        try:
+            member = tar.extractfile(TRAJECTORY_GUEST_PATH)
+        except KeyError:
+            member = None
+        if member is None:
+            raise typer.BadParameter(
+                f"no trajectory at {TRAJECTORY_GUEST_PATH} in {state_tar}: "
+                "the parent leg never wrote one, so there is no step list"
+            )
+        return json.loads(member.read())
 
+
+def _is_observation(message: dict[str, Any]) -> bool:
+    """Mirrors the fork's resume prune: an observation in any message
+    format (user / tool / response API)."""
+    return message.get("type") == "function_call_output" or message.get("role") in (
+        "user",
+        "tool",
+    )
+
+
+def _steps(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per observation that answers an agent action, keyed by
+    the id already in the file (tool_call_id / call_id). The system
+    prompt and the task instruction are observations to the prune but
+    not steps: they answer nothing."""
+    steps: list[dict[str, Any]] = []
+    last_action: dict[str, Any] | None = None
+    for index, message in enumerate(messages):
+        if message.get("role") == "assistant" or message.get("type") == "function_call":
+            last_action = message
+            continue
+        if not _is_observation(message) or last_action is None:
+            continue
+        extra = message.get("extra") or {}
+        actions = (last_action.get("extra") or {}).get("actions") or [{}]
+        steps.append(
+            {
+                "id": message.get("tool_call_id") or message.get("call_id") or f"#{len(steps) + 1}",
+                "index": index,
+                "timestamp": extra.get("timestamp"),
+                "returncode": extra.get("returncode"),
+                "command": actions[0].get("command", "?"),
+            }
+        )
+    return steps
+
+
+def _resolve_step(steps: list[dict[str, Any]], at: str) -> dict[str, Any]:
+    """Git-style resolution: any unambiguous substring of a step id."""
+    matches = [s for s in steps if at in s["id"]]
+    if not matches:
+        raise typer.BadParameter(
+            f"--at {at!r} matches no step id; `titanium branch show` lists them"
+        )
+    if len(matches) > 1:
+        raise typer.BadParameter(
+            f"--at {at!r} is ambiguous: "
+            + ", ".join(s["id"] for s in matches)
+        )
+    return matches[0]
+
+
+_TRIAL_PATH_OPTION = Option(
+    "-p",
+    "--trial-path",
+    help="Path to the parent trial directory (containing config.json "
+    "and the cella-env-* work dir with its state tar).",
+)
+
+
+def _parent_state_tar(trial_path: Path) -> tuple[TrialConfig, Path]:
     trial_dir = Path(trial_path)
     config_path = trial_dir / "config.json"
     if not config_path.is_file():
@@ -99,9 +167,72 @@ def branch_command(
             f"no image-config.json beside {state_tar}: the parent run "
             "predates branch support; re-run it first"
         )
+    return config, state_tar
+
+
+@branch_app.command(name="show")
+def show_command(
+    trial_path: Annotated[Path, _TRIAL_PATH_OPTION],
+) -> None:
+    """List the parent leg's steps, one line per observation."""
+    _, state_tar = _parent_state_tar(trial_path)
+    steps = _steps(_read_trajectory(state_tar).get("messages", []))
+    if not steps:
+        console.print("no steps: the trajectory holds no answered action yet")
+        return
+    for step in steps:
+        ts = step["timestamp"]
+        when = (
+            datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+            if ts is not None
+            else "??:??:??"
+        )
+        rc = step["returncode"]
+        command = " ".join(str(step["command"]).split())
+        # Plain echo, not rich: one step per line whatever the terminal
+        # width, so `awk '{print $1}'` on a pipe stays honest.
+        typer.echo(f"{step['id']}  {when}  rc={rc!s:<4} {command[:72]}")
+
+
+@branch_app.callback()
+def branch_command(
+    ctx: typer.Context,
+    trial_path: Annotated[Path | None, _TRIAL_PATH_OPTION] = None,
+    at: Annotated[
+        str | None,
+        Option(
+            "--at",
+            help="Trim the resumed trajectory back to this step (any "
+            "unambiguous substring of a step id from `branch show`). "
+            "Default: the parent's last observation. The disk is not "
+            "rewound: it stays as the parent leg left it.",
+            show_default=False,
+        ),
+    ] = None,
+    agent_timeout_multiplier: Annotated[
+        float | None,
+        Option(
+            "--agent-timeout-multiplier",
+            help="Agent timeout multiplier for the new leg (default: the "
+            "parent's own).",
+            show_default=False,
+        ),
+    ] = None,
+) -> None:
+    """Continue a cella trial from its preserved state, as a new leg."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if trial_path is None:
+        raise typer.BadParameter("-p/--trial-path is required")
+
+    from titanium.trial.trial import Trial
+
+    trial_dir = Path(trial_path)
+    config, state_tar = _parent_state_tar(trial_dir)
 
     trials_dir = trial_dir.parent
     leg_name = _next_branch_name(config.trial_name, trials_dir)
+    leg_dir = trials_dir / leg_name
 
     config.trials_dir = trials_dir
     config.trial_name = leg_name
@@ -112,9 +243,31 @@ def branch_command(
     if agent_timeout_multiplier is not None:
         config.agent_timeout_multiplier = agent_timeout_multiplier
 
+    trimmed_to = ""
+    if at is not None:
+        trajectory = _read_trajectory(state_tar)
+        messages = trajectory.get("messages", [])
+        step = _resolve_step(_steps(messages), at)
+        trajectory["messages"] = messages[: step["index"] + 1]
+        trimmed = leg_dir / "trimmed-trajectory.json"
+        leg_dir.mkdir(parents=True, exist_ok=True)
+        trimmed.write_text(json.dumps(trajectory))
+        # The environment substitutes the trimmed file for the tar's own
+        # copy while seeding the leg's base tar; the guest-side resume
+        # prune then finds a trajectory already ending at an observation.
+        config.environment.kwargs["resume_overrides"] = {
+            TRAJECTORY_GUEST_PATH: str(trimmed)
+        }
+        trimmed_to = f" at step {step['id']}"
+        console.print(
+            "[yellow]note:[/yellow] the trim rewinds the agent's memory, "
+            "not the disk -- the state tar is from the end of the parent "
+            "leg, and later steps' effects are still on it"
+        )
+
     console.print(
         f"Branching [bold]{trial_dir.name}[/bold] -> [bold green]{leg_name}[/bold green] "
-        f"from {state_tar.name}"
+        f"from {state_tar.name}{trimmed_to}"
     )
 
     async def _run() -> None:

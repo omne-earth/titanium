@@ -243,6 +243,7 @@ class CellaEnvironment(BaseEnvironment):
         dry_run: bool | str = False,
         on_completion: str = "teardown",
         resume_state_tar: str | None = None,
+        resume_overrides: dict[str, str] | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -271,6 +272,13 @@ class CellaEnvironment(BaseEnvironment):
         self._resume_state_tar = (
             Path(resume_state_tar) if resume_state_tar else None
         )
+        # Per-file substitutions applied while seeding the leg's base
+        # tar from the parent's: {guest path: host file}. The branch
+        # CLI's --at trim rides in this way; the parent's tar itself is
+        # never touched.
+        self._resume_overrides = {
+            name: Path(source) for name, source in (resume_overrides or {}).items()
+        }
         # Each engine is an in-process grpclib server (no subprocess):
         # {vm-id: (server, port)}, all hosted on one background asyncio
         # loop thread so they never block the harness's event loop.
@@ -499,13 +507,26 @@ class CellaEnvironment(BaseEnvironment):
         with tarfile.open(tar, "r:") as source, tarfile.open(
             self._base_tar, "w"
         ) as dest:
+            seen = set()
             for member in source:
                 if member.name == latch or member.name.startswith(latch + "/"):
                     continue
-                if member.isfile():
+                override = self._resume_overrides.get(member.name)
+                if override is not None and member.isfile():
+                    payload = override.read_bytes()
+                    member.size = len(payload)
+                    dest.addfile(member, io.BytesIO(payload))
+                    seen.add(member.name)
+                elif member.isfile():
                     dest.addfile(member, source.extractfile(member))
                 else:
                     dest.addfile(member)
+        missing = set(self._resume_overrides) - seen
+        if missing:
+            raise CellaError(
+                "resume_overrides name paths absent from the parent's "
+                f"state tar: {sorted(missing)}"
+            )
 
     # ----------------------------------------------------------- uploads
 

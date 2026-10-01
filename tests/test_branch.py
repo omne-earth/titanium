@@ -12,7 +12,12 @@ import pytest
 import typer
 
 from titanium.agents.installed.mini_swe_agent import MiniSweAgent
-from titanium.cli.branch import _find_state_tar, _next_branch_name
+from titanium.cli.branch import (
+    _find_state_tar,
+    _next_branch_name,
+    _resolve_step,
+    _steps,
+)
 from titanium.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
 from titanium.models.trial.paths import TrialPaths
 
@@ -147,6 +152,105 @@ def test_find_state_tar_refuses_an_unextracted_parent(tmp_path):
     (tmp_path / "cella-env-a").mkdir()
     with pytest.raises(typer.BadParameter, match="no member state tar"):
         _find_state_tar(tmp_path)
+
+
+def _messages():
+    """A three-step trajectory in the tool-message format, plus the two
+    template messages the prune counts as observations but show does not
+    count as steps."""
+    def action(command, call):
+        return {
+            "role": "assistant",
+            "content": "...",
+            "extra": {"actions": [{"command": command, "tool_call_id": call}]},
+        }
+
+    def observation(call, rc, ts):
+        return {
+            "role": "tool",
+            "tool_call_id": call,
+            "content": "{}",
+            "extra": {"returncode": rc, "timestamp": ts},
+        }
+
+    return [
+        {"role": "system", "content": "be good"},
+        {"role": "user", "content": "the task"},
+        action("echo one", "call_aa1"),
+        observation("call_aa1", 0, 100.0),
+        action("echo two", "call_bb2"),
+        observation("call_bb2", 0, 200.0),
+        action("echo three", "call_cc3"),
+        observation("call_cc3", 1, 300.0),
+    ]
+
+
+def test_steps_list_answered_actions_only():
+    steps = _steps(_messages())
+    assert [s["id"] for s in steps] == ["call_aa1", "call_bb2", "call_cc3"]
+    assert [s["command"] for s in steps] == ["echo one", "echo two", "echo three"]
+    assert steps[2]["returncode"] == 1
+    # The index points at the observation itself: messages[:index+1] is
+    # the trim that keeps the step and drops everything after it.
+    assert _messages()[steps[1]["index"]]["tool_call_id"] == "call_bb2"
+
+
+def test_resolve_step_matches_like_git():
+    steps = _steps(_messages())
+    assert _resolve_step(steps, "bb2")["id"] == "call_bb2"
+    with pytest.raises(typer.BadParameter, match="no step id"):
+        _resolve_step(steps, "zz9")
+    with pytest.raises(typer.BadParameter, match="ambiguous"):
+        _resolve_step(steps, "call_")
+
+
+def test_resume_overrides_substitute_the_trajectory(tmp_path, monkeypatch):
+    import tarfile
+
+    parent_work = tmp_path / "parent" / "cella-env-x"
+    parent_work.mkdir(parents=True)
+    state_tar = _parent_state_tar(parent_work)
+    (parent_work / "image-config.json").write_text(json.dumps({}))
+    trimmed = tmp_path / "trimmed.json"
+    trimmed.write_text('{"messages": []}')
+
+    env = _cella_env(
+        tmp_path,
+        resume_state_tar=str(state_tar),
+        resume_overrides={
+            "./logs/agent/mini-swe-agent.trajectory.json": str(trimmed)
+        },
+    )
+    monkeypatch.setattr(env, "preflight", lambda: None)
+    env._paired = False
+    env._start_blocking(force_build=False)
+
+    with tarfile.open(env._base_tar) as tar:
+        payload = tar.extractfile(
+            "./logs/agent/mini-swe-agent.trajectory.json"
+        ).read()
+    assert payload == b'{"messages": []}'
+
+
+def test_resume_overrides_refuse_a_path_the_tar_lacks(tmp_path, monkeypatch):
+    from titanium.environments.cella.environment import CellaError
+
+    parent_work = tmp_path / "parent" / "cella-env-x"
+    parent_work.mkdir(parents=True)
+    state_tar = _parent_state_tar(parent_work)
+    (parent_work / "image-config.json").write_text(json.dumps({}))
+    override = tmp_path / "x.json"
+    override.write_text("{}")
+
+    env = _cella_env(
+        tmp_path,
+        resume_state_tar=str(state_tar),
+        resume_overrides={"./no/such/file.json": str(override)},
+    )
+    monkeypatch.setattr(env, "preflight", lambda: None)
+    env._paired = False
+    with pytest.raises(CellaError, match="absent from the parent's"):
+        env._start_blocking(force_build=False)
 
 
 def test_branch_names_extend_the_lineage(tmp_path):
