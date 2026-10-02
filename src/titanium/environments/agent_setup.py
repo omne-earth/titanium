@@ -192,13 +192,13 @@ def proxy_policy_env(allowlist: NetworkAllowlist, token: str) -> dict[str, str]:
     }
 
 
-def write_docker_proxy_compose(
-    *,
-    path: Path,
-    proxy_dir: Path,
-    allowlist: NetworkAllowlist,
-    token: str,
-) -> Path:
+def write_egress_proxy_build_context(proxy_dir: Path) -> Path:
+    """The squid sidecar's build context: its Dockerfile and bootstrap.
+
+    One home for the image, so a runner that must build it elsewhere (the
+    airgapped cella-runner guest cannot ``apk add``) builds exactly this and
+    hands the result back through ``TITANIUM_EGRESS_PROXY_IMAGE``.
+    """
     proxy_dir.mkdir(parents=True, exist_ok=True)
     (proxy_dir / "Dockerfile").write_text(
         "\n".join(
@@ -217,6 +217,27 @@ def write_docker_proxy_compose(
         )
     )
     (proxy_dir / "start-squid.sh").write_text(squid_bootstrap_command())
+    return proxy_dir
+
+
+def write_docker_proxy_compose(
+    *,
+    path: Path,
+    proxy_dir: Path,
+    allowlist: NetworkAllowlist,
+    token: str,
+    image: str | None = None,
+) -> Path:
+    """The compose override that puts the agent behind the squid sidecar.
+
+    The sidecar is built from ``proxy_dir`` unless *image* names a prebuilt
+    one, in which case that image runs as-is and no build context is written.
+    """
+    if image:
+        proxy_source: dict = {"image": image}
+    else:
+        write_egress_proxy_build_context(proxy_dir)
+        proxy_source = {"build": {"context": str(proxy_dir.resolve().absolute())}}
     compose = {
         "services": {
             "main": {
@@ -228,7 +249,7 @@ def write_docker_proxy_compose(
                 },
             },
             EGRESS_PROXY_SERVICE: {
-                "build": {"context": str(proxy_dir.resolve().absolute())},
+                **proxy_source,
                 "environment": proxy_policy_env(allowlist, token),
                 "healthcheck": {
                     "test": ["CMD-SHELL", "bash -lc '</dev/tcp/127.0.0.1/8080'"],

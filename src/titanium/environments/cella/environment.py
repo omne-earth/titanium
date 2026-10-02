@@ -81,6 +81,7 @@ import asyncio
 import io
 import json
 import logging
+import json
 import os
 import re
 import shutil
@@ -116,7 +117,12 @@ from titanium.environments.cella.constants import (
     ROOTFS_ARTIFACT_NAME,
     RUNNER_DIR,
 )
-from titanium.environments.cella.engine import bound_port, build_judge, serve
+from titanium.environments.cella.engine import (
+    bound_port,
+    build_judge,
+    free_pump_port,
+    serve,
+)
 from titanium.environments.cella.flavor import (
     cella_home,
     render_golden_json,
@@ -420,8 +426,13 @@ class CellaEnvironment(BaseEnvironment):
         self._work = Path(
             tempfile.mkdtemp(prefix="cella-env-", dir=self.trial_paths.trial_dir)
         )
+        self._base_tar = self._work / "state-0000.tar"
         if self._resume_state_tar is not None:
             self._load_resumed_state()
+            if self._paired:
+                self._ensure_appliance()
+            return
+        if self._adopt_prebaked_rootfs():
             if self._paired:
                 self._ensure_appliance()
             return
@@ -462,7 +473,6 @@ class CellaEnvironment(BaseEnvironment):
                 plan_provisioning=plan_systemd_provisioning,
                 timeout_sec=self.task_env_config.build_timeout_sec,
             )
-            self._base_tar = self._work / "state-0000.tar"
             if prepared.rootfs_tar != self._base_tar:
                 shutil.copyfile(prepared.rootfs_tar, self._base_tar)
         finally:
@@ -533,6 +543,32 @@ class CellaEnvironment(BaseEnvironment):
                 "resume_overrides name paths absent from the parent's "
                 f"state tar: {sorted(missing)}"
             )
+
+    def _adopt_prebaked_rootfs(self) -> bool:
+        """Take a rootfs built elsewhere instead of building one here.
+
+        ``TITANIUM_CELLA_ROOTFS_TAR`` names a systemd-provisioned rootfs
+        tar and ``TITANIUM_CELLA_IMAGE_CONFIG`` the JSON ``Config`` of the
+        image it came from -- exactly what the build above produces. A host
+        that cannot build (the airgapped cella-runner guest: no registry,
+        no package index) builds where the network is, seeds both, and
+        names them here; this run then touches no podman for its base
+        (docs/runners/CELLA-RUNNER.md §5.2). Both or neither: one without
+        the other is a misconfiguration, not a fallback.
+        """
+        tar = os.environ.get("TITANIUM_CELLA_ROOTFS_TAR")
+        config = os.environ.get("TITANIUM_CELLA_IMAGE_CONFIG")
+        if not tar and not config:
+            return False
+        if not (tar and config):
+            raise CellaError(
+                "TITANIUM_CELLA_ROOTFS_TAR and TITANIUM_CELLA_IMAGE_CONFIG "
+                "name a prebaked rootfs together; only one is set"
+            )
+        assert self._base_tar is not None
+        shutil.copyfile(tar, self._base_tar)
+        self._image_config = dict(json.loads(Path(config).read_text()))
+        return True
 
     # ----------------------------------------------------------- uploads
 
@@ -1269,7 +1305,8 @@ class CellaEnvironment(BaseEnvironment):
         engine_logger = self._engine_logger(key)
         loop = self._ensure_engine_loop()
         server = asyncio.run_coroutine_threadsafe(
-            serve(judge, "127.0.0.1", 0, engine_logger=engine_logger), loop
+            serve(judge, "127.0.0.1", free_pump_port(), engine_logger=engine_logger),
+            loop,
         ).result(timeout=15)
         port = bound_port(server)
         self._engines[key] = (server, port)

@@ -122,3 +122,62 @@ def test_modal_exec_preserves_env_when_switching_user():
     assert result.return_code == 0
     assert env._strategy.env == {"PATH": "/custom"}
     assert env._strategy.command == "su -m agent -s /bin/bash -c 'echo $PATH'"
+
+
+def test_docker_proxy_compose_uses_prebuilt_image_when_given(tmp_path):
+    path = tmp_path / "compose-egress-proxy.json"
+    write_docker_proxy_compose(
+        path=path,
+        proxy_dir=tmp_path / "proxy",
+        allowlist=type("Allowlist", (), {"domains": ["openrouter.ai"]})(),
+        token="secret",
+        image="titanium-egress-proxy:seeded",
+    )
+
+    proxy = json.loads(path.read_text())["services"][EGRESS_PROXY_SERVICE]
+    assert proxy["image"] == "titanium-egress-proxy:seeded"
+    assert "build" not in proxy
+    assert not (tmp_path / "proxy").exists()  # nothing to build from
+
+
+def test_docker_proxy_compose_builds_by_default(tmp_path):
+    path = tmp_path / "compose-egress-proxy.json"
+    write_docker_proxy_compose(
+        path=path,
+        proxy_dir=tmp_path / "proxy",
+        allowlist=type("Allowlist", (), {"domains": ["openrouter.ai"]})(),
+        token="secret",
+    )
+    proxy = json.loads(path.read_text())["services"][EGRESS_PROXY_SERVICE]
+    assert "image" not in proxy
+    assert (tmp_path / "proxy" / "Dockerfile").is_file()
+    assert (tmp_path / "proxy" / "start-squid.sh").is_file()
+
+
+def test_docker_prebaked_agent_image_skips_the_build(monkeypatch):
+    from titanium.environments.docker.docker import DockerEnvironmentEnvVars
+
+    env = DockerEnvironment.__new__(DockerEnvironment)
+    env.agent_install_spec = object()  # an agent with install steps
+    env._env_vars = DockerEnvironmentEnvVars(
+        main_image_name="hb__t",
+        context_dir="/ctx",
+        host_verifier_logs_path="/v",
+        host_agent_logs_path="/a",
+        host_artifacts_path="/r",
+        env_verifier_logs_path="/lv",
+        env_agent_logs_path="/la",
+        env_artifacts_path="/lr",
+        prebuilt_image_name="task/image:1",
+    )
+
+    monkeypatch.delenv("TITANIUM_AGENT_IMAGE", raising=False)
+    assert env._prebaked_agent_image is None
+
+    monkeypatch.setenv("TITANIUM_AGENT_IMAGE", "titanium-agent:seeded")
+    assert env._prebaked_agent_image == "titanium-agent:seeded"
+    env._prepare_agent_build_context()
+    assert env._env_vars.prebuilt_image_name == "titanium-agent:seeded"
+
+    env.agent_install_spec = None  # no install: the knob is inert
+    assert env._prebaked_agent_image is None

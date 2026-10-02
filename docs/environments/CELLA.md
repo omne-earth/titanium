@@ -65,7 +65,8 @@ closed, pure. There is no third topology.
 **`cella.policy` (titanium+cella's knob, beside the Dockerfile)
 defines the crossing rules at a border.** One grant per line.
 `outgoing` grants are the egress rules; `incoming` grants are the
-ingress rules. `*` matches any ip or any port. L2 grants name an
+ingress rules. `*` matches any ip or any port; the protocol is `tcp`,
+`udp`, `icmp`, or a number. L2 grants name an
 ethertype (`arp`, `ipv6`, `0xNNNN`). Everything not granted is
 refused.
 

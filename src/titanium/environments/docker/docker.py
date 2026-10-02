@@ -404,9 +404,26 @@ class DockerEnvironment(BaseEnvironment):
 
         return paths
 
+    @property
+    def _prebaked_agent_image(self) -> str | None:
+        """An image that already carries the agent's install, built elsewhere.
+
+        ``TITANIUM_AGENT_IMAGE`` names it. A host that cannot run the agent's
+        install steps at build time (the airgapped cella-runner guest: no PyPI,
+        no GitHub) builds the task+agent image where the network is, seeds
+        it, and names it here; the run then uses it as a prebuilt image and
+        builds nothing (docs/runners/CELLA-RUNNER.md §5).
+        """
+        if self.agent_install_spec is None:
+            return None
+        return os.environ.get("TITANIUM_AGENT_IMAGE") or None
+
     def _prepare_agent_build_context(self) -> None:
         install = self.agent_install_spec
         if install is None:
+            return
+        if self._prebaked_agent_image:
+            self._env_vars.prebuilt_image_name = self._prebaked_agent_image
             return
         if self._uses_compose:
             raise ValueError(
@@ -455,6 +472,9 @@ class DockerEnvironment(BaseEnvironment):
             proxy_dir=self.trial_paths.trial_dir / "egress-proxy",
             allowlist=allowlist,
             token=token,
+            # A prebuilt sidecar image, for a host that cannot build it
+            # (the airgapped cella-runner guest seeds one; docs/runners/CELLA-RUNNER.md).
+            image=os.environ.get("TITANIUM_EGRESS_PROXY_IMAGE") or None,
         )
 
     def agent_process_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
@@ -670,8 +690,10 @@ class DockerEnvironment(BaseEnvironment):
 
         self._use_prebuilt = bool(
             not force_build
-            and self._effective_docker_image
-            and self.agent_install_spec is None
+            and (
+                self._prebaked_agent_image
+                or (self._effective_docker_image and self.agent_install_spec is None)
+            )
         )
 
         # Fail fast if the daemon mode disagrees with the task's declared OS.
@@ -690,7 +712,7 @@ class DockerEnvironment(BaseEnvironment):
 
         # Validate image OS after build/pull but before container start.
         image_to_check = (
-            self._effective_docker_image
+            self._env_vars.prebuilt_image_name
             if self._use_prebuilt
             else self._env_vars.main_image_name
         )

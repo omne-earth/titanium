@@ -43,6 +43,7 @@ import pytest
 from titanium.environments.base import SealedPhaseSpec, SealedPhaseStep
 from titanium.environments.cella.environment import (
     CellaEnvironment,
+    CellaError,
     _flavor_name,
 )
 from titanium.environments.cella.flavor import validate_flavor_name
@@ -542,6 +543,8 @@ def test_member_policy_reaches_only_the_appliance():
     assert f"release outgoing {gw}:443/tcp (keep_open=24h) (skip_freeze=true)" in lines
     assert f"release outgoing {gw}:80/tcp (keep_open=24h) (skip_freeze=true)" in lines
     assert f"release outgoing {gw}:53/udp (keep_open=24h) (skip_freeze=true)" in lines
+    assert f"release outgoing {gw}:53/tcp (keep_open=24h) (skip_freeze=true)" in lines
+    assert f"release outgoing {gw}:*/icmp (keep_open=24h) (skip_freeze=true)" in lines
     # No world name ever appears on the member border.
     assert all(g.host == "" for g in policy.grants)
 
@@ -685,3 +688,68 @@ def test_install_user_is_untouched_without_an_agent_install(tmp_path):
     env = _make_env(tmp_path)
     env.agent_install_spec = None
     assert env._install_user() is None
+
+
+def test_a_prebaked_rootfs_is_adopted_and_nothing_is_built(tmp_path, monkeypatch):
+    # The cella-runner guest names a host-provisioned rootfs; the start
+    # copies it in, reads the image config beside it, and touches no podman.
+    env = _make_env(tmp_path)
+    tar = tmp_path / "state.tar"
+    tar.write_bytes(b"rootfs")
+    config = tmp_path / "image-config.json"
+    config.write_text('{"WorkingDir": "/app", "Env": ["A=1"]}')
+    monkeypatch.setenv("TITANIUM_CELLA_ROOTFS_TAR", str(tar))
+    monkeypatch.setenv("TITANIUM_CELLA_IMAGE_CONFIG", str(config))
+    monkeypatch.setenv("CELLA_BIN", str(tar))  # preflight wants a file
+    monkeypatch.setattr(
+        "titanium.environments.cella.environment.new_build_tag",
+        lambda *a, **k: pytest.fail("a prebaked rootfs must not build"),
+    )
+
+    env._start_blocking(force_build=False)
+
+    assert env._base_tar.read_bytes() == b"rootfs"
+    assert env._image_config == {"WorkingDir": "/app", "Env": ["A=1"]}
+
+
+def test_a_prebaked_rootfs_needs_both_names(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+    monkeypatch.setenv("TITANIUM_CELLA_ROOTFS_TAR", str(tmp_path / "state.tar"))
+    monkeypatch.delenv("TITANIUM_CELLA_IMAGE_CONFIG", raising=False)
+    monkeypatch.setenv("CELLA_BIN", str(tmp_path / "task.toml"))
+    (tmp_path / "task.toml").write_text("")
+    with pytest.raises(CellaError, match="only one is set"):
+        env._start_blocking(force_build=False)
+
+
+def test_the_pump_binds_outside_the_reply_window():
+    # Inside a cella-runner guest the ephemeral range is the eight-port
+    # window; the pump takes a loopback port of its own instead.
+    from titanium.environments.cella.constants import (
+        PUMP_PORT_HIGH,
+        PUMP_PORT_LOW,
+        REPLY_PORT_HIGH,
+        REPLY_PORT_LOW,
+    )
+    from titanium.environments.cella.engine import free_pump_port
+
+    port = free_pump_port()
+    assert PUMP_PORT_LOW <= port <= PUMP_PORT_HIGH
+    assert not (REPLY_PORT_LOW <= port <= REPLY_PORT_HIGH)
+
+
+def test_the_pair_knobs_move_the_wire_and_the_resolver():
+    # Pair 1 with the outer appliance as resolver is what a nested run
+    # exports; the module reads both at import, so ask a fresh interpreter.
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ, TITANIUM_CELLA_PAIR="1", TITANIUM_CELLA_UPSTREAM_DNS="10.77.0.1")
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from titanium.environments.cella.constants import APPLIANCE_WIRE_ADDRESS as a, "
+         "MEMBER_WIRE_ADDRESS as m, UPSTREAM_DNS as u; print(a, m, u)"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.split() == ["10.77.1.1", "10.77.1.2", "10.77.0.1"]
