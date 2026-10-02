@@ -39,8 +39,9 @@ CELLA_EXEC_TIMEOUT = 1800.0
 # the create and a one-vCPU boot run into minutes, so the guest's run
 # script raises it (docs/runners/CELLA-RUNNER.md §5.2).
 BOOT_MARGIN_SEC = float(os.environ.get("TITANIUM_CELLA_BOOT_MARGIN_SEC", "180"))
-# One cella verb's own budget (create/start/stop/thaw/...).
-CELLA_VERB_TIMEOUT_SEC = 120.0
+# One cella verb's own budget (create/start/stop/thaw/...). Nested, a create
+# pays sparse mkfs on one vCPU, so the runner prebake raises it in the guest.
+CELLA_VERB_TIMEOUT_SEC = float(os.environ.get("TITANIUM_CELLA_VERB_TIMEOUT_SEC", "120"))
 POWEROFF_GRACE_SEC = 3.0
 
 # --- the guest runner ---------------------------------------------------

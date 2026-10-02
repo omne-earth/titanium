@@ -546,6 +546,7 @@ CELLA_GOLDENS = (("kernel", "canonical"), ("rootfs", "cella"), ("rootfs", "termi
 # /etc/cella/extra-roots.pem (cella docs/TLS-TERMINATOR.md, "Baked defaults").
 CELLA_INNER_PAIR = 1
 CELLA_INNER_BOOT_MARGIN_SEC = 900
+CELLA_INNER_VERB_TIMEOUT_SEC = 900
 CELLA_INNER_EXTRACT_MIB_PER_SEC = 1
 CELLA_INNER_CA_SUBJECT = "/CN=titanium pair CA nested"
 CELLA_INNER_CA_DAYS = "3650"
@@ -712,6 +713,9 @@ export TITANIUM_CELLA_UPSTREAM_DNS={APPLIANCE_WIRE_ADDRESS}
 # The inner machines' boot margin: mkfs, create and a nested one-vCPU boot
 # take minutes here, not the seconds the host default covers.
 export TITANIUM_CELLA_BOOT_MARGIN_SEC={CELLA_INNER_BOOT_MARGIN_SEC}
+# One verb (create/start/stop/thaw) pays the same nested tax; the host
+# default of 120 s killed the verifier's create (sparse mkfs, one vCPU).
+export TITANIUM_CELLA_VERB_TIMEOUT_SEC={CELLA_INNER_VERB_TIMEOUT_SEC}
 # cella's extract budgets the evidence at a host disk's rate (4 MiB/s);
 # here the extractor reads through two VMMs on one vCPU.
 export CELLA_EXTRACT_MIB_PER_SEC={CELLA_INNER_EXTRACT_MIB_PER_SEC}
