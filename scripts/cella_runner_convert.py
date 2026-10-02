@@ -706,7 +706,10 @@ phase "seed: loading the rootfs builder"
       case " $started " in *" $c "*) continue ;; esac
       started="$started $c"
       m=$(basename "$(dirname "$c")")
-      tail -n +1 -F "$c" 2>/dev/null | sed -u "s|^|[inner $m] |" \\
+      tail -n +1 -F "$c" 2>/dev/null \\
+        | sed -u $'s/\\x1b\\[[0-9;?]*[a-zA-Z]//g; s/\\x1b[()][A-Z0-9]//g; s/\\x1b[DM78]//g' \\
+        | stdbuf -oL tr -d '\\000-\\010\\013-\\037' \\
+        | sed -u "s|^|[inner $m] |" \\
         | tee -a "$R/inner-consoles.log" > /dev/console &
     done
   done ) &

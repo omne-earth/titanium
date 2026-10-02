@@ -333,7 +333,10 @@ note "the inner run is the boot: waiting up to ${BOOT_TIMEOUT_SECS}s for its res
 # machines' consoles -- streams into this run's own output while it waits.
 CONSOLE_TAIL_PID=""
 if [ "$LAB" = "true" ]; then
-    ( tail -n +1 -F "$M/console.log" 2>/dev/null | sed -u 's/^/   console | /' ) &
+    ( tail -n +1 -F "$M/console.log" 2>/dev/null \
+        | sed -u $'s/\x1b\\[[0-9;?]*[a-zA-Z]//g; s/\x1b[()][A-Z0-9]//g; s/\x1b[DM78]//g' \
+        | stdbuf -oL tr -d '\000-\010\013-\037' \
+        | sed -u 's/^/   console | /' ) &
     CONSOLE_TAIL_PID=$!
 fi
 
