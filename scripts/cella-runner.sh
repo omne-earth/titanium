@@ -107,7 +107,7 @@ fail() { echo; echo "FAIL: $*"; exit 1; }
 # Never the operator's ~/.cella. Order matches the environment's reap: bridges
 # first, pumps next, machines last. No pump outlives its border.
 teardown() {
-    for p in "$M_BRIDGE_PID" "$A_BRIDGE_PID" "$A_THAW_PID" "$M_PUMP_PID" "$A_PUMP_PID"; do
+    for p in "$M_BRIDGE_PID" "$A_BRIDGE_PID" "$A_THAW_PID" "$M_PUMP_PID" "$A_PUMP_PID" "$CONSOLE_TAIL_PID"; do
         [ -n "$p" ] && kill "$p" 2>/dev/null
     done
     if [ -n "$BIN" ]; then
@@ -190,6 +190,11 @@ note "            tail -f $WORK/pump-appliance.log   # every world crossing, jud
 note "            tail -f $WORK/pump-member.log      # the member border's own judgments"
 note "            tail -f $M/vmm.log                 # the member VMM: parks, releases, the exit"
 note "            $BIN --dump $M/network/ledger      # the chronicle: every crossing, decoded (also audit, verdict)"
+if [ "$LAB" = "true" ]; then
+    note "            tail -f $M/console.log             # the guest serial; inner machines prefixed [inner <name>]"
+else
+    note "no console: the field flavor seals the guest; inner consoles arrive in the payload (debug leg streams them live)"
+fi
 
 # The reflexive rootfs export is multi-GB (the workspace, docker, a full
 # titanium venv). Route the converter's tempdir into this run's workdir, so
@@ -324,6 +329,14 @@ VMM_PID="$(cat "$M/pid" 2>/dev/null)"
 note "member vmm pid=${VMM_PID:-unknown}; pumps member=$M_PUMP_PID appliance=$A_PUMP_PID"
 note "the inner run is the boot: waiting up to ${BOOT_TIMEOUT_SECS}s for its reset"
 
+# Lab flavor: the guest serial -- the run script's phases and the inner
+# machines' consoles -- streams into this run's own output while it waits.
+CONSOLE_TAIL_PID=""
+if [ "$LAB" = "true" ]; then
+    ( tail -n +1 -F "$M/console.log" 2>/dev/null | sed -u 's/^/   console | /' ) &
+    CONSOLE_TAIL_PID=$!
+fi
+
 # Completion is two host-side facts: the VMM pid is gone and no frozen state
 # file exists. Every judged crossing parks (freezes) the machine, so the wait
 # pumps thaws through them -- the agent's inference line freezes here.
@@ -344,6 +357,7 @@ while :; do
     fi
     sleep 2
 done
+[ -n "$CONSOLE_TAIL_PID" ] && { pkill -P "$CONSOLE_TAIL_PID" 2>/dev/null; kill "$CONSOLE_TAIL_PID" 2>/dev/null; wait "$CONSOLE_TAIL_PID" 2>/dev/null; }
 
 # Keep the border evidence before any fail: the work directory is reaped.
 #
