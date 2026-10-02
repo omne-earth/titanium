@@ -497,6 +497,12 @@ class CellaEnvironment(BaseEnvironment):
                 "predates branch support; re-run it first"
             )
         self._image_config = dict(json.loads(config_path.read_text()))
+        # Re-emit the config beside this leg's own state tars (as the build
+        # path does), so a branch *of this leg* finds it and is itself
+        # resumable -- without this, branch-of-a-branch has no image config.
+        (self._work / "image-config.json").write_text(
+            json.dumps(self._image_config)
+        )
         self._base_tar = self._work / "state-0000.tar"
         # The parent's disk carries the orchestrator's own completion
         # latch (RUNNER_DIR/result: done, rc) -- resumed verbatim, the

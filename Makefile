@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard .sudo-tty-guard-cella init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-all smoke-cella-boundary
+.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard .sudo-tty-guard-cella init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-note smoke-cella-branch-all smoke-cella-boundary
 
 -include .secrets
 
@@ -456,13 +456,24 @@ smoke-cella-branch-at: .sudo-tty-guard-cella sync .podman .cella
 	$(LOG)
 	TITANIUM_MODEL=$(TITANIUM_MODEL) SMOKE_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ SMOKE_CACHE_DIR=$(RUN_DIR)/cache/$(BACKEND)/$@ bash scripts/smoke/cella-branch-at.sh
 
+# smoke-cella-branch-note: the --note proof. The --at smoke with one
+# difference -- at the step-7 trim a --note tells the agent to finish --
+# measured to completion. On the same small ledger fixture (tiny resume
+# payload), the note lands as the trailing user turn at the trim, and the
+# note-resumed leg boots, reads it, and runs to reward 1. Needs a model
+# key and TITANIUM_MODEL; without them the script exits 2 (skipped), and
+# a cella helper-machine boot fault also skips (host infra, not the note).
+smoke-cella-branch-note: .sudo-tty-guard-cella sync .podman .cella
+	$(LOG)
+	TITANIUM_MODEL=$(TITANIUM_MODEL) SMOKE_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@ SMOKE_CACHE_DIR=$(RUN_DIR)/cache/$(BACKEND)/$@ bash scripts/smoke/cella-branch-note.sh
+
 # Artifacts follow the jobs-smoke layout: titanium's job directories land in
 # .run/jobs/<backend>/<target>/<timestamp>/ and each script's scratch files
 # (logs, machine lists, extracted trajectories) in
 # .run/cache/<backend>/<target>/<timestamp>/.
 #
 # The three in order, cheapest first.
-smoke-cella-branch-all: smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at
+smoke-cella-branch-all: smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-note
 
 # smoke-cella: the rung-parity smoke -- the real bench tasks under cella,
 # the way smoke-krun-podman runs them under krun. fix-git-offline is

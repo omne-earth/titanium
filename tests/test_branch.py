@@ -14,6 +14,7 @@ import typer
 from titanium.agents.installed.mini_swe_agent import MiniSweAgent
 from titanium.cli.branch import (
     _find_state_tar,
+    _is_observation,
     _next_branch_name,
     _require_resumable_agent,
     _resolve_step,
@@ -331,3 +332,107 @@ def test_branch_names_extend_the_lineage(tmp_path):
     (tmp_path / "foo__ab-branch-1").mkdir()
     # A branch of a branch stays in the same series.
     assert _next_branch_name("foo__ab-branch-1", tmp_path) == "foo__ab-branch-2"
+
+
+def test_resumed_state_reemits_image_config(tmp_path, monkeypatch):
+    # A leg must write its own image-config.json beside its state tars,
+    # so a branch *of the leg* finds it -- otherwise branch-of-a-branch
+    # fails the "predates branch support" precondition.
+    parent_work = tmp_path / "parent" / "cella-env-x"
+    parent_work.mkdir(parents=True)
+    state_tar = _parent_state_tar(parent_work)
+    (parent_work / "image-config.json").write_text(
+        json.dumps({"WorkingDir": "/app"})
+    )
+
+    env = _cella_env(tmp_path, resume_state_tar=str(state_tar))
+    monkeypatch.setattr(env, "preflight", lambda: None)
+    env._paired = False
+    env._start_blocking(force_build=False)
+
+    emitted = env._work / "image-config.json"
+    assert emitted.is_file()
+    assert json.loads(emitted.read_text()) == {"WorkingDir": "/app"}
+
+
+# --------------------------------------------------- CLI: --note / --at+note
+
+
+def _cli_parent_dir(tmp_path, messages):
+    """A minimal parent trial dir branch_command can resume from: config,
+    a state tar carrying the trajectory, and the image config beside it.
+    Agent is oracle, so the resumable-agent receipt gate is skipped."""
+    import io
+    import tarfile
+
+    trial = tmp_path / "job" / "t__ab"
+    env_dir = trial / "cella-env-x"
+    env_dir.mkdir(parents=True)
+    traj = json.dumps(
+        {"messages": messages, "trajectory_format": "mini-swe-agent-1.1"}
+    ).encode()
+    with tarfile.open(env_dir / "state-parent.tar", "w") as tar:
+        info = tarfile.TarInfo("./logs/agent/mini-swe-agent.trajectory.json")
+        info.size = len(traj)
+        tar.addfile(info, io.BytesIO(traj))
+    (env_dir / "image-config.json").write_text(json.dumps({}))
+    (trial / "config.json").write_text(_trial_config("oracle").model_dump_json())
+    return trial
+
+
+def _run_branch(monkeypatch, args):
+    from typer.testing import CliRunner
+
+    import titanium.cli.branch as branch_mod
+
+    # Stop before the trial runs: close the coroutine the callback hands to
+    # run_async so the trajectory is rewritten but nothing boots.
+    def _noop(coro):
+        coro.close()
+
+    monkeypatch.setattr(branch_mod, "run_async", _noop)
+    return CliRunner().invoke(branch_mod.branch_app, args)
+
+
+def test_note_appends_a_trailing_user_message(tmp_path, monkeypatch):
+    messages = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "did x"},
+        {"role": "user", "content": "obs"},
+    ]
+    trial = _cli_parent_dir(tmp_path, messages)
+    result = _run_branch(monkeypatch, ["-p", str(trial), "--note", "remember X"])
+    assert result.exit_code == 0, result.output
+
+    leg = json.loads(
+        (tmp_path / "job" / "t__ab-branch-1" / "trimmed-trajectory.json").read_text()
+    )["messages"]
+    # The note is the last message, a user-role observation (so the fork's
+    # prune keeps it), and nothing before it changed.
+    assert leg[:-1] == messages
+    assert leg[-1] == {"role": "user", "content": "remember X"}
+    assert _is_observation(leg[-1])
+
+
+def test_at_then_note_trims_first_then_appends(tmp_path, monkeypatch):
+    messages = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "step 1"},
+        {"role": "tool", "content": "obs 1", "tool_call_id": "call_aaa"},
+        {"role": "assistant", "content": "step 2"},
+        {"role": "tool", "content": "obs 2", "tool_call_id": "call_bbb"},
+    ]
+    trial = _cli_parent_dir(tmp_path, messages)
+    result = _run_branch(
+        monkeypatch, ["-p", str(trial), "--at", "call_aaa", "--note", "hi"]
+    )
+    assert result.exit_code == 0, result.output
+
+    leg = json.loads(
+        (tmp_path / "job" / "t__ab-branch-1" / "trimmed-trajectory.json").read_text()
+    )["messages"]
+    # Trimmed to the first observation (index 3), then the note appended.
+    assert [m.get("content") for m in leg] == ["s", "task", "step 1", "obs 1", "hi"]
+    assert leg[-1] == {"role": "user", "content": "hi"}

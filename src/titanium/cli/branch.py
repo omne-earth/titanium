@@ -246,6 +246,16 @@ def branch_command(
             show_default=False,
         ),
     ] = None,
+    note: Annotated[
+        str | None,
+        Option(
+            "--note",
+            help="Append one user message to the resumed trajectory as new "
+            "context for the continuation. Combines with --at (the note "
+            "lands after the trim). Does not touch the task definition.",
+            show_default=False,
+        ),
+    ] = None,
 ) -> None:
     """Continue a cella trial from its preserved state, as a new leg."""
     if ctx.invoked_subcommand is not None:
@@ -273,31 +283,43 @@ def branch_command(
     if agent_timeout_multiplier is not None:
         config.agent_timeout_multiplier = agent_timeout_multiplier
 
+    # --at and --note both rewrite the resumed trajectory, so they share
+    # one load/write and the same resume_overrides substitution.
     trimmed_to = ""
-    if at is not None:
+    noted = ""
+    if at is not None or note is not None:
         trajectory = _read_trajectory(state_tar)
         messages = trajectory.get("messages", [])
-        step = _resolve_step(_steps(messages), at)
-        trajectory["messages"] = messages[: step["index"] + 1]
-        trimmed = leg_dir / "trimmed-trajectory.json"
+        if at is not None:
+            step = _resolve_step(_steps(messages), at)
+            messages = messages[: step["index"] + 1]
+            trimmed_to = f" at step {step['id']}"
+            console.print(
+                "[yellow]note:[/yellow] the trim rewinds the agent's memory, "
+                "not the disk -- the state tar is from the end of the parent "
+                "leg, and later steps' effects are still on it"
+            )
+        if note is not None:
+            # A trailing user message is an observation, so the fork's
+            # resume prune keeps it and the agent reads it as its latest
+            # input before acting. Two keys only -- the exact shape of a
+            # mini-swe-agent-1.1 user turn.
+            messages = [*messages, {"role": "user", "content": note}]
+            noted = " +note"
+        trajectory["messages"] = messages
         leg_dir.mkdir(parents=True, exist_ok=True)
+        trimmed = leg_dir / "trimmed-trajectory.json"
         trimmed.write_text(json.dumps(trajectory))
-        # The environment substitutes the trimmed file for the tar's own
-        # copy while seeding the leg's base tar; the guest-side resume
-        # prune then finds a trajectory already ending at an observation.
+        # The environment substitutes this file for the tar's own copy
+        # while seeding the leg's base tar; the guest-side resume prune
+        # then finds a trajectory already ending at an observation.
         config.environment.kwargs["resume_overrides"] = {
             TRAJECTORY_GUEST_PATH: str(trimmed)
         }
-        trimmed_to = f" at step {step['id']}"
-        console.print(
-            "[yellow]note:[/yellow] the trim rewinds the agent's memory, "
-            "not the disk -- the state tar is from the end of the parent "
-            "leg, and later steps' effects are still on it"
-        )
 
     console.print(
         f"Branching [bold]{trial_dir.name}[/bold] -> [bold green]{leg_name}[/bold green] "
-        f"from {state_tar.name}{trimmed_to}"
+        f"from {state_tar.name}{trimmed_to}{noted}"
     )
 
     async def _run() -> None:
