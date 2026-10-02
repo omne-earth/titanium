@@ -430,8 +430,20 @@ if "$BIN" extract "$VM" /titanium > "$WORK/payload.tar" 2>"$WORK/extract.err"; t
     tar -C "$OUT" --delay-directory-restore -xf "$WORK/payload.tar" 2>/dev/null \
         || note "payload tar extracted with warnings"
     pass "payload extracted to $OUT"
-    [ -f "$OUT/titanium/result/exit-code" ] \
-        && note "inner titanium exit code: $(cat "$OUT/titanium/result/exit-code")"
+    # The reset alone does not prove completion: panic=1 reboot=t turns a
+    # guest kernel panic into the same reset. Only the markers the run
+    # script writes after titanium exits separate the two.
+    if [ ! -f "$OUT/titanium/result/done" ] || [ ! -f "$OUT/titanium/result/exit-code" ]; then
+        keep_borders
+        [ -f "$OUT/titanium/result/phases.log" ] && { echo "--- phases.log ---"; sed 's/^/   /' "$OUT/titanium/result/phases.log"; }
+        fail "the guest reset without its completion markers (done, exit-code) -- a crash, not a finish"
+    fi
+    inner_rc=$(cat "$OUT/titanium/result/exit-code")
+    note "inner titanium exit code: $inner_rc"
+    if [ "$inner_rc" != "0" ]; then
+        keep_borders
+        fail "inner titanium exited $inner_rc"
+    fi
 else
     echo "--- extract stderr ---"; sed 's/^/   /' "$WORK/extract.err"
     fail "cella extract /titanium failed"
