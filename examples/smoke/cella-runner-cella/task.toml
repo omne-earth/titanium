@@ -19,12 +19,13 @@ expert_time_estimate_min = 5.0
 junior_time_estimate_min = 15.0
 
 [verifier]
-timeout_sec = 600.0
+timeout_sec = 7200.0
 
 [agent]
 user = "titanium"
 # Nested, each step pays two membranes; the docker probe's 600 s is short here.
-timeout_sec = 1800.0
+# 1800 s was still short: the nested agent run blew it (un-nested it took 642 s).
+timeout_sec = 7200.0
 
 [environment]
 build_timeout_sec = 7200.0
