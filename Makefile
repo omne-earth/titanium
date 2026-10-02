@@ -541,6 +541,11 @@ CELLA_RUNNER_TASK ?= examples/smoke/cella-runner-$(CELLA_RUNNER_ENV)
 CELLA_RUNNER_ENV = $(patsubst %-debug,%,$(@:smoke-cella-runner-%=%))
 smoke-cella-runner-docker smoke-cella-runner-docker-debug: .cella-runner-kernel-docker
 smoke-cella-runner-cella smoke-cella-runner-cella-debug: .cella-runner-kernel-cella
+# The nested smoke's inner machines run the lab persona set, so their
+# consoles are recorded (tailed into the result and onto the guest serial)
+# while the outer member stays the field flavor.
+smoke-cella-runner-cella smoke-cella-runner-cella-debug: .cella-debug
+smoke-cella-runner-cella smoke-cella-runner-cella-debug: export CELLA_RUNNER_INNER_CELLA_DIR = $(CELLA_SRC)/target/lab
 smoke-cella-runner-docker smoke-cella-runner-cella: .sudo-tty-guard-cella sync .podman .cella
 	$(LOG)
 	TITANIUM_CELLA_RUNNER_AGENT=$(TITANIUM_AGENT) bash scripts/cella-runner.sh $(CELLA_RUNNER_TASK) $(CELLA_RUNNER_ENV) $(TITANIUM_JOBS_DIR)/$(BACKEND)/$@

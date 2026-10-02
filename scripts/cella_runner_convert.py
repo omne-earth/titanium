@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import shutil
@@ -694,6 +695,21 @@ phase "seed: loading the rootfs builder"
 # on its own terms, and the record says why.
 {{ ls -la /dev/kvm; {CELLA_AS_USER} CELLA_HOME={CELLA_GUEST_HOME} cella doctor gate kvm bwrap golden:kernel:canonical golden:rootfs:cella golden:rootfs:terminator; }} \\
   > "$R/cella-doctor.txt" 2>&1 && phase "cella doctor gate: ok" || phase "cella doctor gate: FAILED"
+# The inner machines' consoles (lab persona set only; the field set writes
+# none). Followed into the result -- a wedge's record survives the salvage
+# extract -- and onto this guest's serial, live when the outer run is the
+# debug leg. One tail per machine, picked up as each console appears.
+( started=""
+  while sleep 5; do
+    for c in {CELLA_GUEST_HOME}/machines/*/console.log; do
+      [ -f "$c" ] || continue
+      case " $started " in *" $c "*) continue ;; esac
+      started="$started $c"
+      m=$(basename "$(dirname "$c")")
+      tail -n +1 -F "$c" 2>/dev/null | sed -u "s|^|[inner $m] |" \\
+        | tee -a "$R/inner-consoles.log" > /dev/console &
+    done
+  done ) &
 """
 
 
@@ -744,8 +760,14 @@ def _cella_stage(task_dir: Path, context: Path, agent: str) -> str | None:
     home = Path.home() / ".cella"
     bins = seed / "bin"
     bins.mkdir(parents=True, exist_ok=True)
-    for binary in sorted((home / "bin").glob("cella*")):
-        shutil.copy2(binary, bins / binary.name)
+    # The inner persona set. The lab dir (CELLA_RUNNER_INNER_CELLA_DIR, the
+    # smoke's .cella-debug build) makes the inner machines write console.log,
+    # observable in the payload while the outer member stays the field flavor.
+    inner_dir = os.environ.get("CELLA_RUNNER_INNER_CELLA_DIR")
+    src_bins = Path(inner_dir) if inner_dir else home / "bin"
+    for binary in sorted(src_bins.glob("cella*")):
+        if binary.is_file() and binary.suffix != ".d":
+            shutil.copy2(binary, bins / binary.name)
     for axis, flavor in CELLA_GOLDENS:
         shutil.copytree(home / axis / flavor, seed / "home" / axis / flavor)
     nest_terminator_golden(seed / "home" / "rootfs" / "terminator", home / "rootfs" / "terminator" / "ca.pem")
