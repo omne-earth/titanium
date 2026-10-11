@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard .sudo-tty-guard-cella init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-note smoke-cella-branch-all smoke-cella-boundary
+.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard .sudo-tty-guard-cella init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-note smoke-cella-branch-all smoke-cella-boundary boundary-test boundary-test-list sweep-boundary-test
 
 -include .secrets
 
@@ -409,6 +409,44 @@ smoke-cella-boundary: .sudo-tty-guard sync .podman .cella
 	cp -r examples/tasks/cella-boundary-study $(RUN_TASKS)/$(BACKEND)/$@/
 	mkdir -p "$(REPORTS_DIR)/$(BACKEND)/$@"
 	$(MAKE) titanium-run TITANIUM_ENV=cella TITANIUM_AGENT=oracle TITANIUM_TASK=$(RUN_TASKS)/$(BACKEND)/$@ TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/$(BACKEND)/$@
+
+# boundary-test: the sudo-boundary study as a lightweight REAL-model run
+# (mini-swe-agent, not the oracle). Runs examples/tasks/cella-boundary-study
+# once on cella for a single OpenRouter MODEL and records artifacts under
+# .run/jobs/openrouter/boundary-testing/<model>. Not a smoke: no pass/fail
+# gate and no branching -- the recorded run is the study artifact. Model
+# slugs are not secrets, so they live here; API keys stay in .secrets.
+BOUNDARY_TEST_MODELS ?= \
+	openai/gpt-6-luna-pro \
+	mistralai/mistral-large-4-0 \
+	moonshotai/kimi-k3 \
+	z-ai/glm-5.3 \
+	qwen/qwen3.8-max-0902 \
+	anthropic/claude-opus-5.5
+
+boundary-test-list:
+	@printf '%s\n' $(BOUNDARY_TEST_MODELS)
+
+boundary-test:
+	$(LOG)
+	@test -n "$(MODEL)" || { echo "boundary-test: set MODEL=<slug> (see: make boundary-test-list)"; exit 2; }
+	$(MAKE) titanium-run BACKEND=openrouter TITANIUM_ENV=cella \
+		TITANIUM_TASK=examples/tasks/cella-boundary-study \
+		TITANIUM_MODEL=$(MODEL) \
+		TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/openrouter/boundary-testing/$(subst /,__,$(MODEL))
+
+sweep-boundary-test:
+	$(LOG)
+	@if [ "$(CONFIRM)" != "1" ]; then \
+		echo "sweep-boundary-test: dry run (no CONFIRM=1). Would run the boundary study once per model:"; \
+		printf '  %s\n' $(BOUNDARY_TEST_MODELS); \
+		echo "Re-run to execute: make sweep-boundary-test CONFIRM=1"; \
+		exit 0; \
+	fi; \
+	for m in $(BOUNDARY_TEST_MODELS); do \
+		echo "=== boundary-test MODEL=$$m ==="; \
+		$(MAKE) boundary-test MODEL=$$m || echo "boundary-test FAILED for $$m (continuing)"; \
+	done
 
 smoke-cella-all: smoke-cella-rootfs smoke-cella-integration smoke-cella
 
