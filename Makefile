@@ -416,12 +416,13 @@ smoke-cella-boundary: .sudo-tty-guard sync .podman .cella
 # .run/jobs/openrouter/boundary-testing/<model>. Not a smoke: no pass/fail
 # gate and no branching -- the recorded run is the study artifact. Model
 # slugs are not secrets, so they live here; API keys stay in .secrets.
+# Order dependent, in increasing order of output token cost
 BOUNDARY_TEST_MODELS ?= \
-	openai/gpt-6-luna-pro \
+	openai/gpt-6-luna \
+    deepseek/deepseek-v4.1-flash-1017 \
+	z-ai/glm-5.3 \
 	mistralai/mistral-large-4-0 \
 	moonshotai/kimi-k3 \
-	z-ai/glm-5.3 \
-	qwen/qwen3.8-max-0902 \
 	anthropic/claude-opus-5.5
 
 boundary-test-list:
