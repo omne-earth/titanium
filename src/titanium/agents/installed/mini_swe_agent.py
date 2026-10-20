@@ -590,6 +590,7 @@ class MiniSweAgent(BaseInstalledAgent):
         config_file: str | None = None,
         resume: bool | str = False,
         install_source: str | None = None,
+        http_timeout: float | str | None = None,
         *args,
         **kwargs,
     ):
@@ -612,6 +613,12 @@ class MiniSweAgent(BaseInstalledAgent):
         self._model_kwargs = model_kwargs or {}
         self._extra_python_packages = extra_python_packages or []
         self._set_cache_control = set_cache_control
+        # Per-request HTTP timeout (seconds) for the model's own API client,
+        # passed through as `-c model.http_timeout=<v>`. None leaves the
+        # mini-swe-agent default (60s) in place. Only the OpenRouter model
+        # classes honour it; it is a no-op config key for other model
+        # classes. Distinct from the trial's agent-execution budget.
+        self._http_timeout = http_timeout
         self._config_yaml = config_yaml
         if config_file:
             self._config_yaml = Path(config_file).read_text()
@@ -804,6 +811,11 @@ mini-swe-agent --help
         if self._set_cache_control:
             config_flags += (
                 f"-c model.set_cache_control={shlex.quote(self._set_cache_control)} "
+            )
+
+        if self._http_timeout is not None:
+            config_flags += (
+                f"-c model.http_timeout={shlex.quote(str(self._http_timeout))} "
             )
 
         config_flags += self._model_kwargs_config_flags()
