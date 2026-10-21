@@ -288,3 +288,61 @@ def test_convert_openrouter_byok_uses_upstream_cost_details():
     agent_steps = [step for step in trajectory.steps if step.source == "agent"]
     assert agent_steps[0].metrics is not None
     assert agent_steps[0].metrics.cost_usd == 0.00123
+
+
+def test_mini_swe_http_timeout_emits_model_config_flag(tmp_path: Path):
+    agent = MiniSweAgent(
+        logs_dir=tmp_path,
+        model_name="openrouter/deepseek/deepseek-v4.1-flash-1017",
+        http_timeout=240,
+    )
+
+    config_flags = agent._build_config_flags()
+
+    assert "-c model.http_timeout=240 " in config_flags
+    # Not smuggled into model_kwargs (which would be forwarded to the API payload).
+    assert "model.model_kwargs.http_timeout" not in config_flags
+
+
+def test_mini_swe_http_timeout_absent_by_default(tmp_path: Path):
+    agent = MiniSweAgent(
+        logs_dir=tmp_path,
+        model_name="openrouter/deepseek/deepseek-v4.1-flash-1017",
+    )
+
+    # No flag means mini-swe-agent keeps its own 60s default.
+    assert "model.http_timeout" not in agent._build_config_flags()
+
+
+def test_mini_swe_http_timeout_reaches_assembled_command(tmp_path, monkeypatch):
+    """End-to-end: the 240s timeout rides the actual assembled agent command,
+    alongside the native OpenRouter model class, with the provider prefix
+    stripped from --model."""
+    monkeypatch.setenv("MSWEA_API_KEY", "test-key")
+    agent = MiniSweAgent(
+        logs_dir=tmp_path,
+        model_name="openrouter/deepseek/deepseek-v4.1-flash-1017",
+        http_timeout=240,
+    )
+
+    command = agent.sealed_command_spec(
+        "investigate the boundary", environment=None
+    ).steps[-1].command
+
+    assert "mini-swe-agent --yolo --model=deepseek/deepseek-v4.1-flash-1017 " in command
+    assert "-c model.model_class=openrouter " in command
+    assert "-c model.http_timeout=240 " in command
+
+
+def test_mini_swe_assembled_command_omits_http_timeout_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("MSWEA_API_KEY", "test-key")
+    agent = MiniSweAgent(
+        logs_dir=tmp_path,
+        model_name="openrouter/deepseek/deepseek-v4.1-flash-1017",
+    )
+
+    command = agent.sealed_command_spec(
+        "investigate the boundary", environment=None
+    ).steps[-1].command
+
+    assert "model.http_timeout" not in command

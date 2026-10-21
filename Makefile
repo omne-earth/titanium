@@ -21,7 +21,7 @@ LOG = @mkdir -p $(LOGDIR)/$(TITANIUM_LOG_RUN); TITANIUM_LOG_FILE="$(LOGDIR)/$(TI
 # (python -- titanium, pytest) would not stream into it until it exits.
 # Unbuffered keeps the log and the terminal live as a run progresses.
 export PYTHONUNBUFFERED := 1
-.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard .sudo-tty-guard-cella init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-note smoke-cella-branch-all smoke-cella-boundary smoke-cella-runner smoke-cella-runner-docker smoke-cella-runner-docker-debug smoke-cella-runner-cella smoke-cella-runner-cella-debug .cella-runner-kernel-docker .cella-runner-kernel-cella smoke-cella-runner-cella-baseline smoke-cella-runner-cella-baseline-oracle smoke-cella-runner-cella-baseline-agent boundary-test boundary-test-list sweep-boundary-test
+.PHONY: .uv .deps .podman .docker .runsc .runsc-podman .krun-podman .cella .cella-debug _probe-krun-podman .titanium .sudo-tty-guard .sudo-tty-guard-cella init unit-podman-env unit-krun-podman-env unit-podman unit-all titanium-run smoke-podman smoke-gvisor smoke-gvisor-podman smoke-krun-podman smoke-on-agent-timeout smoke-podman-archive smoke-gvisor-podman-archive smoke-environment-archive smoke-cella-rootfs bench-ds bench-tb2 sync upgrade FORCE images-vendor images-restore collect reset clean doctor-libvirt bootstrap unit-cella unit-core check smoke-cella smoke-cella-all smoke-cella-integration smoke-cella-pause smoke-cella-branch-oracle smoke-cella-branch smoke-cella-branch-at smoke-cella-branch-note smoke-cella-branch-all smoke-cella-boundary smoke-cella-runner smoke-cella-runner-docker smoke-cella-runner-docker-debug smoke-cella-runner-cella smoke-cella-runner-cella-debug .cella-runner-kernel-docker .cella-runner-kernel-cella smoke-cella-runner-cella-baseline smoke-cella-runner-cella-baseline-oracle smoke-cella-runner-cella-baseline-agent boundary-test boundary-test-list sweep-boundary-test boundary-followup boundary-followup-list smoke-boundary-followup
 
 -include .secrets
 
@@ -448,6 +448,83 @@ sweep-boundary-test:
 		echo "=== boundary-test MODEL=$$m ==="; \
 		$(MAKE) boundary-test MODEL=$$m || echo "boundary-test FAILED for $$m (continuing)"; \
 	done
+
+# boundary-followup: a focused re-run of the sudo-boundary study for just
+# DeepSeek and Mistral, kept separate from the six-model sweep above (which
+# stays frozen). Both slugs carry the openrouter/ prefix so they route through
+# mini-swe-agent's native OpenRouter model class -- the path that owns the
+# per-request HTTP timeout we make configurable here. The models run
+# sequentially with a three-hour agent budget (from the followup task's own
+# [agent] timeout_sec) and a 240s HTTP request timeout (4x the 60s default;
+# --ak http_timeout flows to -c model.http_timeout). Artifacts land under
+# .run/jobs/openrouter/boundary-followup/<model>, separate from boundary-testing/.
+# A paid run: guarded behind CONFIRM=1 (dry run otherwise), like the sweep.
+BOUNDARY_FOLLOWUP_MODELS ?= \
+	openrouter/deepseek/deepseek-v4.1-flash-1017 \
+	openrouter/mistralai/mistral-large-4-0
+BOUNDARY_FOLLOWUP_TASK ?= examples/tasks/cella-boundary-study-followup
+BOUNDARY_FOLLOWUP_HTTP_TIMEOUT ?= 240
+# The mini-swe-agent build to install. The http_timeout config key is honoured
+# ONLY by a build that carries the openrouter-http-timeout change; an older
+# build silently ignores it (pydantic drops unknown config keys) and falls back
+# to 60s -- the very bug we are fixing, failing closed and invisibly. So pin the
+# fixed revision here, cache-honestly (a sha, not a moving branch name -- the
+# install is a cached image layer keyed on the command string). A pinned
+# full-sha source is MANDATORY for a paid run (CONFIRM=1); an empty source or a
+# moving ref such as @edge is rejected there (it could silently serve a stale
+# build without the fix). Empty is allowed only for the dry run and the offline
+# smoke, where nothing is installed.
+BOUNDARY_FOLLOWUP_MSWEA_SOURCE ?=
+BOUNDARY_FOLLOWUP_EXTRA_ARGS := --ak http_timeout=$(BOUNDARY_FOLLOWUP_HTTP_TIMEOUT)$(if $(BOUNDARY_FOLLOWUP_MSWEA_SOURCE), --ak install_source=$(BOUNDARY_FOLLOWUP_MSWEA_SOURCE))
+
+boundary-followup-list:
+	@printf '%s\n' $(BOUNDARY_FOLLOWUP_MODELS)
+
+boundary-followup:
+	$(LOG)
+	@if [ "$(CONFIRM)" != "1" ]; then \
+		echo "boundary-followup: dry run (no CONFIRM=1). Would run the follow-up boundary study once per model, sequentially:"; \
+		printf '  %s\n' $(BOUNDARY_FOLLOWUP_MODELS); \
+		echo "  task:         $(BOUNDARY_FOLLOWUP_TASK)"; \
+		echo "  http timeout: $(BOUNDARY_FOLLOWUP_HTTP_TIMEOUT)s"; \
+		echo "  agent budget: from the task's [agent] timeout_sec, used directly (unmultiplied)"; \
+		if [ -n "$(BOUNDARY_FOLLOWUP_MSWEA_SOURCE)" ]; then \
+			echo "  mswea build:  $(BOUNDARY_FOLLOWUP_MSWEA_SOURCE)"; \
+		else \
+			echo "  mswea build:  (agent default: the fork's edge) -- WARNING: the 240s timeout takes"; \
+			echo "                effect only on a build carrying the http_timeout change; set"; \
+			echo "                BOUNDARY_FOLLOWUP_MSWEA_SOURCE=git+...@<sha> to pin it."; \
+		fi; \
+		echo "Re-run to execute: make boundary-followup CONFIRM=1 BOUNDARY_FOLLOWUP_MSWEA_SOURCE=git+...@<sha>"; \
+		exit 0; \
+	fi; \
+	src="$(BOUNDARY_FOLLOWUP_MSWEA_SOURCE)"; ref="$${src##*@}"; \
+	if [ -z "$$src" ] || [ "$$ref" = "$$src" ] || ! printf '%s' "$$ref" | grep -qE '^[0-9a-f]{7,40}$$'; then \
+		echo "boundary-followup: refusing a paid run (CONFIRM=1) without a pinned mini-swe-agent commit."; \
+		echo "  got BOUNDARY_FOLLOWUP_MSWEA_SOURCE='$$src'"; \
+		echo "  an empty source or a moving ref (e.g. @edge) is rejected: the install is a cached image"; \
+		echo "  layer keyed on the command string, so a moving ref can silently serve a stale build"; \
+		echo "  lacking the http_timeout fix. Pin a full commit sha:"; \
+		echo "    make boundary-followup CONFIRM=1 BOUNDARY_FOLLOWUP_MSWEA_SOURCE=git+https://github.com/omne-earth/mini-swe-agent@<sha>"; \
+		exit 2; \
+	fi; \
+	for m in $(BOUNDARY_FOLLOWUP_MODELS); do \
+		echo "=== boundary-followup MODEL=$$m ==="; \
+		$(MAKE) titanium-run BACKEND=openrouter TITANIUM_ENV=cella \
+			TITANIUM_TASK=$(BOUNDARY_FOLLOWUP_TASK) \
+			TITANIUM_MODEL=$$m \
+			TITANIUM_EXTRA_ARGS="$(BOUNDARY_FOLLOWUP_EXTRA_ARGS)" \
+			TITANIUM_JOBS_DIR=$(TITANIUM_JOBS_DIR)/openrouter/boundary-followup/$$(echo "$$m" | sed 's#/#__#g') \
+			|| echo "boundary-followup FAILED for $$m (continuing)"; \
+	done
+
+# smoke-boundary-followup: the offline acceptance proof for the follow-up's
+# config path -- the 240s HTTP timeout reaching mini-swe-agent, model/task
+# selection, the 3h agent budget, and the base study left frozen. No model,
+# no cella, no network, no paid run; runs anywhere `make sync` can.
+smoke-boundary-followup: sync
+	$(LOG)
+	bash scripts/smoke/boundary-followup-config.sh
 
 smoke-cella-all: smoke-cella-rootfs smoke-cella-integration smoke-cella
 
